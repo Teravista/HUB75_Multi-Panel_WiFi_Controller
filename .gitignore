@@ -1,0 +1,54 @@
+# CMake and Pico SDK build output
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.ninja
+*.ninja_deps
+*.ninja_log
+
+# Compiled firmware and debug artifacts
+*.bin
+*.dis
+*.elf
+*.hex
+*.map
+*.uf2
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python caches and tooling output
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local credentials and environment files
+wifiCredentials.h
+.env
+.env.*
+!.env.example
+
+# Private local media
+imagesVideos/private/
+
+# IDE-specific local state
+.vscode/
+.idea/
+*.code-workspace
+.github/
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,7 @@
+#pragma once
+
+// PICO_IP is host-side only; sendImageOverTCP.py reads it directly from .env.
+#define WIFI_SSID "@WIFI_SSID_ESCAPED@"
+#define WIFI_PASSWORD "@WIFI_PASSWORD_ESCAPED@"
+#define IMAGE_UPLOAD_PORT @IMAGE_UPLOAD_PORT@
+#define WIFI_GATEWAY_PROBE_PORT @WIFI_GATEWAY_PROBE_PORT@

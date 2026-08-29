@@ -1,0 +1,145 @@
+#include "pico.h"
+
+#ifndef USE_PICO_GRAPHICS
+#define USE_PICO_GRAPHICS true
+#endif
+
+#if USE_PICO_GRAPHICS == true
+#include "../libraries/pico_graphics/pico_graphics.hpp"
+#endif
+
+// See README.md file chapter "How to Configure" for some hints how to adapt the configuration to your panel
+
+// Set MATRIX_PANEL_WIDTH and MATRIX_PANEL_HEIGHT to the width and height of your matrix panel!
+#ifndef MATRIX_PANEL_WIDTH
+#define MATRIX_PANEL_WIDTH 64
+#endif
+#ifndef MATRIX_PANEL_HEIGHT
+#define MATRIX_PANEL_HEIGHT 64
+#endif
+
+// Wiring of the HUB75 matrix
+#ifndef DATA_BASE_PIN // start gpio pin of consecutive color pins e.g., r1, g1, b1, r2, g2, b2
+#define DATA_BASE_PIN 0
+#endif
+#ifndef DATA_N_PINS
+#define DATA_N_PINS 6 // count of consecutive color pins usually 6
+#endif
+#ifndef ROWSEL_BASE_PIN
+#define ROWSEL_BASE_PIN 6 // start gpio pin of address pins
+#endif
+#ifndef ROWSEL_N_PINS
+#define ROWSEL_N_PINS 5 // count of consecutive address pins - adapt to the number of address pins of your panel
+#endif
+#ifndef CLK_PIN
+#define CLK_PIN 11
+#endif
+#ifndef STROBE_PIN
+#define STROBE_PIN 12
+#endif
+#ifndef OEN_PIN
+#define OEN_PIN 13
+#endif
+
+// Scan rate 1 : 32 for a 64x64 matrix panel means 64 pixel height divided by 32 pixel results in 2 rows lit simultaneously.
+// Scan rate 1 : 16 for a 64x64 matrix panel means 64 pixel height divided by 16 pixel results in 4 rows lit simultaneously.
+// Scan rate 1 : 16 for a 64x32 matrix panel means 32 pixel height divided by 16 pixel results in 2 rows lit simultaneously.
+// Scan rate 1 : 8 for a 64x32 matrix panel means 32 pixel height divided by 8 pixel results in 4 rows lit simultaneously.
+// Scan rate 1 : 4 for a 32x16 matrix panel means 16 pixel height divided by 4 pixel results in 4 rows lit simultaneously.
+// ...
+
+// Set your panel
+//
+// Example:
+// The P3-64*64-32S-V2.0 is a standard Hub75 panel with two rows multiplexed, so define HUB75_MULTIPLEX_2_ROWS should be correct
+//
+// #define HUB75_MULTIPLEX_2_ROWS      // default - two rows lit simultaneously
+// #define HUB75_P10_3535_16X32_4S     // four rows lit simultaneously (can be defined via CMake)
+// #define HUB75_P3_1415_16S_64X64_S31 // four rows lit simultaneously
+//
+// Default to HUB75_MULTIPLEX_2_ROWS if no multiplexing mode is defined
+// Only define default if none of the mapping modes are already defined
+#if !defined(HUB75_MULTIPLEX_2_ROWS) && !defined(HUB75_P10_3535_16X32_4S) && !defined(HUB75_P3_1415_16S_64X64_S31)
+#define HUB75_MULTIPLEX_2_ROWS // two rows lit simultaneously
+#endif
+
+// If panel type FM6126A or panel type RUL6024 is selected, an initialisation sequence is sent to the panel
+#define PANEL_GENERIC 0
+#define PANEL_FM6126A 1
+#define PANEL_RUL6024 2
+
+// set your panel type
+// e.g. P3-64*64-32S-V2.0 might have a RUL6024 chip, if so, set PANEL_TYPE to PANEL_RUL6024
+#ifndef PANEL_TYPE
+#define PANEL_TYPE PANEL_GENERIC
+#endif
+
+#ifndef INVERTED_STB
+#define INVERTED_STB false
+#endif
+
+// TEMPORAL_DITHERING is experimental - development still in progress
+#ifndef TEMPORAL_DITHERING
+#define TEMPORAL_DITHERING false
+#endif
+
+#ifndef SM_CLOCKDIV_FACTOR
+// To prevent flicker or ghosting it might be worth a try to reduce state machine speed.
+// For panels with height less or equal to 16 rows try a factor of 8.0f
+// For panels with height less or equal to 32 rows try a factor of 2.0f or 4.0f
+// Even for panels with height less or equal to 62 rows a factor of about 2.0f might solve such an issue
+#define SM_CLOCKDIV_FACTOR 1.0f
+#endif
+
+// Used in hub75_demo.cpp
+// Start hub75 driver on core1 if HUB75_MULTICORE is set to true
+// Start hub75 driver on core0 if HUB75_MULTICORE is set to false
+// The hub75 driver has not much CPU load. Most of it task are handled by DMA and PIO.
+// Only the interupt handler oen_finished_handler is CPU bound.
+#ifndef HUB75_MULTICORE
+#define HUB75_MULTICORE true
+#endif
+
+// --- modifications below this line might imply changes in source code ---
+
+#if TEMPORAL_DITHERING == true
+#define LUT_MAPPING(IDX, COLOUR) temporal_dithering(IDX, COLOUR)
+#define LUT_MAPPING_RGB(IDX, R, G, B) temporal_dithering(IDX, R, G, B)
+#else
+#define LUT_MAPPING(IDX, COLOUR) pack_lut_rgb(COLOUR, lut)
+#define LUT_MAPPING_RGB(IDX, R, G, B) pack_lut_rgb_(R, G, B, lut)
+#endif
+
+// At the moment only used for HUB75_P10_3535_16X32_4S panels
+#define SCAN_GROUPS (1 << ROWSEL_N_PINS)
+
+#if !defined(BIT_DEPTH)
+#define BIT_DEPTH 10 // default
+#endif
+
+#if BIT_DEPTH != 8 && BIT_DEPTH != 10
+#error "BIT_DEPTH must be 8 or 10"
+#endif
+
+// Accumulator precision has to fit the lut precision.
+#ifndef ACC_BITS
+#define ACC_BITS (BIT_DEPTH + 2)
+#endif
+
+#define EXIT_FAILURE 1
+
+#if USE_PICO_GRAPHICS == true
+using namespace pimoroni;
+#endif
+
+void create_hub75_driver(uint w, uint h, uint pt, bool stb_inverted);
+void start_hub75_driver();
+extern volatile uint32_t hub75_frame_count;
+void update_bgr(const uint8_t *src);
+#if USE_PICO_GRAPHICS == true
+void update(PicoGraphics const *graphics);
+#endif
+
+void setBasisBrightness(uint8_t factor);
+void setIntensity(float intensity);
+void setIntensity(float intensity, bool linear_brightness_control);
