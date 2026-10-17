@@ -33,6 +33,9 @@ __pycache__/
 .coverage
 htmlcov/
 
+# test folder
+/tests/
+
 # Local credentials and environment files
 wifiCredentials.h
 .env

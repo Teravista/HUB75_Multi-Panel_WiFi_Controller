@@ -3,6 +3,22 @@
 This project includes software from the following projects. Their licenses and
 copyright notices apply to the relevant portions of this repository.
 
+## SD-card filesystem and driver
+
+`third_party/fatfs_sd` contains carlk3's
+no-OS-FatFS-SD-SDIO-SPI-RPi-Pico v3.7.0:
+https://github.com/carlk3/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
+
+The Apache-2.0 license is retained in `third_party/fatfs_sd/LICENSE`;
+component copyright and license notices remain in the source tree.
+
+## TJpgDec
+
+`third_party/tjpgd` contains ChaN TJpgDec R0.03 (2021):
+https://elm-chan.org/fsw/tjpgd/
+
+Copyright and redistribution notices are retained in `tjpgd.c` and `tjpgd.h`.
+
 ## JuPFu hub75
 
 The HUB75 driver core is derived from JuPFu hub75:
@@ -32,8 +48,8 @@ SOFTWARE.
 
 ## Pimoroni Pico
 
-The code under `HUB75DriverSrc/common/` and parts of
-`HUB75DriverSrc/libraries/` are derived from or vendored from Pimoroni Pico:
+The code under `third_party/hub75/common/` and parts of
+`third_party/hub75/libraries/` are derived from or vendored from Pimoroni Pico:
 https://github.com/pimoroni/pimoroni-pico
 
 MIT License
@@ -60,7 +76,7 @@ SOFTWARE.
 
 ## Raspberry Pi
 
-`HUB75DriverSrc/src/hub75.pio` includes software from Raspberry Pi Ltd.
+`third_party/hub75/src/hub75.pio` includes software from Raspberry Pi Ltd.
 
 BSD 3-Clause License
 

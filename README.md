@@ -78,7 +78,7 @@ All three are configurable via defines at the top of the script or command-line 
     <td width="50%">
       <strong>NOTE: This photo shows the wiring and construction used in my working setup and is provided for reference only. You may need to adapt it to your own panels and hardware.</strong>
       <br><br>
-      Pin mapping / wiring config lives in <a href="HUB75DriverSrc/src/hub75.hpp">HUB75DriverSrc/src/hub75.hpp</a>. Pins can be changed by editing the defines there, but must follow the rules noted in the comments above each define (e.g. color/row-select pins must be consecutive).
+      Pin mapping / wiring config lives in <a href="third_party/hub75/src/hub75.hpp">third_party/hub75/src/hub75.hpp</a>. Pins can be changed by editing the defines there, but must follow the rules noted in the comments above each define (e.g. color/row-select pins must be consecutive).
     </td>
   </tr>
 </table>
