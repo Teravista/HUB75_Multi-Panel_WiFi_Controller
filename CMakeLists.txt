@@ -101,20 +101,20 @@ target_compile_definitions(hub75 PRIVATE
 )
 
 # Generate PIO header
-pico_generate_pio_header(hub75 ${CMAKE_CURRENT_LIST_DIR}/HUB75DriverSrc/src/hub75.pio)
+pico_generate_pio_header(hub75 ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.pio)
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(hub75 0)
 pico_enable_stdio_usb(hub75 1)
 
-add_subdirectory(HUB75DriverSrc/common)
-add_subdirectory(HUB75DriverSrc/libraries)
+add_subdirectory(third_party/hub75/common)
+add_subdirectory(third_party/hub75/libraries)
 
 target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
-        ${CMAKE_CURRENT_LIST_DIR}/HUB75DriverSrc/src/hub75.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/HUB75DriverSrc/src/rul6024.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/HUB75DriverSrc/src/fm6126a.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
         ${CMAKE_CURRENT_LIST_DIR}/mainEntry.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/displayHelpers.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/networkUpload.cpp
@@ -140,7 +140,7 @@ endif()
 # Add the standard include files to the build
 target_include_directories(hub75 PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
-        ${CMAKE_CURRENT_LIST_DIR}/HUB75DriverSrc/src
+        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src
         ${CMAKE_CURRENT_LIST_DIR}/src
         ${CMAKE_CURRENT_LIST_DIR}/src/defines
         ${CMAKE_CURRENT_LIST_DIR}
