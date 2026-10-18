@@ -96,6 +96,7 @@ target_compile_definitions(hub75 PRIVATE
     # TEMPORAL_DITHERING=false    # experimental - switch on temporal dithering to improve colour depth (currently 2 additional bits)
     # SM_CLOCKDIV_FACTOR=1.0f     # to prevent flicker or ghosting it might be worth a try to reduce state machine speed
     # BIT_DEPTH=10                # numner (count) of bit-planes used for BCM (Binary Code Modulation) - valid values for BIT_DEPTH are 8 or 10
+    CPU_FRAME_RGB565=1
     HUB75_MULTICORE=false      # force single-core path (core0) to avoid multicore startup races
     CYW43_PIO_CLOCK_DIV_INT=4  # compensate cyw43 wireless SPI PIO clock divider for the 250MHz overclocked sys clock (default div=2 assumes ~125MHz sys clock; div=4 keeps the wireless SPI PIO near the same safe ~62.5MHz)
 )
@@ -113,9 +114,11 @@ add_subdirectory(third_party/hub75/libraries)
 target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rgb565.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
         ${CMAKE_CURRENT_LIST_DIR}/mainEntry.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/display/cpuFrame.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/display/displayHelpers.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/networkUpload.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/wifiNetwork.cpp

@@ -3,17 +3,14 @@
 #include "hardware/clocks.h"
 #include "hub75.hpp"
 #include "config/defines.h"
-#include "display/displayHelpers.hpp"
+#include "display/include/displayHelpers.hpp"
 #include "network/networkUpload.hpp"
 #include "network/wifiNetwork.hpp"
 
 #define WIFI_STATE_MACHINE_REV "wifi-sm-r5"
 
-/*
-    Main loop that advances the animation, wifi state machine and renders the new uploaded frame over TCP
-    and sends it to the driver to display
-*/
-static void RenderLoop(DisplayHelpers &displayHelpers, NetworkUpload &networkUpload, WifiNetwork &wifiNetwork, pimoroni::PicoGraphics_PenRGB888 &graphics)
+// Prepares and submits display frames while advancing controller services.
+static void RenderLoop(DisplayHelpers &displayHelpers, NetworkUpload &networkUpload, WifiNetwork &wifiNetwork, CpuGraphics &graphics)
 {
     size_t frameIndex = FIRST_FRAME_INDEX;
     bool animationMovingForward = true;
@@ -63,35 +60,30 @@ static void RenderLoop(DisplayHelpers &displayHelpers, NetworkUpload &networkUpl
         uptimeMs = to_ms_since_boot(get_absolute_time());
         if (uptimeMs - lastStatusMs >= STATUS_PRINT_INTERVAL_10S)
         {
-            printf("[status] t=%us fps=%u net=%s ip=%s\n",
-                    uptimeMs / 1000u,
-                    framesPerSecond,
-                    wifiNetwork.GetNetStateName(),
-                    wifiNetwork.GetWifiIpText());
+            printf("[status] t=%us fps=%u net=%s ip=%s\n", uptimeMs / MILLISECONDS_PER_SECOND_U,
+                   framesPerSecond, wifiNetwork.GetNetStateName(), wifiNetwork.GetWifiIpText());
             lastStatusMs = uptimeMs;
         }
         
-        //send frame data to the driver to display on the HUB75 panel
-        update(&graphics);
+        // Reuse the driver writer only after its previous swap was consumed.
+        if (hub75_ready_for_update()) update(&graphics);
 
         sleep_ms(ANIMATION_FRAME_DELAY_MS);
     }
 }
 
-/* 
-    some initial setup and initialization functions 
-*/
+// Initializes the controller and starts the display and network loops.
 int main()
 {
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
     stdio_init_all();
     sleep_ms(STARTUP_DELAY_5S);
 
-    alignas(4) static unsigned char frameBuffer[FRAME_BUFFER_SIZE_BYTES];
+    alignas(DMA_BUFFER_ALIGNMENT) static unsigned char frameBuffer[FRAME_BUFFER_SIZE_BYTES];
     DisplayHelpers displayHelpers;
     NetworkUpload networkUpload(&displayHelpers, frameBuffer);
     WifiNetwork wifiNetwork(&networkUpload);
-    pimoroni::PicoGraphics_PenRGB888 graphics(
+    CpuGraphics graphics(
         MATRIX_PANEL_WIDTH,
         MATRIX_PANEL_HEIGHT,
         frameBuffer);
@@ -108,6 +100,12 @@ int main()
     setIntensity(DISPLAY_INTENSITY);
 
     printf("[boot] hub75 driver up\n");
+
+    // Queue visible content before the first blocking Wi-Fi connection.
+    displayHelpers.RenderLogicalImageToGraphics(
+        graphics, displayHelpers.GetImageDataForFrame(FIRST_FRAME_INDEX));
+    displayHelpers.DrawWifiStatusIcon(graphics, false);
+    update(&graphics);
 
     RenderLoop(displayHelpers, networkUpload, wifiNetwork, graphics);
 }
