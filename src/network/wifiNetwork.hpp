@@ -4,7 +4,7 @@
 #include "pico/types.h"
 #include "lwip/tcp.h"
 
-#include "networkUpload.hpp"
+#include "network/networkUpload.hpp"
 
 class WifiNetwork {
 public:

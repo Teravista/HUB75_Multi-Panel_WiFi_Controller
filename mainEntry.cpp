@@ -2,10 +2,10 @@
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hub75.hpp"
-#include "defines/defines.h"
-#include "displayHelpers.hpp"
-#include "networkUpload.hpp"
-#include "wifiNetwork.hpp"
+#include "config/defines.h"
+#include "display/displayHelpers.hpp"
+#include "network/networkUpload.hpp"
+#include "network/wifiNetwork.hpp"
 
 #define WIFI_STATE_MACHINE_REV "wifi-sm-r5"
 

@@ -1,4 +1,4 @@
-#include "networkUpload.hpp"
+#include "network/networkUpload.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -7,8 +7,8 @@
 #include "pico/cyw43_arch.h"
 #include "lwip/tcp.h"
 
-#include "defines/defines.h"
-#include "displayHelpers.hpp"
+#include "config/defines.h"
+#include "display/displayHelpers.hpp"
 
 NetworkUpload::NetworkUpload(DisplayHelpers *displayHelpers, unsigned char *frameBuffer)
     : m_displayHelpers(displayHelpers),

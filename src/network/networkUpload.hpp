@@ -5,8 +5,8 @@
 #include <cstddef>
 
 #include "lwip/tcp.h"
-#include "defines/defines.h"
-#include "displayHelpers.hpp"
+#include "config/defines.h"
+#include "display/displayHelpers.hpp"
 
 class NetworkUpload {
 public:

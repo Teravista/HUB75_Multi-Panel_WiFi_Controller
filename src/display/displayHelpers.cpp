@@ -1,4 +1,4 @@
-#include "displayHelpers.hpp"
+#include "display/displayHelpers.hpp"
 
 /*
     Returns the image data for the requested frame. Animation builds select a

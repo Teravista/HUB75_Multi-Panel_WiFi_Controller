@@ -1,4 +1,4 @@
-#include "wifiNetwork.hpp"
+#include "network/wifiNetwork.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -9,8 +9,8 @@
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
 
-#include "defines/defines.h"
-#include "networkUpload.hpp"
+#include "config/defines.h"
+#include "network/networkUpload.hpp"
 #include "networkConfig.h"
 
 WifiNetwork::WifiNetwork(NetworkUpload *networkUpload)

@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-#include "defines/defines.h"
+#include "config/defines.h"
 #include "hub75.hpp"
 
 class DisplayHelpers {
