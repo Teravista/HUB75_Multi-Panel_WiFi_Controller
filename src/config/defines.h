@@ -8,12 +8,12 @@
 
 
 #if USE_ANIMATION
-#include "imagesVideos/forst_walkTrim_128x256_anim.h"
+#include "../../imagesVideos/forst_walkTrim_128x256_anim.h"
 #define FLASHED_IMAGE_DATA GENERATED_ANIMATION_DATA
 #define ANIMATION_FRAME_DELAY_MS GENERATED_ANIMATION_FRAME_DELAY_MS
 #define ANIMATION_FRAME_COUNT GENERATED_ANIMATION_FRAME_COUNT
 #else
-#include "imagesVideos/apple_128x256ByteArray.h"
+#include "../../imagesVideos/apple_128x256ByteArray.h"
 #define FLASHED_IMAGE_DATA GENERATED_IMAGE_DATA
 #define ANIMATION_FRAME_DELAY_MS 0
 #endif
@@ -29,7 +29,9 @@
 #define FIRST_FLIPPED_PANEL_INDEX 2
 #define IMAGE_BYTES_PER_PIXEL 3
 #define LOGICAL_PIXEL_COUNT (LOGICAL_IMAGE_WIDTH * LOGICAL_IMAGE_HEIGHT)
-#define FRAME_BUFFER_SIZE_BYTES (LOGICAL_PIXEL_COUNT * sizeof(uint32_t))
+#include "display/include/cpuFrame.hpp"
+// CPU colour precision is selected at build time, independently of wire formats.
+#define FRAME_BUFFER_SIZE_BYTES (LOGICAL_PIXEL_COUNT * CpuFrame::PixelBytes)
 #define SOURCE_FRAME_SIZE_BYTES (LOGICAL_PIXEL_COUNT * IMAGE_BYTES_PER_PIXEL)
 #define IMAGE_GREEN_BYTE_OFFSET 0
 #define IMAGE_BLUE_BYTE_OFFSET 1
@@ -68,3 +70,26 @@
 
 // Visual panels in row/column order mapped to their daisy-chain panel indices.
 static const int PANEL_INDEX_BY_LOGICAL_PANEL[LOGICAL_PANEL_COUNT_Y][LOGICAL_PANEL_COUNT_X] = {{2, 1}, {3, 0}};
+
+#define BITS_PER_BYTE 8
+
+#define DMA_BUFFER_ALIGNMENT 4
+
+#define MILLISECONDS_PER_SECOND_U 1000u
+
+#define RGB565_BLUE_MASK 31
+#define RGB565_GREEN_EXPAND_SHIFT 2
+#define RGB565_GREEN_MASK 63
+#define RGB565_GREEN_PACK_SHIFT 3
+#define RGB565_GREEN_REPLICATE_SHIFT 4
+#define RGB565_GREEN_SHIFT 5
+#define RGB565_GREEN_SOURCE_MASK 252
+#define RGB565_RED_BLUE_EXPAND_SHIFT 3
+#define RGB565_RED_BLUE_REDUCE_SHIFT 3
+#define RGB565_RED_BLUE_REPLICATE_SHIFT 2
+#define RGB565_RED_BLUE_SOURCE_MASK 248
+#define RGB565_RED_PACK_SHIFT 8
+#define RGB565_RED_SHIFT 11
+
+#define RGB888_GREEN_SHIFT 8
+#define RGB888_RED_SHIFT 16

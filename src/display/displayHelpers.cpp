@@ -1,10 +1,8 @@
-#include "display/displayHelpers.hpp"
+#include "display/include/displayHelpers.hpp"
 
-/*
-    Returns the image data for the requested frame. Animation builds select a
-    frame from the animation array; non-animation builds always use the single
-    static image. This keeps conditional compilation out of the render loop.
-*/
+#define RGB_CHANNEL_MAX 255
+
+// Returns the built-in image data for the requested animation frame.
 const unsigned char *DisplayHelpers::GetImageDataForFrame(size_t frameIndex)
 {
 #if USE_ANIMATION
@@ -14,14 +12,7 @@ const unsigned char *DisplayHelpers::GetImageDataForFrame(size_t frameIndex)
 #endif
 }
 
-/*
-    Converts one coordinate from the logical 128x256 image into the physical
-    512x64 framebuffer used by the HUB75 driver. The logical image is divided
-    into four 64x128 panels. This function finds the logical panel, gets the
-    coordinate inside that panel, applies the required orientation correction,
-    rotates it into the driver's 128x64 panel layout, and places it according
-    to the panel's daisy-chain index.
-*/
+// Maps a logical image coordinate to its physical panel position.
 void DisplayHelpers::ConvertLogicalToPhysicalCoordinates(
     int logicalX,
     int logicalY,
@@ -53,14 +44,9 @@ void DisplayHelpers::ConvertLogicalToPhysicalCoordinates(
     physicalY = localPanelX;
 }
 
-/*
-  Renders one logical image into the physical graphics framebuffer. Each
-  source pixel is read from the image data, converted from the stored color
-  byte order to RGB, mapped to its physical panel coordinate, and written to
-  the graphics buffer for the HUB75 driver.
-*/
+// Maps a logical image into the graphics buffer for the panel chain.
 void DisplayHelpers::RenderLogicalImageToGraphics(
-    pimoroni::PicoGraphics_PenRGB888 &graphics,
+    CpuGraphics &graphics,
     const unsigned char *imageData)
 {
     int physicalX;
@@ -94,14 +80,9 @@ void DisplayHelpers::RenderLogicalImageToGraphics(
     }
 }
 
-/*
-  Draws a small WiFi status icon (three signal bars) over the top-right
-  corner of the logical image, on a black backing square so it stays
-  readable over any image content. White bars mean connected, red means not
-  connected.
-*/
+// Draws the Wi-Fi connection indicator over the logical image.
 void DisplayHelpers::DrawWifiStatusIcon(
-    pimoroni::PicoGraphics_PenRGB888 &graphics,
+    CpuGraphics &graphics,
     bool isConnected)
 {
     int physicalX;
@@ -129,10 +110,11 @@ void DisplayHelpers::DrawWifiStatusIcon(
     }
 
     if (isConnected) {
-        graphics.set_pen(255, 255, 255); // white bars for connected
+        graphics.set_pen(RGB_CHANNEL_MAX, RGB_CHANNEL_MAX, RGB_CHANNEL_MAX); // white bars for connected
     }
     else {
-        graphics.set_pen(0, 255, 0); // red bars for not connected (counting in my bit shiftied coloring)
+        graphics.set_pen(0, RGB_CHANNEL_MAX,
+                         0); // red bars for not connected (counting in my bit shiftied coloring)
     }
     for (bar = 0; bar < WIFI_ICON_BAR_COUNT; bar++) {
         barHeight = (bar + 1) * WIFI_ICON_BAR_HEIGHT_STEP;
@@ -148,12 +130,7 @@ void DisplayHelpers::DrawWifiStatusIcon(
     }
 }
 
-/*
-  Returns the next animation frame while moving between the first and last
-  frame. The movingForward flag is updated whenever an endpoint is reached,
-  creating a sequence such as 0, 1, 2, 1, 0, 1. For a single-frame image,
-  the first frame is always returned.
-*/
+// Advances one frame and reverses direction at each animation endpoint.
 size_t DisplayHelpers::GetNextPingPongFrameIndex(
     size_t currentFrameIndex,
     bool &movingForward,
@@ -180,10 +157,7 @@ size_t DisplayHelpers::GetNextPingPongFrameIndex(
     return currentFrameIndex - FRAME_INDEX_STEP;
 }
 
-/*
- Gets the next frame for the configured animation.
- If this is not an animation build, it always returns the first frame.
-*/
+// Selects the next frame according to the built-in animation mode.
 size_t DisplayHelpers::GetNextAnimationFrameIndex(
     size_t currentFrameIndex,
     bool &animationMovingForward)

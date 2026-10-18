@@ -8,18 +8,16 @@
 #include "lwip/tcp.h"
 
 #include "config/defines.h"
-#include "display/displayHelpers.hpp"
+#include "display/include/displayHelpers.hpp"
 
+// Connects frame reception to the CPU framebuffer and display helpers.
 NetworkUpload::NetworkUpload(DisplayHelpers *displayHelpers, unsigned char *frameBuffer)
     : m_displayHelpers(displayHelpers),
       m_frameBuffer(frameBuffer)
 {
 }
 
-/*
-Convert RGB logical pixel over TCP to physical framebuffer pixel,
-applying the logical-to-physical panel mapping and the wiring color byte order correction.
-*/
+// Converts one received RGB888 pixel into the CPU framebuffer format.
 void NetworkUpload::DecodeAndStorePixel(const unsigned char *pixelBytes, size_t pixelIndex)
 {
     const int logicalX = static_cast<int>(pixelIndex % LOGICAL_IMAGE_WIDTH);
@@ -32,18 +30,14 @@ void NetworkUpload::DecodeAndStorePixel(const unsigned char *pixelBytes, size_t 
     }
 
     // Calculate the destination index in the framebuffer for this pixel.
-    const size_t destIndex = (physicalY * MATRIX_PANEL_WIDTH + physicalX) * sizeof(uint32_t);
+    const size_t destIndex = (physicalY * MATRIX_PANEL_WIDTH + physicalX) * CpuFrame::PixelBytes;
 
     //Adjust for the physical wirieng issue.
-    m_frameBuffer[destIndex + 0] = pixelBytes[IMAGE_BLUE_BYTE_OFFSET];
-    m_frameBuffer[destIndex + 1] = pixelBytes[IMAGE_GREEN_BYTE_OFFSET];
-    m_frameBuffer[destIndex + 2] = pixelBytes[IMAGE_RED_BYTE_OFFSET];
-    m_frameBuffer[destIndex + 3] = 0;
+    CpuFrame::Store(m_frameBuffer + destIndex, pixelBytes[IMAGE_RED_BYTE_OFFSET],
+                    pixelBytes[IMAGE_GREEN_BYTE_OFFSET], pixelBytes[IMAGE_BLUE_BYTE_OFFSET]);
 }
 
-/*
-    TCP receive callback for the frame upload server.
-*/
+// Accepts TCP photo bytes and completes or rejects the uploaded frame.
 err_t NetworkUpload::OnTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 {
     auto *self = static_cast<NetworkUpload *>(arg);
@@ -83,8 +77,11 @@ err_t NetworkUpload::OnTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, e
         // Copy only the smaller amount: bytes needed to complete this pixel,
         // or bytes still available in the current received pbuf.
         // This ensures we don't read past the end of the pbuf or overrun the carry buffer.
-        bytesToCopy = (bytesNeededForCarry < pbufRemaining) ?
-                      bytesNeededForCarry : pbufRemaining;
+        if ((bytesNeededForCarry < pbufRemaining)) {
+            bytesToCopy = bytesNeededForCarry;
+        } else {
+            bytesToCopy = pbufRemaining;
+        }
 
         // Copy this chunk from the pbuf into the unused portion of the carry buffer.
         pbuf_copy_partial(p, self->m_pixelCarry + self->m_pixelCarryLen, bytesToCopy, pbufOffset);
@@ -142,9 +139,7 @@ err_t NetworkUpload::OnTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, e
     return ERR_OK;
 }
 
-/*
-    Callback for TCP client error during frame upload.
-*/
+// Releases photo upload state after a TCP connection error.
 void NetworkUpload::OnTcpErr(void *arg, err_t err)
 {
     auto *self = static_cast<NetworkUpload *>(arg);
@@ -157,9 +152,7 @@ void NetworkUpload::OnTcpErr(void *arg, err_t err)
     }
 }
 
-/*
-    Accepts a new TCP connection for frame upload.
-*/
+// Accepts a TCP photo client and initializes its receive state.
 err_t NetworkUpload::OnTcpAccept(void *arg, struct tcp_pcb *client, err_t err)
 {
     auto *self = static_cast<NetworkUpload *>(arg);
@@ -193,12 +186,7 @@ err_t NetworkUpload::OnTcpAccept(void *arg, struct tcp_pcb *client, err_t err)
     return ERR_OK;
 }
 
-/*
-    Resets only in-flight receive state, used when (re)starting the TCP
-    listener. Unlike InitFrameUploadState, this must NOT clear m_activeFrame
-    or the lifetime counters, otherwise a WiFi reconnect wipes the last
-    successfully uploaded frame back to the default flashed image.
-*/
+// Resets incomplete photo reception without clearing the last completed frame.
 void NetworkUpload::ResetPixelReceiveState()
 {
     m_uploadInProgress.store(false, std::memory_order_relaxed);
@@ -206,9 +194,7 @@ void NetworkUpload::ResetPixelReceiveState()
     m_pixelCarryLen = 0;
 }
 
-/*
-    Initializes TCP frame receiver state.
-*/
+// Initializes photo reception and clears the published framebuffer pointer.
 void NetworkUpload::InitFrameUploadState()
 {
     m_activeFrame.store(nullptr, std::memory_order_relaxed);
@@ -219,9 +205,7 @@ void NetworkUpload::InitFrameUploadState()
     m_listenerPort = 0;
 }
 
-/*
-    For clean shutdown and state change we need to close the listener and reset all state so we can start again later so no network issue occur later on
-*/
+// Stops the raw TCP photo upload listener and resets receive state.
 void NetworkUpload::StopFrameUploadServer()
 {
     if (m_listenerPcb != nullptr)
@@ -238,19 +222,13 @@ void NetworkUpload::StopFrameUploadServer()
     ResetPixelReceiveState();
 }
 
-/*
-  Reports whether a TCP upload is currently writing pixels into the shared
-  framebuffer. The render loop uses this to avoid reading a partially written
-  frame.
-*/
+// Reports whether a photo upload is currently receiving bytes.
 bool NetworkUpload::IsFrameUploadInProgress()
 {
     return m_uploadInProgress.load(std::memory_order_acquire);
 }
 
-/*
-    Starts the TCP frame upload listener on the specified port.
-*/
+// Starts the raw TCP photo upload listener.
 bool NetworkUpload::StartFrameUploadServer(
     uint16_t port)
 {
@@ -305,9 +283,7 @@ bool NetworkUpload::StartFrameUploadServer(
     return true;
 }
 
-/*
-    Reports whether the local TCP listener still exists and is LISTEN state
-*/
+// Reports whether the raw TCP photo listener is active.
 bool NetworkUpload::IsFrameUploadServerListening()
 {
     bool listenerReady = false;
@@ -321,9 +297,7 @@ bool NetworkUpload::IsFrameUploadServerListening()
     return listenerReady;
 }
 
-/*
-    stores a pointer to the latest fully uploaded frame,
-*/
+// Returns the completed logical frame when one is available.
 const unsigned char *NetworkUpload::GetUploadedFrameData()
 {
     return m_activeFrame.load(std::memory_order_acquire);

@@ -1,5 +1,8 @@
 #include <cstdlib>
+#include <cstddef>
 #include <vector>
+#include "rgb565.hpp"
+
 #include <memory>
 
 #include "pico/stdlib.h"
@@ -11,6 +14,9 @@
 #include "pico/sync.h"
 
 #include "hub75.hpp"
+#if CPU_FRAME_RGB565 && !defined(HUB75_MULTIPLEX_2_ROWS)
+#error "The compact CPU frame currently requires HUB75_MULTIPLEX_2_ROWS"
+#endif
 #include "hub75.pio.h"
 
 #include "rul6024.h"
@@ -21,7 +27,7 @@
 
 #if BIT_DEPTH == 10
 #if TEMPORAL_DITHERING != false
-static const uint16_t lut[256] = {
+static constexpr uint16_t lut[256] = {
     0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 18, 20, 21, 23, 25, 27,
     28, 30, 32, 34, 36, 37, 39, 41, 43, 45, 47, 49, 52, 54, 56, 59,
     61, 64, 66, 69, 72, 75, 77, 80, 83, 87, 90, 93, 96, 100, 103, 107,
@@ -39,7 +45,7 @@ static const uint16_t lut[256] = {
     2938, 2971, 3005, 3039, 3073, 3107, 3142, 3177, 3212, 3248, 3283, 3319, 3356, 3392, 3429, 3466,
     3503, 3541, 3578, 3617, 3655, 3694, 3732, 3772, 3811, 3851, 3891, 3931, 3972, 4012, 4054, 4095};
 #else
-static const uint16_t lut[256] = {
+static constexpr uint16_t lut[256] = {
     0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7,
     7, 8, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 15,
     15, 16, 17, 17, 18, 19, 19, 20, 21, 22, 22, 23, 24, 25, 26, 27,
@@ -59,7 +65,7 @@ static const uint16_t lut[256] = {
 #endif
 #elif BIT_DEPTH == 8
 #if TEMPORAL_DITHERING != false
-static const uint16_t lut[256] = {
+static constexpr uint16_t lut[256] = {
     0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7,
     7, 8, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 15,
     15, 16, 17, 17, 18, 19, 19, 20, 21, 22, 22, 23, 24, 25, 26, 27,
@@ -77,7 +83,7 @@ static const uint16_t lut[256] = {
     734, 742, 751, 759, 768, 776, 785, 794, 802, 811, 820, 829, 838, 847, 857, 866,
     875, 885, 894, 903, 913, 923, 932, 942, 952, 962, 972, 982, 992, 1002, 1013, 1023};
 #else
-static const uint16_t lut[256] = {
+static constexpr uint16_t lut[256] = {
     0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2,
     2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4,
     4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 7,
@@ -148,19 +154,25 @@ static uint32_t bit_plane = 0;
 // Three-word record sent to the hub75_row PIO state machine for each row/bit-plane.
 // The PIO consumes all three words in order via DMA.
 //
-// Memory layout (must remain packed, no padding):
+// Memory layout (three consecutive words, with four-byte DMA alignment):
 //   offset 0: row_address  — 5-bit row select
 //   offset 4: lit_cycles   — OEn asserted   (panel ON)  duration, BCM weighted
 //   offset 8: dark_cycles  — OEn deasserted (panel OFF) duration
 //
 // Invariant: lit_cycles + dark_cycles = basis_factor << bit_plane (constant),
 // which guarantees a brightness-independent frame rate.
-struct OenRecord
+struct alignas(uint32_t) OenRecord
 {
     uint32_t row_address; ///< 5-bit row select; selects which pair of rows to drive
     uint32_t lit_cycles;  ///< OEn ON  duration for this bit plane, scaled by brightness
     uint32_t dark_cycles; ///< OEn OFF duration = full BCM period - lit_cycles
-} __attribute__((packed));
+};
+
+static_assert(sizeof(OenRecord) == 3 * sizeof(uint32_t), "PIO row record must contain exactly three words");
+static_assert(alignof(OenRecord) >= alignof(uint32_t), "32-bit DMA requires word-aligned row data");
+static_assert(offsetof(OenRecord, row_address) == 0 &&
+              offsetof(OenRecord, lit_cycles) == 4 &&
+              offsetof(OenRecord, dark_cycles) == 8, "PIO row record field order changed");
 
 static volatile OenRecord oen_data = {0, 0, 0};
 
@@ -184,7 +196,7 @@ static volatile uint32_t brightness_fp = (1u << BRIGHTNESS_FP_SHIFT); // default
 static volatile uint32_t lit_cycles[BIT_DEPTH];
 static volatile uint32_t dark_cycles[BIT_DEPTH];
 
-static void swap_dma_buffer_if_pending()
+__attribute__((always_inline)) static inline void swap_dma_buffer_if_pending()
 {
     critical_section_enter_blocking(&frame_swap_critical_section);
 
@@ -195,6 +207,14 @@ static void swap_dma_buffer_if_pending()
     }
 
     critical_section_exit(&frame_swap_critical_section);
+}
+
+bool hub75_ready_for_update()
+{
+    critical_section_enter_blocking(&frame_swap_critical_section);
+    const bool ready = !swap_pending;
+    critical_section_exit(&frame_swap_critical_section);
+    return ready;
 }
 
 // Basis factor (coarse brightness)
@@ -342,7 +362,7 @@ static void init_accumulators(std::size_t pixel_count)
  * modifies the PIO state machine instruction, and restarts DMA transfers
  * for pixel data to ensure continuous frame updates.
  */
-static void oen_finished_handler()
+static void __not_in_flash_func(oen_finished_handler)()
 {
     // Clear the interrupt request for the finished DMA channel
     dma_channel_acknowledge_irq1(oen_finished_chan);
@@ -628,6 +648,7 @@ static void setup_dma_transfers()
 
     dma_channel_config oen_finished_config = dma_channel_get_default_config(oen_finished_chan);
     channel_config_set_transfer_data_size(&oen_finished_config, DMA_SIZE_32);
+    channel_config_set_high_priority(&oen_finished_config, true);
     channel_config_set_read_increment(&oen_finished_config, false);
     channel_config_set_write_increment(&oen_finished_config, false);
     channel_config_set_dreq(&oen_finished_config, pio_get_dreq(pio_config.row_pio, pio_config.sm_row, false));
@@ -644,6 +665,9 @@ static void setup_dma_transfers()
 static void setup_dma_irq()
 {
     irq_set_exclusive_handler(DMA_IRQ_1, oen_finished_handler);
+    // Row restart is time-critical: let it preempt USB/timer foreground workers.
+    // Core 1 radio firmware loading must not evict/stall this handler from XIP.
+    irq_set_priority(DMA_IRQ_1, PICO_HIGHEST_IRQ_PRIORITY);
     dma_channel_set_irq1_enabled(oen_finished_chan, true);
     irq_set_enabled(DMA_IRQ_1, true);
 }
@@ -748,8 +772,32 @@ __attribute__((optimize("unroll-loops"))) void update(
     PicoGraphics const *graphics // Graphics object to be updated - RGB888 format, 24-bits in uint32_t array
 )
 {
-    if (graphics->pen_type != PicoGraphics::PEN_RGB888)
+    if (graphics->pen_type == PicoGraphics::PEN_RGB565) {
+#if !defined(HUB75_MULTIPLEX_2_ROWS)
+        return; // RGB565 input currently supports the controller's two-row panels.
+#else
+        const auto* pixels = static_cast<const uint16_t*>(graphics->frame_buffer);
+#if TEMPORAL_DITHERING == false
+        // 512 bytes in flash avoid expanding each pixel and redoing gamma shifts.
+        static constexpr auto tables=MakeDriver565Tables(lut);
+#endif
+        for (size_t i = 0; i < size_t(width) * height; ++i) {
+            // HUB75_MULTIPLEX_2_ROWS: each row contains interleaved upper/lower pixels.
+            const size_t destination = (i < offset) ? i * 2 : (i - offset) * 2 + 1;
+#if TEMPORAL_DITHERING == false
+            frame_buffer[destination] = PackDriverRGB565(pixels[i],tables);
+#else
+            frame_buffer[destination] = LUT_MAPPING(destination,ExpandDriverRGB565(pixels[i]));
+#endif
+        }
+        critical_section_enter_blocking(&frame_swap_critical_section);
+        swap_pending = true;
+        frame_buffer = (frame_buffer == frame_buffer1) ? frame_buffer2 : frame_buffer1;
+        critical_section_exit(&frame_swap_critical_section);
         return;
+#endif
+    }
+    if (graphics->pen_type != PicoGraphics::PEN_RGB888) return;
 
     __attribute__((aligned(4))) uint32_t const *src = static_cast<uint32_t const *>(graphics->frame_buffer);
 

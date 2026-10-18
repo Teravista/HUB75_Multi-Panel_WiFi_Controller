@@ -149,7 +149,8 @@ This is a longer-term idea, much further out than the two plans above. At 128x25
 ```text
 src/
   config/       Application settings, network template and lwIP configuration
-  display/      Logical image rendering and display helpers
+  display/      CPU frame and rendering implementations
+    include/    Display declarations
   network/      Wi-Fi connection and TCP image uploads
 third_party/    Bundled HUB75, SD filesystem and JPEG libraries
 ```
@@ -160,7 +161,7 @@ use paths relative to `src/`, for example `network/wifiNetwork.hpp`. The
 
 ## Program Flow
 
-After power-on, there's a 5-second startup delay to give you time to attach a serial/USB debugger before anything happens. Setup then runs: core objects (display helpers, network upload, WiFi, graphics) are constructed, the frame buffer is zero-initialized, and the HUB75 driver is created and started - since its internal buffer starts as all zeros, the panel is black at this point. The code then enters the main loop, whose first pass renders the default image/animation into the frame buffer, but before that reaches the display, it makes a blocking WiFi connect attempt (up to 15 seconds); the panel stays black until that attempt succeeds or times out, since nothing is pushed to the driver until after it resolves.
+After power-on, there's a 5-second startup delay to give you time to attach a serial/USB debugger before anything happens. Setup then constructs the display, upload and WiFi objects, initializes the graphics buffer, and starts the HUB75 driver. The first flashed image/animation frame and disconnected WiFi icon are queued before entering the main loop, so the panel has visible content during the first blocking WiFi connection attempt (up to 15 seconds).
 
 Regardless of whether that first attempt connected or failed, the program is already in main while loop, which consists of updating to the next frame of the animation if applicable, updating the [WiFi state machine](#wifi-state-machine), calculating the fps, and sending the new frame to the driver, then looping.
 
@@ -168,6 +169,17 @@ Note that any later WiFi disconnect and reconnect attempt blocks the loop the sa
 
 ## Driver Overview
 The driver uses double buffering: the CPU writes a new frame into the currently unused buffer, then flags a swap. The refresh loop itself - reading pixels, driving rows, and timing brightness bit-planes - runs on the RP2350's PIO/DMA hardware, independent of the CPU, and only swaps buffers at a safe point. So even if the CPU stalls for a bit - for example, blocking on WiFi/TCP calls, since the async counterparts proved unstable and failed for reasons unrelated to this project's own code - the panel keeps refreshing at a stable ~60 fps.
+
+### CPU frame and scan stability
+
+The CPU graphics frame uses RGB565 (64 KiB instead of 128 KiB). Flashed images
+and TCP uploads still supply RGB888 pixels, which are converted into this compact
+buffer. The driver accepts RGB565 through gamma lookup tables and retains its
+two separate 32-bit scan buffers. Frame submission waits for the previous buffer
+swap.
+
+See [Display buffers and refresh stability](docs/SCAN-ISOLATION.md) for
+RGB565 memory usage, buffer swapping and stable panel refresh.
 
 ## WiFi State Machine
 

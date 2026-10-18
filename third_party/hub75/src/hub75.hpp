@@ -113,13 +113,7 @@
 // At the moment only used for HUB75_P10_3535_16X32_4S panels
 #define SCAN_GROUPS (1 << ROWSEL_N_PINS)
 
-#if !defined(BIT_DEPTH)
-#define BIT_DEPTH 10 // default
-#endif
-
-#if BIT_DEPTH != 8 && BIT_DEPTH != 10
-#error "BIT_DEPTH must be 8 or 10"
-#endif
+#include "rgb565.hpp"
 
 // Accumulator precision has to fit the lut precision.
 #ifndef ACC_BITS
@@ -134,6 +128,9 @@ using namespace pimoroni;
 
 void create_hub75_driver(uint w, uint h, uint pt, bool stb_inverted);
 void start_hub75_driver();
+// True after the DMA scanner has consumed the previous queued buffer swap.
+// Foreground producers must wait before writing/submitting another frame.
+bool hub75_ready_for_update();
 extern volatile uint32_t hub75_frame_count;
 void update_bgr(const uint8_t *src);
 #if USE_PICO_GRAPHICS == true

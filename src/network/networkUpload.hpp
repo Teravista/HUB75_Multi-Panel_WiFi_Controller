@@ -6,45 +6,34 @@
 
 #include "lwip/tcp.h"
 #include "config/defines.h"
-#include "display/displayHelpers.hpp"
+#include "display/include/displayHelpers.hpp"
 
 class NetworkUpload {
 public:
+    // Initializes an unbound photo upload controller.
     NetworkUpload() = default;
+
+    // Connects frame reception to the CPU framebuffer and display helpers.
     explicit NetworkUpload(DisplayHelpers *displayHelpers, unsigned char *frameBuffer = nullptr);
 
-    /*
-        Initializes TCP frame receiver state.
-    */
+    // Initializes photo reception and clears the published framebuffer pointer.
     void InitFrameUploadState();
 
-    /*
-      Reports whether a TCP upload is currently writing pixels into the shared
-      framebuffer. The render loop uses this to avoid reading a partially written
-      frame.
-    */
+    // Reports whether a photo upload is currently receiving bytes.
     bool IsFrameUploadInProgress();
 
-    /*
-        For clean shutdown and state change we need to close the listener and reset all state so we can start again later so no network issue occur later on
-    */
+    // Stops the raw TCP photo upload listener and resets receive state.
     void StopFrameUploadServer();
 
-    /*
-        Starts the TCP frame upload listener on the specified port.
-    */
+    // Starts the raw TCP photo upload listener.
     bool StartFrameUploadServer(
         uint16_t port
     );
 
-    /*
-        Reports whether the local TCP listener still exists and is LISTEN state
-    */
+    // Reports whether the raw TCP photo listener is active.
     bool IsFrameUploadServerListening();
 
-    /*
-        stores a pointer to the latest fully uploaded frame,
-    */
+    // Returns the completed logical frame when one is available.
     const unsigned char *GetUploadedFrameData();
 
 private:
@@ -67,32 +56,19 @@ private:
     struct tcp_pcb *m_listenerPcb = nullptr;
     uint16_t m_listenerPort = 0;
 
-    /*
-    Convert RGB logical pixel over TCP to physical framebuffer pixel,
-    applying the logical-to-physical panel mapping and the wiring color byte order correction.
-    */
+    // Converts one received RGB888 pixel into the CPU framebuffer format.
     void DecodeAndStorePixel(const unsigned char *pixelBytes, size_t pixelIndex);
 
-    /*
-        TCP receive callback for the frame upload server.
-    */
+    // Accepts TCP photo bytes and completes or rejects the uploaded frame.
     static err_t OnTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err);
 
-    /*
-        Callback for TCP client error during frame upload.
-    */
+    // Releases photo upload state after a TCP connection error.
     static void OnTcpErr(void *arg, err_t err);
 
-    /*
-        Accepts a new TCP connection for frame upload.
-    */
+    // Accepts a TCP photo client and initializes its receive state.
     static err_t OnTcpAccept(void *arg, struct tcp_pcb *client, err_t err);
 
-    /*
-        Resets only in-flight receive state, used when (re)starting the TCP
-        listener. Unlike InitFrameUploadState, this must NOT clear m_activeFrame
-        or the lifetime counters, otherwise a WiFi reconnect wipes the last
-        successfully uploaded frame back to the default flashed image.
-    */
+    // Resets incomplete photo reception without clearing the last completed frame.
     void ResetPixelReceiveState();
+
 };
