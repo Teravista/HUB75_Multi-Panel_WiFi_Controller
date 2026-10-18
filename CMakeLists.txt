@@ -110,6 +110,7 @@ pico_enable_stdio_usb(hub75 1)
 
 add_subdirectory(third_party/hub75/common)
 add_subdirectory(third_party/hub75/libraries)
+add_subdirectory(third_party/fatfs_sd/src)
 
 target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
@@ -122,6 +123,8 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/display/displayHelpers.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/networkUpload.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/wifiNetwork.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp
         )
 
 # Add the standard library to the build
@@ -133,6 +136,7 @@ target_link_libraries(hub75
         hardware_dma
         hardware_timer
         hardware_vreg
+        no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
         pico_graphics)
 
 if(PICO_CYW43_SUPPORTED)
@@ -150,4 +154,3 @@ target_include_directories(hub75 PRIVATE
 )
 
 pico_add_extra_outputs(hub75)
-

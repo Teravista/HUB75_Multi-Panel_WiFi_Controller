@@ -181,6 +181,12 @@ swap.
 See [Display buffers and refresh stability](docs/SCAN-ISOLATION.md) for
 RGB565 memory usage, buffer swapping and stable panel refresh.
 
+### SD storage API
+
+`MemoryManager` provides SD mounting, named RGB888 image save/read, checksum
+validation and a temporary-file save/read check. See [SD storage](docs/MEMORY-MANAGER.md)
+for wiring and API usage.
+
 ## WiFi State Machine
 
 The state machine has three states - `NoWifi`, `WifiNoTcp`, and `Ready` - advanced once per main loop iteration by `UpdateNetworkStateMachine()`.
