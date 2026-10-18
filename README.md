@@ -38,6 +38,7 @@
   - [Flash-Backed Animation Upload Over TCP](#flash-backed-animation-upload-over-tcp)
   - [External Storage for Longer Animations](#external-storage-for-longer-animations)
 - [5. Implementation Details / Architecture](#5-implementation-details--architecture)
+  - [Source folders](#source-folders)
   - [Program Flow](#program-flow)
   - [Driver Overview](#driver-overview)
   - [WiFi State Machine](#wifi-state-machine)
@@ -105,12 +106,12 @@ If wrong credentials are provided, the connection fails, the WiFi icon in the to
 Configure `.env` as described above before the first build. This project is built and flashed using VS Code with the [Raspberry Pi Pico extension](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico). Import the project through the extension, then use its UI buttons to compile and run/flash - no manual CLI setup required.
 
 ## USE_ANIMATION flag
-The `USE_ANIMATION` flag in `src/defines/defines.h` controls what gets built into flash: `0` builds a single still image, `1` builds a multi-frame animation.
+The `USE_ANIMATION` flag in `src/config/defines.h` controls what gets built into flash: `0` builds a single still image, `1` builds a multi-frame animation.
 
 ## Flashing Your Own Image or Animation
 1. Run `imageToRGB888ArrayConverter.py` (still image) or `mp4ToRGB888ArrayConverter.py` (video/animation), pointing it at your source file and adjusting settings like animation delay/fps as needed.
 2. The script generates a `.h` file in `imagesVideos/`.
-3. `#include` that new file in `src/defines/defines.h` under the `USE_ANIMATION` block - that's the only required change.
+3. `#include` that new file in `src/config/defines.h` under the `USE_ANIMATION` block - that's the only required change.
 
 ## Python Utility Setup
 Install the Python packages used by the image, video, and TCP upload scripts:
@@ -142,6 +143,20 @@ Once uploaded images can be saved to flash, this opens the door to uploading mul
 This is a longer-term idea, much further out than the two plans above. At 128x256 pixels and RGB888, each frame takes up a lot of space, and with the SDK's flash overhead, the current maximum is 38 frames - enough for a very short looping animation, but not much more. External storage would remove this limit, allowing long-form animations at a much higher frame count.
 
 # 5. Implementation Details / Architecture
+
+## Source folders
+
+```text
+src/
+  config/       Application settings, network template and lwIP configuration
+  display/      Logical image rendering and display helpers
+  network/      Wi-Fi connection and TCP image uploads
+third_party/    Bundled HUB75, SD filesystem and JPEG libraries
+```
+
+`mainEntry.cpp` contains startup and the main loop. Application header includes
+use paths relative to `src/`, for example `network/wifiNetwork.hpp`. The
+`src/config/` include path also lets lwIP find `lwipopts.h`.
 
 ## Program Flow
 

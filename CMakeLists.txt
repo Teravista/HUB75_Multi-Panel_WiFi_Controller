@@ -42,7 +42,7 @@ if(NOT EXISTS "${LOCAL_ENV_FILE}")
     message(FATAL_ERROR "Missing .env file. Copy .env.example to .env and fill in its values.")
 endif()
 
-set(NETWORK_CONFIG_TEMPLATE "${CMAKE_CURRENT_LIST_DIR}/src/defines/networkConfig.h.in")
+set(NETWORK_CONFIG_TEMPLATE "${CMAKE_CURRENT_LIST_DIR}/src/config/networkConfig.h.in")
 set(NETWORK_CONFIG_GENERATOR "${CMAKE_CURRENT_LIST_DIR}/cmake/GenerateNetworkConfig.cmake")
 set(NETWORK_CONFIG_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/networkConfig.h")
 
@@ -116,9 +116,9 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
         ${CMAKE_CURRENT_LIST_DIR}/mainEntry.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/displayHelpers.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/networkUpload.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/wifiNetwork.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/display/displayHelpers.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/network/networkUpload.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/network/wifiNetwork.cpp
         )
 
 # Add the standard library to the build
@@ -142,7 +142,7 @@ target_include_directories(hub75 PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src
         ${CMAKE_CURRENT_LIST_DIR}/src
-        ${CMAKE_CURRENT_LIST_DIR}/src/defines
+        ${CMAKE_CURRENT_LIST_DIR}/src/config
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
