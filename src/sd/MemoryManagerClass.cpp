@@ -665,3 +665,347 @@ MemoryManager::RunReadWriteCheck (
     std::printf("[memory] self-test PASS: saved and read %u bytes; test file removed\n", unsigned(bytes));
     return true;
 } // RunReadWriteCheck
+
+/**
+    Builds a retained RGB888 photo header containing its generation and CRC.
+
+    The versioned header includes the generation in the checksum-covered prefix.
+    A retained slot is accepted only after both this prefix and every payload byte
+    reproduce the final CRC stored at the end of the header.
+
+    @param header Caller-provided output with SAVED_PHOTO_HEADER_BYTES bytes.
+    @param generation Sequence identifying this saved photo.
+    @param checksum Final CRC of the header prefix and RGB888 payload.
+*/
+void
+MemoryManager::BuildSavedPhotoHeader (
+    uint8_t* header,
+    uint32_t generation,
+    uint32_t checksum
+    )
+{
+    std::memset(header, 0, SAVED_PHOTO_HEADER_BYTES);
+    BuildPhotoStorageHeader(header, 0);
+    std::memcpy(header, "H75L", MEDIA_MAGIC_BYTES);
+    header[STORAGE_HEADER_VERSION_OFFSET] = SAVED_PHOTO_VERSION;
+    WriteUnsigned32LittleEndian(header + SAVED_PHOTO_GENERATION_OFFSET, generation);
+    WriteUnsigned32LittleEndian(header + SAVED_PHOTO_CHECKSUM_OFFSET, checksum);
+} // BuildSavedPhotoHeader
+
+/**
+    Reads and validates one retained photo, optionally delivering its pixels.
+
+    Both the fixed RGB888 description and exact file length are checked before
+    streaming. Sink fragments remain provisional until the prefix/payload CRC
+    and file close succeed. Missing or damaged content is kept distinct from an
+    I/O failure so callers do not overwrite a card they cannot safely inspect.
+
+    @param index Retained slot index, zero or one.
+    @param sink Optional synchronous consumer; null performs validation only.
+    @param context Borrowed consumer state valid until the read returns.
+
+    @return slot - Validity, generation and the relevant filesystem/error result.
+*/
+MemoryManager::SavedPhotoSlot
+MemoryManager::ReadSavedPhotoSlot (
+    unsigned index,
+    ImageSink sink,
+    void* context
+    )
+{
+    SavedPhotoSlot slot;
+    const char* path = nullptr;
+    uint8_t header[SAVED_PHOTO_HEADER_BYTES];
+    uint8_t expected[SAVED_PHOTO_HEADER_BYTES];
+    UINT count;
+    FRESULT result;
+    FRESULT closed;
+    bool good;
+    uint32_t checksum;
+    uint32_t crc;
+    size_t offset;
+    UINT bytes;
+
+    if (index == 0) {
+        path = "0:/LASTA.H75";
+    } else {
+        path = "0:/LASTB.H75";
+    }
+    result = f_open(&storage_.imageFile, path, FA_READ);
+    slot.result = result;
+    if (result == FR_NO_FILE) {
+        return slot;
+    }
+    if (result != FR_OK) {
+        slot.state = SlotState::IoError;
+        slot.error = "saved photo open failed";
+        return slot;
+    }
+
+    slot.state = SlotState::Invalid;
+    std::memset(header, 0, sizeof(header));
+    count = 0;
+    result = f_read(&storage_.imageFile, header, sizeof(header), &count);
+    slot.generation = ReadUnsigned32LittleEndian(header + SAVED_PHOTO_GENERATION_OFFSET);
+    checksum = ReadUnsigned32LittleEndian(header + SAVED_PHOTO_CHECKSUM_OFFSET);
+    BuildSavedPhotoHeader(expected, slot.generation, checksum);
+    good = result == FR_OK && count == sizeof(header) &&
+           f_size(&storage_.imageFile) == SOURCE_FRAME_SIZE_BYTES + sizeof(header) &&
+           !std::memcmp(header, expected, sizeof(header));
+    crc = UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, SAVED_PHOTO_CHECKSUM_OFFSET);
+
+    for (offset = 0; good && offset < SOURCE_FRAME_SIZE_BYTES;) {
+        bytes = UINT(std::min(ChunkBytes, SOURCE_FRAME_SIZE_BYTES - offset));
+        result = f_read(&storage_.imageFile, storage_.readBuffer, bytes, &count);
+        good = result == FR_OK && count == bytes;
+        if (good) {
+            crc = UpdateImageCrc32(crc, storage_.readBuffer, count);
+            if (sink && !sink(context, storage_.readBuffer, count, offset)) {
+                slot.error = "saved photo consumer rejected data";
+                good = false;
+            }
+        }
+        offset += count;
+    }
+    if (good && ~crc != checksum) {
+        slot.error = "saved photo checksum mismatch";
+        good = false;
+    }
+    closed = f_close(&storage_.imageFile);
+    if (result == FR_OK) {
+        result = closed;
+    }
+    slot.result = result;
+    if (result != FR_OK) {
+        slot.state = SlotState::IoError;
+        slot.error = "saved photo read/close failed";
+    } else if (good) {
+        slot.state = SlotState::Valid;
+    }
+    return slot;
+} // ReadSavedPhotoSlot
+
+/**
+    Selects the newest valid generation with wrap-safe ordering.
+
+    Invalid slots are ignored. When both copies validate, signed generation
+    distance chooses the newer copy even across the unsigned counter wrap.
+
+    @param slots Two previously inspected retained photo descriptions.
+
+    @return 0 - The first slot is the newest valid copy.
+    @return 1 - The second slot is the newest valid copy.
+    @return SAVED_PHOTO_NO_SLOT - Neither slot contains a valid photo.
+*/
+int
+MemoryManager::FindNewestSavedPhoto (
+    const SavedPhotoSlot* slots
+    )
+{
+    if (slots[0].state != SlotState::Valid) {
+        if (slots[1].state == SlotState::Valid) {
+            return 1;
+        }
+        return SAVED_PHOTO_NO_SLOT;
+    }
+    if (slots[1].state == SlotState::Valid && int32_t(slots[1].generation - slots[0].generation) > 0) {
+        return 1;
+    }
+    return 0;
+} // FindNewestSavedPhoto
+
+/**
+    Streams a new retained photo into the selected alternate slot.
+
+    The source is read in bounded chunks while CRC state includes the generation
+    header prefix. Only after the payload is written is its final header installed
+    and the file closed. A failed write leaves the other retained generation intact.
+    Actual card I/O failure avoids additional cleanup writes to that session.
+
+    @param index Destination slot index, zero or one.
+    @param generation New generation number.
+    @param source Synchronous stable RGB888 pixel producer.
+    @param context Borrowed source state for this save.
+    @param result Output filesystem status for failure reporting.
+
+    @return true - Header and payload were written and closed successfully.
+    @return false - The source, write, seek or close failed.
+*/
+bool
+MemoryManager::WriteSavedPhotoSlot (
+    unsigned index,
+    uint32_t generation,
+    ImageSource source,
+    void* context,
+    int& result
+    )
+{
+    const char* path = nullptr;
+    uint8_t header[SAVED_PHOTO_HEADER_BYTES];
+    uint32_t crc;
+    UINT count;
+    FRESULT status;
+    FRESULT closed;
+    bool good;
+    size_t offset;
+    UINT bytes;
+
+    if (index == 0) {
+        path = "0:/LASTA.H75";
+    } else {
+        path = "0:/LASTB.H75";
+    }
+    status = f_open(&storage_.imageFile, path, FA_WRITE | FA_CREATE_ALWAYS);
+    result = status;
+    if (status != FR_OK) {
+        return false;
+    }
+    BuildSavedPhotoHeader(header, generation, 0);
+    crc = UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, SAVED_PHOTO_CHECKSUM_OFFSET);
+    count = 0;
+    status = f_write(&storage_.imageFile, header, sizeof(header), &count);
+    good = status == FR_OK && count == sizeof(header);
+    for (offset = 0; good && offset < SOURCE_FRAME_SIZE_BYTES;) {
+        bytes = UINT(std::min(ChunkBytes, SOURCE_FRAME_SIZE_BYTES - offset));
+        good = source(context, storage_.readBuffer, bytes, offset);
+        if (!good) {
+            break;
+        }
+        crc = UpdateImageCrc32(crc, storage_.readBuffer, bytes);
+        status = f_write(&storage_.imageFile, storage_.readBuffer, bytes, &count);
+        good = status == FR_OK && count == bytes;
+        offset += count;
+    }
+    if (good) {
+        BuildSavedPhotoHeader(header, generation, ~crc);
+        status = f_lseek(&storage_.imageFile, 0);
+        if (status == FR_OK) {
+            status = f_write(&storage_.imageFile, header, sizeof(header), &count);
+        }
+        good = status == FR_OK && count == sizeof(header);
+    }
+    if (status == FR_DISK_ERR || status == FR_NOT_READY) {
+        storage_.imageFile = {};
+        result = status;
+        return false;
+    }
+    closed = f_close(&storage_.imageFile);
+    if (status == FR_OK) {
+        status = closed;
+    }
+    result = status;
+    if (!good || status != FR_OK) {
+        if (status != FR_DISK_ERR && status != FR_NOT_READY) {
+            f_unlink(path);
+        }
+        return false;
+    }
+    return true;
+} // WriteSavedPhotoSlot
+
+/**
+    Saves a new retained photo while keeping the previous valid generation.
+
+    Inspects both retained slots before choosing the alternate destination. Source
+    pixels are streamed synchronously and the completed file is reread before the
+    save is reported successful. A source callback must not re-enter storage, and
+    its image must stay stable throughout the call. No extra full frame is allocated.
+
+    @param source Stable logical RGB888 pixel producer.
+    @param context Borrowed source state valid until this call completes.
+
+    @return true - A new generation was written and verified.
+    @return false - Storage is unavailable/busy, source data failed or validation failed.
+*/
+bool
+MemoryManager::SaveLastImage (
+    ImageSource source,
+    void* context
+    )
+{
+    SavedPhotoSlot slots[SAVED_PHOTO_SLOT_COUNT];
+    SavedPhotoSlot verified;
+    int latest;
+    unsigned target;
+    uint32_t generation;
+    int result;
+    size_t index;
+
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || !source) {
+        return ReportStorageFailure("photo storage busy/unavailable or missing source");
+    }
+    for (index = 0; index < SAVED_PHOTO_SLOT_COUNT; ++index) {
+        slots[index] = ReadSavedPhotoSlot(unsigned(index));
+        if (slots[index].state == SlotState::IoError) {
+            return ReportStorageFailure(slots[index].error, slots[index].result);
+        }
+    }
+    latest = FindNewestSavedPhoto(slots);
+    if (latest == 0) {
+        target = 1;
+    } else {
+        target = 0;
+    }
+    generation = 1;
+    if (latest >= 0) {
+        generation = slots[latest].generation + 1;
+    }
+    result = FR_OK;
+    if (!WriteSavedPhotoSlot(target, generation, source, context, result)) {
+        return ReportStorageFailure("saved photo write failed", result);
+    }
+    verified = ReadSavedPhotoSlot(target);
+    if (verified.state != SlotState::Valid || verified.generation != generation) {
+        return ReportStorageFailure("saved photo verification failed", verified.result);
+    }
+    error_ = "none";
+    return true;
+} // SaveLastImage
+
+/**
+    Restores the newest verified retained photo through a chunk sink.
+
+    Header and payload validation determines the newest usable generation first,
+    so a damaged replacement can fall back to the other retained copy. A final
+    synchronous read delivers its provisional pixels and verifies them again.
+    Callers publish the frame only after this method succeeds.
+
+    @param sink Synchronous consumer of logical RGB888 fragments.
+    @param context Borrowed consumer state valid until this call completes.
+
+    @return true - The selected retained photo was streamed and verified.
+    @return false - No valid copy exists or availability, callback or I/O failed.
+*/
+bool
+MemoryManager::ReadLastImage (
+    ImageSink sink,
+    void* context
+    )
+{
+    SavedPhotoSlot slots[SAVED_PHOTO_SLOT_COUNT];
+    SavedPhotoSlot loaded;
+    size_t index;
+    int latest;
+
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || !sink) {
+        return ReportStorageFailure("photo storage busy/unavailable or missing sink");
+    }
+    for (index = 0; index < SAVED_PHOTO_SLOT_COUNT; ++index) {
+        slots[index] = ReadSavedPhotoSlot(unsigned(index));
+        if (slots[index].state == SlotState::IoError) {
+            return ReportStorageFailure(slots[index].error, slots[index].result);
+        }
+    }
+    latest = FindNewestSavedPhoto(slots);
+    if (latest < 0) {
+        return ReportStorageFailure("no valid saved photo");
+    }
+    loaded = ReadSavedPhotoSlot(unsigned(latest), sink, context);
+    if (loaded.state != SlotState::Valid) {
+        return ReportStorageFailure(loaded.error, loaded.result);
+    }
+    error_ = "none";
+    return true;
+} // ReadLastImage

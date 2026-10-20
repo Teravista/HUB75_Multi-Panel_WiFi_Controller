@@ -51,3 +51,28 @@ if (memory.Initialize()) {
     memory.Shutdown();
 }
 ```
+
+
+## Automatic photo persistence
+
+Each completed raw TCP photo is saved once, before drawing the connection icon.
+Frame ownership excludes new uploads while the foreground reads the source, so
+no second framebuffer is needed. A failed save keeps the live photo visible and
+is not retried continuously for the same frame revision.
+
+`SaveLastImage(source, context)` streams logical RGB888 pixels into alternating
+reserved `LASTA.H75` and `LASTB.H75` files. `ReadLastImage(sink, context)` selects
+the newest valid generation; a corrupt or incomplete replacement falls back to
+the previous valid copy. Each retained file has a 24-byte version-2 header, with
+a CRC covering the generation/header prefix and 98,304-byte payload. These files
+are controller-owned and must not be used as arbitrary named-image destinations.
+
+Startup queues the flashed image, then attempts to restore a verified saved
+photo before Wi-Fi connection begins. Missing or unusable storage leaves the
+flashed image available. SD hardware is released for the first radio resource
+claim and initialized once afterward, even if association is still pending.
+This stage uses explicit initialization; automatic SD remount recovery is separate.
+
+The `PhotoPersistence` bridge connects MemoryManager to FrameBufferController.
+FrameReceiver supplies ownership tokens and completed-frame revisions; TCP
+callbacks only receive/map pixels. Filesystem work remains in foreground code.

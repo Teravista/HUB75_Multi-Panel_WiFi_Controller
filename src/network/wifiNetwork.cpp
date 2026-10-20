@@ -10,10 +10,10 @@
 #include "lwip/tcp.h"
 
 #include "config/defines.h"
-#include "network/networkUpload.hpp"
+#include "network/include/FrameBufferControllerClass.hpp"
 #include "networkConfig.h"
 
-WifiNetwork::WifiNetwork(NetworkUpload *networkUpload)
+WifiNetwork::WifiNetwork(FrameBufferController *networkUpload)
     : m_networkUpload(networkUpload)
 {
 }
@@ -436,3 +436,20 @@ const char *WifiNetwork::GetWifiIpText() const
     }
     return m_wifiIpText.c_str();
 }
+
+/**
+    Reports whether the radio has initialized, even if association is pending.
+
+    Startup uses this to re-enable SD hardware after the initial radio resource
+    claim, without requiring a successful Wi-Fi join or Internet access.
+
+    @return true - The CYW43 context has been initialized.
+    @return false - No radio context is currently available.
+*/
+bool
+WifiNetwork::IsRadioInitialized (
+    void
+    ) const
+{
+    return m_cyw43Initialized;
+} // IsRadioInitialized
