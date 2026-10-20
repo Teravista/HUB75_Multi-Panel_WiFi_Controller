@@ -1,0 +1,36 @@
+#pragma once
+
+namespace StorageConfig {
+// GPIO numbers; the physical Pico pins are listed in the storage guide.
+constexpr unsigned Miso = 16;
+constexpr unsigned ChipSelect = 17;
+constexpr unsigned Clock = 18;
+constexpr unsigned Mosi = 19;
+constexpr unsigned BaudRate = 4'000'000;
+} // namespace StorageConfig
+
+#define PHOTO_HEADER_BYTES 20
+#define STORAGE_MAXIMUM_NAME_LENGTH 48
+#define SD_SELF_TEST_NAME_BYTES 13
+#define SD_SELF_TEST_FILENAME_ATTEMPTS 1000
+#define SD_SECTOR_BYTES 512
+#define CRC32_REFLECTED_POLYNOMIAL_U 0xedb88320u
+#define MEDIA_MAGIC_BYTES 4
+#define PHOTO_HEADER_CHECKSUM_OFFSET 16
+#define PHOTO_HEADER_HEIGHT_HIGH_OFFSET 9
+#define PHOTO_HEADER_HEIGHT_LOW_OFFSET 8
+#define PHOTO_HEADER_PAYLOAD_SIZE_OFFSET 12
+#define PHOTO_HEADER_PIXEL_BYTES_OFFSET 5
+#define PHOTO_HEADER_RESERVED_HIGH_OFFSET 11
+#define PHOTO_HEADER_RESERVED_LOW_OFFSET 10
+#define PHOTO_HEADER_WIDTH_HIGH_OFFSET 7
+#define PHOTO_HEADER_WIDTH_LOW_OFFSET 6
+#define STORAGE_CRC32_INITIAL_U 0xffffffffu
+#define STORAGE_HEADER_VERSION_OFFSET 4
+#define STORAGE_PATH_PREFIX_AND_TERMINATOR_BYTES 4
+#define STORAGE_VERSION_PHOTO 1
+#define UINT32_BYTES 4
+#define UINT32_BYTE_THREE_INDEX 3
+#define UINT32_BYTE_TWO_INDEX 2
+#define WORD_BYTE_THREE_SHIFT 24
+#define WORD_BYTE_TWO_SHIFT 16
