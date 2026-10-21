@@ -13,13 +13,22 @@
     buffer and hardware lifecycle without allocating another complete framebuffer.
     Exact file/header checks and a payload CRC protect readback; delivered fragments
     remain provisional until the complete read succeeds. A non-waiting guard rejects
-    reentrant access, and a temporary-file self-check exercises save/read/cleanup.
+    reentrant access, and a temporary-file self-check exercises save/read/cleanup. Alternating retained
+    photo slots preserve the previous valid generation during a replacement save.
 */
 class MemoryManager {
 public:
     static constexpr size_t IoChunkBytes = 6 * 1024;
     // Pixel fragments are provisional until the complete read succeeds.
     using ImageSink = bool (*)(void* context, const uint8_t* pixels, size_t bytes, size_t offset);
+
+    using ImageSource = bool (*)(void* context, uint8_t* pixels, size_t bytes, size_t offset);
+
+    // Saves a new retained photo while keeping the previous valid generation.
+    bool SaveLastImage(ImageSource source, void* context);
+
+    // Restores the newest verified retained photo through a chunk sink.
+    bool ReadLastImage(ImageSink sink, void* context);
 
     // Mounts the SD card for image storage.
     bool Initialize(void);
@@ -93,6 +102,27 @@ private:
 
     // Compares readback pixels against the source used by the storage self-check.
     static bool CompareSavedImageBytes(void* context, const uint8_t* bytes, size_t count, size_t offset);
+
+    enum class SlotState { Missing, Invalid, Valid, IoError };
+
+    struct SavedPhotoSlot {
+        SlotState state = SlotState::Missing;
+        uint32_t generation = 0;
+        int result = 0;
+        const char* error = "invalid saved photo";
+    };
+
+    // Builds a retained RGB888 photo header containing its generation and CRC.
+    static void BuildSavedPhotoHeader(uint8_t* header, uint32_t generation, uint32_t checksum);
+
+    // Reads and validates one retained photo, optionally delivering its pixels.
+    static SavedPhotoSlot ReadSavedPhotoSlot(unsigned index, ImageSink sink = nullptr, void* context = nullptr);
+
+    // Selects the newest valid generation with wrap-safe ordering.
+    static int FindNewestSavedPhoto(const SavedPhotoSlot* slots);
+
+    // Streams a new retained photo into the selected alternate slot.
+    static bool WriteSavedPhotoSlot(unsigned index, uint32_t generation, ImageSource source, void* context, int& result);
 
     bool ready_ = false;
     const char* error_ = "storage not initialized";

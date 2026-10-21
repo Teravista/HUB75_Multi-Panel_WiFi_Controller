@@ -185,7 +185,10 @@ RGB565 memory usage, buffer swapping and stable panel refresh.
 
 `MemoryManager` provides SD mounting, named RGB888 image save/read, checksum
 validation and a temporary-file save/read check. See [SD storage](docs/MEMORY-MANAGER.md)
-for wiring and API usage.
+for wiring and API usage. Completed TCP photo uploads are saved once to alternating
+SD copies and restored before Wi-Fi startup; invalid or unavailable saved content
+falls back to the flashed image. Frame ownership keeps saves clear of concurrent
+uploads, and failed saves leave the live photo visible.
 
 ## WiFi State Machine
 

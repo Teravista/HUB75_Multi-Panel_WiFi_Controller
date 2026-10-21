@@ -4,12 +4,12 @@
 #include "pico/types.h"
 #include "lwip/tcp.h"
 
-#include "network/networkUpload.hpp"
+#include "network/include/FrameBufferControllerClass.hpp"
 
 class WifiNetwork {
 public:
     WifiNetwork() = default;
-    explicit WifiNetwork(NetworkUpload *networkUpload);
+    explicit WifiNetwork(FrameBufferController *networkUpload);
 
     // Three-state network lifecycle:
     //   NoWifi     - no usable WiFi link; any previous listener has been destroyed
@@ -46,8 +46,11 @@ public:
     */
     const char *GetWifiIpText() const;
 
+    // Reports whether the radio has initialized, even if association is pending.
+    bool IsRadioInitialized(void) const;
+
 private:
-    NetworkUpload *m_networkUpload = nullptr;
+    FrameBufferController *m_networkUpload = nullptr;
 
     NetState m_netState = NetState::NoWifi;
     std::string m_wifiIpText;
