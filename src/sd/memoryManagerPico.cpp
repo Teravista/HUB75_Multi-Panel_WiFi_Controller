@@ -1,6 +1,9 @@
 #include "sd/include/memoryManagerPlatform.hpp"
 #include "config/include/storageConfig.hpp"
 #include "hw_config.h"
+#include "hardware/clocks.h"
+
+#define SD_PERIPHERAL_CLOCK_THRESHOLD_HZ 24'000'000
 
 namespace {
 spi_t storageSpi{};
@@ -61,6 +64,14 @@ InitializeMemoryStorageHardware (
     )
 {
     bool initialized;
+    unsigned systemClock;
+
+    // Set the SPI peripheral clock source before the bus is initialized. The
+    // card still starts at the driver's slow initialization clock.
+    if (!configured && StorageConfig::BaudRate > SD_PERIPHERAL_CLOCK_THRESHOLD_HZ) {
+        systemClock = clock_get_hz(clk_sys);
+        clock_configure_undivided(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS, systemClock);
+    }
 
     // Configure the dedicated SPI bus once; each mount still reclaims only the resources owned by this
     // reader.

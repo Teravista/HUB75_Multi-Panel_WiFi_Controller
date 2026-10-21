@@ -10,7 +10,7 @@
     Provides the initial SD image-storage boundary for the panel controller.
 
     Foreground callers mount storage and save or stream one named logical RGB888
-    image through this class. It owns the filesystem handle, one shared 6 KiB read
+    image through this class. It owns the filesystem handle, one shared 24 KiB read
     buffer and hardware lifecycle without allocating another complete framebuffer.
     Versioned descriptors retain per-photo metadata; legacy headers remain readable.
     Exact file/header checks and payload/header CRCs protect readback; delivered fragments
@@ -20,7 +20,7 @@
 */
 class MemoryManager {
 public:
-    static constexpr size_t IoChunkBytes = 6 * 1024;
+    static constexpr size_t IoChunkBytes = 24 * 1024;
     // Pixel fragments are provisional until the complete read succeeds.
     using ImageSink = bool (*)(void* context, const uint8_t* pixels, size_t bytes, size_t offset);
 

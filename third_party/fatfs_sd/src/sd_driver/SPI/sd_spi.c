@@ -1,3 +1,4 @@
+// Local changes: negotiated SD clock and bounded read DMA/profiling support.
 /* sd_spi.c
 Copyright 2021 Carl John Kugler III
 
@@ -28,12 +29,15 @@ specific language governing permissions and limitations under the License.
 #endif
 //
 #include "sd_spi.h"
+#include "sd_spi_speed.h"
 
 // #define TRACE_PRINTF(fmt, args...)
 // #define TRACE_PRINTF printf
 
 void sd_spi_go_high_frequency(sd_card_t *sd_card_p) {
-    uint actual = spi_set_baudrate(sd_card_p->spi_if_p->spi->hw_inst, sd_card_p->spi_if_p->spi->baud_rate);
+    uint baud = sd_card_p->spi_if_p->state.transfer_baud_rate;
+    if (!baud) baud = sd_spi_default_speed(sd_card_p->spi_if_p->spi->baud_rate);
+    uint actual = spi_set_baudrate(sd_card_p->spi_if_p->spi->hw_inst, baud);
     DBG_PRINTF("%s: Actual frequency: %lu\n", __FUNCTION__, (long)actual);
 }
 void sd_spi_go_low_frequency(sd_card_t *sd_card_p) {

@@ -194,6 +194,9 @@ Photo saves now retain a checked media descriptor alongside their pixels, while
 legacy saved photos remain readable. See [media metadata](docs/MEDIA-METADATA.md)
 for field meanings, the binary layout and compatibility.
 
+SD bulk I/O uses a negotiated clock, larger reads and faster CRC32 checks.
+See [SD throughput](docs/SD-OPTIMIZATION.md) for behavior, RAM cost and diagnostics.
+
 ## WiFi State Machine
 
 The state machine has three states - `NoWifi`, `WifiNoTcp`, and `Ready` - advanced once per main loop iteration by `UpdateNetworkStateMachine()`.

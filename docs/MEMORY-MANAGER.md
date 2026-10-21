@@ -1,7 +1,7 @@
 # SD image storage
 
 `MemoryManager` owns the SPI hardware, FAT/exFAT filesystem, file operations and
-a shared 6 KiB read buffer. Its API saves and reads one logical 128 x 256 RGB888
+a shared 24 KiB read buffer. Its API saves and reads one logical 128 x 256 RGB888
 image without allocating another full framebuffer.
 
 The class overview is in `src/sd/include/MemoryManagerClass.hpp`; its implementation
@@ -18,7 +18,8 @@ and private class-owned storage state are in `src/sd/MemoryManagerClass.cpp`.
 | MISO | GP16 | 21 |
 | GND | GND | 23 |
 
-`src/config/include/storageConfig.hpp` defines these pins and the 4 MHz transfer clock.
+`src/config/include/storageConfig.hpp` defines these pins and requests a 48 MHz
+transfer clock, subject to card-mode negotiation and hardware dividers.
 The card needs an existing FAT/exFAT filesystem. The SPI driver claims two free
 DMA channels; shutdown releases only those channels and its SPI resources.
 
@@ -85,3 +86,9 @@ named images and version-2 retained saves remain readable. The optional metadata
 output of `ReadImage` / `ReadLastImage` is published only after successful
 validation; `SaveLastImage` also accepts an explicit full-panel RGB888 photo
 descriptor. See [media metadata](MEDIA-METADATA.md) for layouts and API details.
+
+## SD throughput
+
+Storage uses one 24 KiB scratch buffer, larger bulk photo reads and compatible table-based CRC32. The driver negotiates its
+requested clock before exceeding Default Speed. See [SD throughput](SD-OPTIMIZATION.md)
+for card fallback, DMA behavior, RAM cost and diagnostic settings.

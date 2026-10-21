@@ -1,3 +1,4 @@
+// Local changes: negotiated SD clock and bounded read DMA/profiling support.
 /* sd_card.h
 Copyright 2021 Carl John Kugler III
 
@@ -35,6 +36,7 @@ specific language governing permissions and limitations under the License.
 #include "sd_card_constants.h"
 #include "sd_regs.h"
 #include "util.h"
+#include "SPI/sd_read_profile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +48,7 @@ typedef struct sd_spi_if_state_t {
     bool ongoing_mlt_blk_wrt;
     uint32_t cont_sector_wrt;
     uint32_t n_wrt_blks_reqd;
+    uint32_t transfer_baud_rate; // Confirmed card mode; reset on medium initialization.
 } sd_spi_if_state_t;
 
 typedef struct sd_spi_if_t {
@@ -60,6 +63,11 @@ typedef struct sd_spi_if_t {
     bool set_drive_strength;
     enum gpio_drive_strength ss_gpio_drive_strength;
     sd_spi_if_state_t state;
+    // Local extension: bounded foreground CPU work while read DMA is active.
+    // Never an IRQ callback; the caller owns both buffers and clears this hook.
+    void (*read_work)(void *context);
+    void *read_work_context;
+    sd_spi_read_profile_t *read_profile;
 } sd_spi_if_t;
 
 typedef struct sd_sdio_if_t {

@@ -33,6 +33,7 @@ set(PICO_BOARD pico2_w CACHE STRING "Board type")
 include(pico_sdk_import.cmake)
 
 project(hub75 C CXX ASM)
+option(HUB75_VERBOSE_LOGS "Enable verbose diagnostics and the startup serial delay" OFF)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -111,6 +112,11 @@ pico_enable_stdio_usb(hub75 1)
 add_subdirectory(third_party/hub75/common)
 add_subdirectory(third_party/hub75/libraries)
 add_subdirectory(third_party/fatfs_sd/src)
+target_compile_definitions(no-OS-FatFS-SD-SDIO-SPI-RPi-Pico INTERFACE
+    USE_PRINTF=$<BOOL:${HUB75_VERBOSE_LOGS}>
+    USE_DBG_PRINTF=$<BOOL:${HUB75_VERBOSE_LOGS}>)
+
+target_compile_definitions(hub75 PRIVATE HUB75_VERBOSE_LOGS=$<BOOL:${HUB75_VERBOSE_LOGS}>)
 
 target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
@@ -127,6 +133,7 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaMetadata.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/wifiNetwork.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/sd/storageCrc32.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp
         )
 
