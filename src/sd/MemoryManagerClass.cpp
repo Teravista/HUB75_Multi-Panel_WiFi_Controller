@@ -1,5 +1,6 @@
 #include "sd/include/MemoryManagerClass.hpp"
 #include "sd/include/memoryManagerPlatform.hpp"
+#include "sd/include/storageCrc32.hpp"
 #include "config/defines.h"
 #include "ff.h"
 #include <algorithm>
@@ -11,7 +12,7 @@
     Holds the single storage session's filesystem, file and bounded read buffer.
 
     Static class-owned storage preserves one SD hardware owner and avoids placing
-    FatFs objects or the 6 KiB scratch allocation on the small foreground stack.
+    FatFs objects or the 24 KiB scratch allocation on the small foreground stack.
 */
 struct MemoryManager::StorageState {
     FATFS filesystem{};
@@ -100,9 +101,9 @@ MemoryManager::BuildValidatedImagePath (
 /**
     Updates the running CRC32 checksum with another byte span.
 
-    Accumulates the reflected IEEE CRC32 state one byte and bit at a time, allowing the same
-    state to continue across streamed chunks. The caller supplies the initial state and applies
-    final inversion only when the whole payload is complete.
+    Uses flash-resident slicing-by-four tables while retaining the existing
+    reflected IEEE CRC32 state, polynomial and final inversion. The same state
+    continues across arbitrary fragment boundaries, preserving every stored CRC.
 
     @param crc Running CRC32 state before processing these bytes.
     @param bytes Read-only input byte buffer.
@@ -118,22 +119,7 @@ MemoryManager::UpdateImageCrc32 (
     size_t length
     )
 {
-    size_t index;
-    unsigned bit;
-
-    // Process each byte least-significant bit first using the reflected IEEE CRC32 polynomial.
-    for (index = 0; index < length; ++index) {
-        crc ^= bytes[index];
-        for (bit = 0; bit < BITS_PER_BYTE; ++bit) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ CRC32_REFLECTED_POLYNOMIAL_U;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-
-    return crc;
+    return StorageCrc32::UpdateCrc32Checksum(crc, bytes, length);
 } // UpdateImageCrc32
 
 /**

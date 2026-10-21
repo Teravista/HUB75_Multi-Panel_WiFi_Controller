@@ -11,6 +11,8 @@ https://github.com/carlk3/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
 
 The Apache-2.0 license is retained in `third_party/fatfs_sd/LICENSE`;
 component copyright and license notices remain in the source tree.
+Local SD-driver changes add bounded High Speed negotiation, read-work/timing
+hooks and DMA completion before CRC-error retry.
 
 ## TJpgDec
 

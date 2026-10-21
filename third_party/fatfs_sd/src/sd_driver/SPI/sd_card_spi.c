@@ -1,3 +1,4 @@
+// Local changes: negotiated SD clock and bounded read DMA/profiling support.
 /**
  * @file sd_card_spi.c
  * @brief SD Card SPI Driver
@@ -179,6 +180,7 @@
 #include "sd_card.h"
 #include "sd_card_constants.h"
 #include "sd_spi.h"
+#include "sd_spi_speed.h"
 #include "sd_timeouts.h"
 #include "util.h"
 //
@@ -791,6 +793,32 @@ static block_dev_err_t read_bytes(sd_card_t *sd_card_p, uint8_t *buffer, uint32_
     }
     return 0;
 }
+
+// CMD6 is optional in SPI mode. Probe it at the initialization clock; a
+// rejected command, bad CRC/status, or busy function keeps Default Speed.
+static bool sd_switch_speed(void *context, uint32_t argument, uint8_t status[64]) {
+    sd_card_t *card = context;
+    uint32_t response = 0;
+    const char *stage = (argument & 0x80000000u) ? "switch" : "check";
+    (void)stage;
+    const block_dev_err_t command_error = sd_cmd(card, CMD6_SWITCH_FUNC, argument, false, &response);
+    DBG_PRINTF("[memory] CMD6 %s: arg=0x%08lx clock=%u Hz R1=0x%02lx error=%d\n",
+           stage, (unsigned long)argument, spi_get_baudrate(card->spi_if_p->spi->hw_inst),
+           (unsigned long)response, (int)command_error);
+    if (command_error != SD_BLOCK_DEVICE_ERROR_NONE || response != 0)
+        return false;
+    const block_dev_err_t data_error = read_bytes(card, status, 64);
+    if (data_error != SD_BLOCK_DEVICE_ERROR_NONE) {
+        DBG_PRINTF("[memory] CMD6 %s: status read failed error=%d\n", stage, (int)data_error);
+        return false;
+    }
+    // Supply at least eight further clocks before using the new bus timing.
+    sd_spi_read(card);
+    DBG_PRINTF("[memory] CMD6 %s: support=0x%04x selected=%u status_version=%u busy=0x%04x\n",
+           stage, (unsigned)((status[12] << 8) | status[13]), (unsigned)(status[16] & 15u),
+           (unsigned)status[17], (unsigned)((status[28] << 8) | status[29]));
+    return true;
+}
 /**
  * @brief Read a block of data from the SD card.
  *
@@ -831,11 +859,15 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
         if (SD_BLOCK_DEVICE_ERROR_NONE != status) return status;
     }
 
+    sd_spi_read_profile_t *profile = sd_card_p->spi_if_p->read_profile;
+    uint64_t stage = profile ? time_us_64() : 0;
+    if (profile) ++profile->transactions;
     // Send command to receive data
     if (num_rd_blks == 1)
         status = sd_cmd(sd_card_p, CMD17_READ_SINGLE_BLOCK, data_address, false, 0);
     else
         status = sd_cmd(sd_card_p, CMD18_READ_MULTIPLE_BLOCK, data_address, false, 0);
+    if (profile) profile->command_us += time_us_64() - stage;
     if (SD_BLOCK_DEVICE_ERROR_NONE != status) return status;
 
     /* Optimization:
@@ -850,26 +882,41 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
     // receive the data : one block at a time
     while (blk_cnt) {
         // read until start byte (0xFE)
-        if (!sd_wait_token(sd_card_p, SPI_START_BLOCK)) {
+        stage = profile ? time_us_64() : 0;
+        bool token_ok = sd_wait_token(sd_card_p, SPI_START_BLOCK);
+        if (profile) profile->token_us += time_us_64() - stage;
+        if (!token_ok) {
             DBG_PRINTF("%s:%d Read timeout\n", __func__, __LINE__);
             return SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
         }
         // read data
+        stage = profile ? time_us_64() : 0;
         sd_spi_transfer_start(sd_card_p, NULL, buffer, sd_block_size);
 
+        if (sd_card_p->spi_if_p->read_work)
+            sd_card_p->spi_if_p->read_work(sd_card_p->spi_if_p->read_work_context);
+
         // Check the CRC16 checksum for the previous data block
+        bool crc_ok = true;
         if (prev_buffer_addr) {
             // Check previous block's CRC:
-            if (!chk_crc16(prev_buffer_addr, sd_block_size, prev_block_crc)) {
+            const uint64_t crc_start = profile ? time_us_64() : 0;
+            crc_ok = chk_crc16(prev_buffer_addr, sd_block_size, prev_block_crc);
+            if (profile) profile->crc_us += time_us_64() - crc_start;
+            if (!crc_ok) {
                 DBG_PRINTF("%s: Invalid CRC received: 0x%" PRIx16 "\n", __func__,
                            prev_block_crc);
-                return SD_BLOCK_DEVICE_ERROR_CRC;
             }
         }
         
         uint32_t timeout = calculate_transfer_time_ms(sd_card_p->spi_if_p->spi, sd_block_size);
         bool ok = sd_spi_transfer_wait_complete(sd_card_p, timeout);
+        if (profile) profile->transfer_us += time_us_64() - stage;
         if (!ok) return SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
+        // Finish the active DMA before propagating a previous-sector CRC
+        // failure, so retries cannot race a transfer into a reused buffer.
+        if (!crc_ok) return SD_BLOCK_DEVICE_ERROR_CRC;
+        if (profile) ++profile->sectors;
 
         // Read the CRC16 checksum for the data block
         prev_block_crc = sd_spi_read(sd_card_p) << 8;
@@ -881,11 +928,16 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
 
     if (num_rd_blks > 1) {
         // Send CMD12(0x00000000) to stop the transmission for multi-block transfer
+        stage = profile ? time_us_64() : 0;
         status = sd_cmd(sd_card_p, CMD12_STOP_TRANSMISSION, 0x0, false, 0);
+        if (profile) profile->command_us += time_us_64() - stage;
         if (SD_BLOCK_DEVICE_ERROR_NONE != status) return status;
     }
     // Check final block's CRC:
-    if (!chk_crc16(prev_buffer_addr, sd_block_size, prev_block_crc)) {
+    stage = profile ? time_us_64() : 0;
+    bool final_crc_ok = chk_crc16(prev_buffer_addr, sd_block_size, prev_block_crc);
+    if (profile) profile->crc_us += time_us_64() - stage;
+    if (!final_crc_ok) {
         DBG_PRINTF("%s: Invalid CRC received: 0x%" PRIx16 "\n", __func__, prev_block_crc);
         return SD_BLOCK_DEVICE_ERROR_CRC;
     }
@@ -1616,6 +1668,7 @@ DSTATUS sd_card_spi_init(sd_card_t *sd_card_p) {
 
     // Initialize the member variables
     sd_card_p->state.card_type = SDCARD_NONE;
+    sd_card_p->spi_if_p->state.transfer_baud_rate = 0;
 
     // Acquire the SD card
     sd_spi_acquire(sd_card_p);
@@ -1636,6 +1689,16 @@ DSTATUS sd_card_spi_init(sd_card_t *sd_card_p) {
 
     DBG_PRINTF("SD card initialized\n");
 
+    const uint32_t requested = sd_card_p->spi_if_p->spi->baud_rate;
+    const sd_spi_speed_result_t speed = sd_spi_negotiate_speed_diagnosed(requested, sd_switch_speed, sd_card_p);
+    sd_card_p->spi_if_p->state.transfer_baud_rate = speed.baud_rate;
+    if (requested > 25000000u) {
+        DBG_PRINTF("[memory] SD mode=%s; requested=%lu Hz selected=%lu Hz reason=%s\n",
+               sd_card_p->spi_if_p->state.transfer_baud_rate > 25000000u ? "high-speed" : "default",
+               (unsigned long)requested,
+               (unsigned long)sd_card_p->spi_if_p->state.transfer_baud_rate,
+               sd_spi_speed_reason_name(speed.reason));
+    }
     // Set SCK for data transfer
     sd_spi_go_high_frequency(sd_card_p);
 

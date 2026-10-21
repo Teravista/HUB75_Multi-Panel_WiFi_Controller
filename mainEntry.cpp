@@ -136,7 +136,9 @@ main (
 
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
     stdio_init_all();
+#if HUB75_VERBOSE_LOGS
     sleep_ms(STARTUP_DELAY_5S);
+#endif
     printf("\n[boot] hub75 starting (%s)\n", WIFI_STATE_MACHINE_REV);
     wifiNetwork.InitializeNetworkTiming();
     create_hub75_driver(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, PANEL_TYPE, INVERTED_STB);
