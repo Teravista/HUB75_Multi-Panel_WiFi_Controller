@@ -190,6 +190,10 @@ SD copies and restored before Wi-Fi startup; invalid or unavailable saved conten
 falls back to the flashed image. Frame ownership keeps saves clear of concurrent
 uploads, and failed saves leave the live photo visible.
 
+Photo saves now retain a checked media descriptor alongside their pixels, while
+legacy saved photos remain readable. See [media metadata](docs/MEDIA-METADATA.md)
+for field meanings, the binary layout and compatibility.
+
 ## WiFi State Machine
 
 The state machine has three states - `NoWifi`, `WifiNoTcp`, and `Ready` - advanced once per main loop iteration by `UpdateNetworkStateMachine()`.

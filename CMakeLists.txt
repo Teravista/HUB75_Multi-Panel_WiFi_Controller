@@ -124,6 +124,7 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameBufferControllerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameReceiverClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/PhotoPersistenceClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaMetadata.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/wifiNetwork.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp

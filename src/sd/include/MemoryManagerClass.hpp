@@ -4,6 +4,7 @@
 #include <cstdint>
 #include "config/include/storageConfig.hpp"
 #include "config/defines.h"
+#include "media/include/mediaMetadata.hpp"
 
 /**
     Provides the initial SD image-storage boundary for the panel controller.
@@ -11,7 +12,8 @@
     Foreground callers mount storage and save or stream one named logical RGB888
     image through this class. It owns the filesystem handle, one shared 6 KiB read
     buffer and hardware lifecycle without allocating another complete framebuffer.
-    Exact file/header checks and a payload CRC protect readback; delivered fragments
+    Versioned descriptors retain per-photo metadata; legacy headers remain readable.
+    Exact file/header checks and payload/header CRCs protect readback; delivered fragments
     remain provisional until the complete read succeeds. A non-waiting guard rejects
     reentrant access, and a temporary-file self-check exercises save/read/cleanup. Alternating retained
     photo slots preserve the previous valid generation during a replacement save.
@@ -27,8 +29,11 @@ public:
     // Saves a new retained photo while keeping the previous valid generation.
     bool SaveLastImage(ImageSource source, void* context);
 
-    // Restores the newest verified retained photo through a chunk sink.
-    bool ReadLastImage(ImageSink sink, void* context);
+    // Saves a retained RGB888 photo with an explicit media descriptor.
+    bool SaveLastImage(const MediaMetadata& metadata, ImageSource source, void* context);
+
+    // Restores the newest verified retained photo and its optional metadata.
+    bool ReadLastImage(ImageSink sink, void* context, MediaMetadata* metadata = nullptr);
 
     // Mounts the SD card for image storage.
     bool Initialize(void);
@@ -45,14 +50,16 @@ public:
     // Writes a new named photo without replacing an existing file.
     bool SaveImage(const char* name, const uint8_t* pixels, size_t bytes);
 
-    // Streams a named RGB888 photo and validates its dimensions and checksum.
-    bool ReadImage(const char* name, ImageSink sink, void* context);
+    // Streams a named RGB888 photo and validates its metadata and checksum.
+    bool ReadImage(const char* name, ImageSink sink, void* context, MediaMetadata* metadata = nullptr);
 
     // Saves, rereads, and removes an unused temporary test image.
     bool RunReadWriteCheck(const uint8_t* pixels, size_t bytes);
 
 private:
     static constexpr size_t HeaderBytes = PHOTO_HEADER_BYTES;
+    static constexpr size_t LegacyLastHeaderBytes = SAVED_PHOTO_HEADER_BYTES;
+    static constexpr size_t LastHeaderBytes = METADATA_PHOTO_HEADER_BYTES;
     static constexpr size_t ChunkBytes = IoChunkBytes;
     static constexpr size_t MaximumNameLength = STORAGE_MAXIMUM_NAME_LENGTH;
     static_assert(ChunkBytes % SD_SECTOR_BYTES == 0 && ChunkBytes % IMAGE_BYTES_PER_PIXEL == 0,
@@ -108,12 +115,16 @@ private:
     struct SavedPhotoSlot {
         SlotState state = SlotState::Missing;
         uint32_t generation = 0;
+        MediaMetadata metadata;
         int result = 0;
         const char* error = "invalid saved photo";
     };
 
-    // Builds a retained RGB888 photo header containing its generation and CRC.
-    static void BuildSavedPhotoHeader(uint8_t* header, uint32_t generation, uint32_t checksum);
+    // Builds a saved-photo header with metadata and separate checksums.
+    static void BuildSavedPhotoHeader(uint8_t* header, const MediaMetadata& metadata, uint32_t generation, uint32_t checksum);
+
+    // Validates a current or legacy stored photo and its provisional pixels.
+    static SavedPhotoSlot ReadAndValidatePhotoFile(const char* path, ImageSink sink, void* context);
 
     // Reads and validates one retained photo, optionally delivering its pixels.
     static SavedPhotoSlot ReadSavedPhotoSlot(unsigned index, ImageSink sink = nullptr, void* context = nullptr);
@@ -122,7 +133,7 @@ private:
     static int FindNewestSavedPhoto(const SavedPhotoSlot* slots);
 
     // Streams a new retained photo into the selected alternate slot.
-    static bool WriteSavedPhotoSlot(unsigned index, uint32_t generation, ImageSource source, void* context, int& result);
+    static bool WriteSavedPhotoSlot(unsigned index, uint32_t generation, const MediaMetadata& metadata, ImageSource source, void* context, int& result);
 
     bool ready_ = false;
     const char* error_ = "storage not initialized";

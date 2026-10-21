@@ -629,40 +629,93 @@ FrameBufferController::AbortFrame (
 } // AbortFrame
 
 /**
-    Claims a complete RGB888 photo transfer without waiting for another owner.
-
-    A zero token means rendering or a previous upload still owns the frame. The
-    receiver validates the exact payload size and keeps fragmented pixels together.
+    Starts a full-panel RGB888 photo upload with default metadata.
 
     @param bytes Complete RGB888 photo payload length.
 
-    @return token - Nonzero ownership token for the accepted transfer.
-    @return 0 - The expected frame size or ownership state prevented reception.
+    @return token - Nonzero ownership token for the accepted upload.
+    @return 0 - Size or ownership prevents starting this upload.
 */
 FrameBufferController::Token
 FrameBufferController::BeginFrame (
     size_t bytes
     )
 {
-    return m_receiver.Begin(bytes);
+    return BeginFrame(bytes, MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT));
 } // BeginFrame
 
 /**
-    Publishes a completely received photo through its current ownership token.
+    Starts a photo upload with the requested frame size and metadata.
 
-    The completed revision lets foreground persistence attempt a save only once.
-    With pending-frame holding enabled, rendering must claim the frame before a
-    new upload can replace the pixels.
+    The common descriptor can describe video, but this receiver still accepts
+    only one RGB888 photo matching the complete panel. Pending metadata changes
+    only after ownership is acquired; a rejected upload leaves the active frame
+    and its description unchanged.
 
-    @param owner Ownership token returned by BeginFrame.
+    @param bytes Number of bytes to process.
+    @param metadata Logical photo type, dimensions, pixel format and timing.
 
-    @return true - The exact frame payload was accepted and published.
-    @return false - The owner is stale or the payload is incomplete.
+    @return token - Nonzero ownership token for the new photo upload.
+    @return 0 - The metadata, frame size or framebuffer ownership prevents starting the upload.
+*/
+FrameBufferController::Token
+FrameBufferController::BeginFrame (
+    size_t bytes,
+    const MediaMetadata& metadata
+    )
+{
+    uint64_t payload;
+    uint32_t token;
+
+    // The descriptor can express videos, but this receiver still owns one photo.
+    if (metadata.pixelFormat != PixelFormat::RGB888 ||
+        !metadata.IsPhotoFor(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT) || !metadata.PayloadBytes(payload) ||
+        payload != bytes) {
+        return 0;
+    }
+    token = m_receiver.Begin(bytes);
+    if (token) {
+        m_pendingMetadata = metadata;
+    }
+    return token;
+} // BeginFrame
+
+/**
+    Publishes a complete upload with its pending photo metadata.
+
+    Validates completion before changing the current descriptor. Metadata is
+    installed while the upload still owns the framebuffer, then Finish publishes
+    the new revision and releases or holds it for foreground persistence.
+
+    @param owner Ownership token returned when this upload was started.
+
+    @return true - The completed upload was published.
+    @return false - The token is invalid or the complete frame is not yet available.
 */
 bool
 FrameBufferController::FinishFrame (
     Token owner
     )
 {
+    if (!m_receiver.CanFinish(owner)) {
+        return false;
+    }
+    m_metadata = m_pendingMetadata;
     return m_receiver.Finish(owner);
 } // FinishFrame
+
+
+/**
+    Returns metadata for the current completed frame.
+
+    Read under foreground render ownership, or in serialized transport context.
+
+    @return metadata - Copy of the completed frame type, dimensions, format and timing.
+*/
+MediaMetadata
+FrameBufferController::GetFrameMetadata (
+    void
+    ) const
+{
+    return m_metadata;
+} // GetFrameMetadata

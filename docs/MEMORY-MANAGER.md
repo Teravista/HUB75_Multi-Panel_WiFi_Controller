@@ -63,8 +63,8 @@ is not retried continuously for the same frame revision.
 `SaveLastImage(source, context)` streams logical RGB888 pixels into alternating
 reserved `LASTA.H75` and `LASTB.H75` files. `ReadLastImage(sink, context)` selects
 the newest valid generation; a corrupt or incomplete replacement falls back to
-the previous valid copy. Each retained file has a 24-byte version-2 header, with
-a CRC covering the generation/header prefix and 98,304-byte payload. These files
+the previous valid copy. Each retained file has a 52-byte version-3 header, with
+separate CRCs covering the descriptor/generation header and 98,304-byte payload. These files
 are controller-owned and must not be used as arbitrary named-image destinations.
 
 Startup queues the flashed image, then attempts to restore a verified saved
@@ -76,3 +76,12 @@ This stage uses explicit initialization; automatic SD remount recovery is separa
 The `PhotoPersistence` bridge connects MemoryManager to FrameBufferController.
 FrameReceiver supplies ownership tokens and completed-frame revisions; TCP
 callbacks only receive/map pixels. Filesystem work remains in foreground code.
+
+## Per-photo metadata
+
+New named and retained photos use the version-3 container with a per-photo
+media descriptor and independent header/payload checksums. Existing version-1
+named images and version-2 retained saves remain readable. The optional metadata
+output of `ReadImage` / `ReadLastImage` is published only after successful
+validation; `SaveLastImage` also accepts an explicit full-panel RGB888 photo
+descriptor. See [media metadata](MEDIA-METADATA.md) for layouts and API details.
