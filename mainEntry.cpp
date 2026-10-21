@@ -9,7 +9,7 @@
 #include "sd/include/MemoryManagerClass.hpp"
 #include "media/include/PhotoPersistenceClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "photo-sd-storage"
+#define WIFI_STATE_MACHINE_REV "photo-media-metadata"
 
 /**
     Prepares and submits display frames while advancing photo and network services.
@@ -48,6 +48,7 @@ RenderLoop (
     uint32_t elapsedMs;
     const unsigned char* uploadedFrame = nullptr;
     PhotoPersistence::SaveResult saved;
+    MediaMetadata metadata;
 
     frameIndex = FIRST_FRAME_INDEX;
     animationMovingForward = true;
@@ -73,7 +74,10 @@ RenderLoop (
         // Save unmodified logical pixels before drawing connection status.
         saved = photos.SaveUploadedImage();
         if (saved == PhotoPersistence::SaveResult::Saved) {
-            printf("[memory] uploaded photo saved and verified\n");
+            metadata = upload.GetFrameMetadata();
+            printf("[memory] photo saved format=%s frames=%u fps=%u/%u\n",
+                   metadata.FormatName(), unsigned(metadata.frameCount),
+                   unsigned(metadata.fpsNumerator), unsigned(metadata.fpsDenominator));
         } else if (saved == PhotoPersistence::SaveResult::Failed) {
             printf("[memory] photo save failed: %s; keeping live photo\n", memory.GetLastError());
         }

@@ -5,6 +5,7 @@
 #include "lwip/tcp.h"
 #include "config/defines.h"
 #include "network/include/FrameReceiverClass.hpp"
+#include "media/include/mediaMetadata.hpp"
 
 /**
     Connects raw photo reception and storage readback to the shared CPU framebuffer.
@@ -44,6 +45,12 @@ public:
     // Starts a full-panel RGB888 photo upload with the expected payload size.
     Token BeginFrame(size_t bytes);
 
+    // Starts a photo upload with a validated explicit media descriptor.
+    Token BeginFrame(size_t bytes, const MediaMetadata& metadata);
+
+    // Returns metadata for the current completed frame under render ownership.
+    MediaMetadata GetFrameMetadata(void) const;
+
     // Feeds bytes to the frame upload identified by its ownership token.
     bool FeedFrame(Token owner, const uint8_t* bytes, size_t count);
 
@@ -78,6 +85,8 @@ private:
     DisplayHelpers* m_displayHelpers;
     unsigned char* m_frameBuffer;
     FrameReceiver m_receiver;
+    MediaMetadata m_metadata = MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);
+    MediaMetadata m_pendingMetadata;
     tcp_pcb* m_listenerPcb = nullptr;
     uint16_t m_listenerPort = 0;
     tcp_pcb* m_clientPcb = nullptr;

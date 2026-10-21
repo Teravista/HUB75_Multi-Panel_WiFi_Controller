@@ -17,8 +17,9 @@ PhotoPersistence::PhotoPersistence (
 /**
     Restores the newest verified saved photo to the framebuffer.
 
-    Before the radio/network callbacks start. A failed provisional load is aborted so normal
-    rendering replaces it with the flashed image.
+    Runs before radio/network callbacks start. The storage reader verifies the
+    descriptor and payload before publication. A failed provisional load is
+    aborted so normal rendering replaces it with the flashed image.
 
     @return true - The newest valid stored photo was restored to the display buffer.
     @return false - No valid photo was available or restoration failed.
@@ -29,6 +30,7 @@ PhotoPersistence::RestoreLastImage (
     )
 {
     uint32_t token;
+    MediaMetadata metadata;
 
     // Restore through the same guarded receive path used by uploads; abandon provisional pixels on
     // failure.
@@ -37,7 +39,8 @@ PhotoPersistence::RestoreLastImage (
         return false;
     }
     RestoreContext context{upload_, token};
-    if (!memory_.ReadLastImage(Consume, &context) || !upload_.FinishFrame(token)) {
+    if (!memory_.ReadLastImage(Consume, &context, &metadata) ||
+        !metadata.IsPhotoFor(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT) || !upload_.FinishFrame(token)) {
         upload_.AbortFrame(token);
         return false;
     }
@@ -68,7 +71,7 @@ PhotoPersistence::SaveUploadedImage (
         return SaveResult::Unchanged;
     }
     attemptedRevision_ = revision;
-    if (!memory_.IsReady() || !memory_.SaveLastImage(Produce, &upload_)) {
+    if (!memory_.IsReady() || !memory_.SaveLastImage(upload_.GetFrameMetadata(), Produce, &upload_)) {
         return SaveResult::Failed;
     }
     return SaveResult::Saved;

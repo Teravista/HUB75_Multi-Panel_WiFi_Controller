@@ -380,7 +380,7 @@ MemoryManager::GetLastError (
 /**
     Writes a new named photo without replacing an existing file.
 
-    Creates a new file with exclusive-create semantics, builds the fixed photo header and writes
+    Creates a new file with exclusive-create semantics, builds the descriptor-bearing photo header and writes
     the caller's stable RGB888 image in bounded chunks. The full payload checksum is computed
     before writing, and successful completion includes closing the file. A failed or short write
     triggers cleanup instead of intentionally replacing an existing image. This is a synchronous
@@ -403,7 +403,8 @@ MemoryManager::SaveImage (
 {
     char path[MaximumNameLength + STORAGE_PATH_PREFIX_AND_TERMINATOR_BYTES];
     FRESULT result;
-    uint8_t header[HeaderBytes];
+    uint8_t header[LastHeaderBytes];
+    MediaMetadata metadata;
     UINT written;
     bool complete;
     size_t offset;
@@ -438,7 +439,9 @@ MemoryManager::SaveImage (
 
     // Build the on-card header, including dimensions, payload size and checksum.
     std::memset(header, 0, sizeof(header));
-    BuildPhotoStorageHeader(header, ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, pixels, bytes));
+    metadata = MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);
+    BuildSavedPhotoHeader(header, metadata, 0,
+                          ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, pixels, bytes));
     written = 0;
     result = f_write(&storage_.imageFile, header, sizeof(header), &written);
     complete = result == FR_OK && written == sizeof(header);
@@ -466,43 +469,32 @@ MemoryManager::SaveImage (
 } // SaveImage
 
 /**
-    Streams a named RGB888 photo and validates its dimensions and checksum.
+    Streams a named RGB888 photo and validates its metadata and checksum.
 
-    Validates the exact header and file length before streaming bounded RGB888 fragments into
-    the borrowed sink. A running payload CRC is checked after all pixels are consumed, and file-
-    close errors also prevent success. Earlier sink data is provisional: the caller must publish
-    an image only after the whole operation succeeds. Reentrant storage access is rejected by
-    the held guard.
+    Supports legacy named/retained headers and the descriptor-bearing v3 format.
+    The shared reader checks the header and exact photo dimensions before pixels
+    reach the synchronous sink. Fragments remain provisional until payload CRC and
+    close succeed; the optional metadata output is published only after success.
 
-    @param name Filename in the card root; directory separators and invalid names are rejected.
-    @param sink Callback that consumes pixel chunks; false cancels the current frame.
-    @param context Caller-owned state passed unchanged to the callback.
+    @param name Valid root filename to read.
+    @param sink Synchronous RGB888 pixel consumer.
+    @param context Borrowed consumer state for the duration of the read.
+    @param metadata Optional descriptor output; unchanged on failure.
 
-    @return true - The storage operation completed successfully.
-    @return false - Input, storage availability, file I/O or verification prevented completion;
-                    GetLastError() gives the reason.
+    @return true - The complete photo and its metadata passed verification.
+    @return false - Input, storage, header, consumer, checksum or close failed.
 */
 bool
 MemoryManager::ReadImage (
     const char* name,
     ImageSink sink,
-    void* context
+    void* context,
+    MediaMetadata* metadata
     )
 {
     char path[MaximumNameLength + STORAGE_PATH_PREFIX_AND_TERMINATOR_BYTES];
-    FRESULT result;
-    uint8_t header[HeaderBytes];
-    uint8_t expected[HeaderBytes];
-    UINT count;
-    bool complete;
-    uint32_t expectedCrc;
-    const char* failure = nullptr;
-    uint32_t crc;
-    size_t offset;
-    UINT bytes;
-    FRESULT closeResult;
+    SavedPhotoSlot loaded;
 
-    // Claim the shared storage buffer before filesystem access or user callbacks.
     StorageGuard guard;
     if (!guard.acquired) {
         return ReportStorageFailure("storage busy");
@@ -510,68 +502,21 @@ MemoryManager::ReadImage (
     if (!ready_) {
         return ReportStorageFailure("storage not ready");
     }
-
-    // Validate the root filename and image inputs before opening a file.
     if (!BuildValidatedImagePath(name, path)) {
         return ReportStorageFailure("invalid image filename");
     }
-
     if (!sink) {
         return ReportStorageFailure("missing image consumer");
     }
 
-    // Open the saved file before validating its header and reading pixels.
-    result = f_open(&storage_.imageFile, path, FA_READ);
-    if (result != FR_OK) {
-        return ReportStorageFailure("image open failed", result);
+    // Deliver provisional pixels under the storage guard; publish metadata last.
+    loaded = ReadAndValidatePhotoFile(path, sink, context);
+    if (loaded.state != SlotState::Valid) {
+        return ReportStorageFailure(loaded.error, loaded.result);
     }
-
-    // Validate the file header and declared size before accepting pixel data.
-    std::memset(header, 0, sizeof(header));
-    std::memset(expected, 0, sizeof(expected));
-    count = 0;
-    result = f_read(&storage_.imageFile, header, sizeof(header), &count);
-    complete = result == FR_OK && count == sizeof(header) &&
-                    f_size(&storage_.imageFile) == SOURCE_FRAME_SIZE_BYTES + HeaderBytes;
-    expectedCrc = ReadUnsigned32LittleEndian(header + PHOTO_HEADER_CHECKSUM_OFFSET);
-    BuildPhotoStorageHeader(expected, expectedCrc);
-    complete = complete && !std::memcmp(header, expected, sizeof(header));
-    failure = "invalid stored image header or size";
-    crc = STORAGE_CRC32_INITIAL_U;
-
-    // Read bounded chunks and verify their checksum; delivered pixels remain provisional.
-    for (offset = 0; complete && offset < SOURCE_FRAME_SIZE_BYTES;) {
-        bytes = UINT(std::min(ChunkBytes, SOURCE_FRAME_SIZE_BYTES - offset));
-        result = f_read(&storage_.imageFile, storage_.readBuffer, bytes, &count);
-        complete = result == FR_OK && count == bytes;
-        failure = "image data read failed";
-        if (complete) {
-            crc = UpdateImageCrc32(crc, storage_.readBuffer, bytes);
-            complete = sink(context, storage_.readBuffer, bytes, offset);
-            if (!complete) {
-                failure = "image consumer rejected data";
-            }
-        }
-        offset += count;
+    if (metadata) {
+        *metadata = loaded.metadata;
     }
-
-    // Accept the payload only when its complete CRC matches the stored checksum.
-    if (complete && ~crc != expectedCrc) {
-        complete = false;
-        failure = "stored image checksum mismatch";
-    }
-
-    // Close the file and preserve any transfer or close error before reporting success.
-    closeResult = f_close(&storage_.imageFile);
-    if (closeResult != FR_OK) {
-        result = closeResult;
-        failure = "image close failed";
-        complete = false;
-    }
-    if (!complete) {
-        return ReportStorageFailure(failure, result);
-    }
-
     error_ = "none";
     return true;
 } // ReadImage
@@ -667,44 +612,217 @@ MemoryManager::RunReadWriteCheck (
 } // RunReadWriteCheck
 
 /**
-    Builds a retained RGB888 photo header containing its generation and CRC.
+    Builds a saved-photo header with its generation and checksum.
 
-    The versioned header includes the generation in the checksum-covered prefix.
-    A retained slot is accepted only after both this prefix and every payload byte
-    reproduce the final CRC stored at the end of the header.
+    Encodes the photo's generation, media descriptor and expected payload CRC into the fixed
+    saved-photo header, then checksums that header separately. The caller has already validated
+    metadata and supplies enough output storage. Building the header performs no I/O and does not
+    make an in-progress file valid by itself.
 
-    @param header Caller-provided output with SAVED_PHOTO_HEADER_BYTES bytes.
-    @param generation Sequence identifying this saved photo.
-    @param checksum Final CRC of the header prefix and RGB888 payload.
+    @param header Buffer holding the storage or HTTP header.
+    @param metadata Media dimensions, pixel format, placement and playback settings.
+    @param generation Sequence number used to identify the newest valid stored copy.
+    @param checksum Expected CRC32 checksum of the media payload.
 */
 void
 MemoryManager::BuildSavedPhotoHeader (
     uint8_t* header,
+    const MediaMetadata& metadata,
     uint32_t generation,
     uint32_t checksum
     )
 {
-    std::memset(header, 0, SAVED_PHOTO_HEADER_BYTES);
-    BuildPhotoStorageHeader(header, 0);
+    std::memset(header, 0, LastHeaderBytes);
     std::memcpy(header, "H75L", MEDIA_MAGIC_BYTES);
-    header[STORAGE_HEADER_VERSION_OFFSET] = SAVED_PHOTO_VERSION;
-    WriteUnsigned32LittleEndian(header + SAVED_PHOTO_GENERATION_OFFSET, generation);
-    WriteUnsigned32LittleEndian(header + SAVED_PHOTO_CHECKSUM_OFFSET, checksum);
+    header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_SAVED_PHOTO;
+    MediaMetadataCodec::WriteUnsigned16LittleEndian(header + STORAGE_HEADER_LENGTH_OFFSET, LastHeaderBytes);
+    WriteUnsigned32LittleEndian(header + STORAGE_HEADER_GENERATION_OFFSET, generation);
+    MediaMetadataCodec::EncodeMediaDescriptor(metadata, header + STORAGE_HEADER_METADATA_OFFSET,
+                                              MediaMetadataCodec::HeaderBytes);
+    WriteUnsigned32LittleEndian(header + SAVED_PHOTO_PAYLOAD_CRC_OFFSET, checksum);
+    WriteUnsigned32LittleEndian(
+        header + SAVED_PHOTO_HEADER_CRC_OFFSET,
+        ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, SAVED_PHOTO_HEADER_CRC_OFFSET));
 } // BuildSavedPhotoHeader
+
+/**
+    Validates a stored photo while streaming provisional pixel data.
+
+    Recognizes supported current and legacy photo headers, checks the declared file size and
+    reconstructs compatible metadata where older formats lack a descriptor. It then reads the
+    complete RGB888 payload in bounded chunks while accumulating the correct version-specific
+    checksum.
+
+    Sink calls run synchronously as chunks arrive, so their pixels remain provisional until the
+    final checksum and file close both succeed. The result distinguishes missing, invalid and
+    I/O-failed files, allowing callers to fall back on damaged content without hiding an actual
+    card communication failure.
+
+    @param path Storage path used by this operation.
+    @param sink Callback that consumes pixel chunks; false cancels the current frame.
+    @param context Caller-owned state passed unchanged to the callback.
+
+    @return result - Inspection/read result including validity, metadata and any I/O or
+                     validation error.
+*/
+MemoryManager::SavedPhotoSlot
+MemoryManager::ReadAndValidatePhotoFile (
+    const char* path,
+    ImageSink sink,
+    void* context
+    )
+{
+    SavedPhotoSlot slot;
+    uint8_t header[LastHeaderBytes];
+    uint8_t expected[LegacyLastHeaderBytes];
+    UINT count;
+    size_t headerBytes;
+    bool complete;
+    uint32_t expectedCrc;
+    uint32_t crc;
+    uint32_t checksumOffset;
+    size_t offset;
+    UINT bytes;
+    FRESULT closeResult;
+
+    slot = {};
+
+    // Open the saved file before validating its header and reading pixels.
+    slot.result = f_open(&storage_.imageFile, path, FA_READ);
+    slot.error = "image open failed";
+    if (slot.result == FR_NO_FILE) {
+        return slot;
+    }
+    if (slot.result != FR_OK) {
+        slot.state = SlotState::IoError;
+        return slot;
+    }
+    slot.state = SlotState::Invalid;
+
+    // Validate the file header and declared size before accepting pixel data.
+    std::memset(header, 0, sizeof(header));
+    std::memset(expected, 0, sizeof(expected));
+    count = 0;
+    headerBytes = 0;
+    slot.result = f_read(&storage_.imageFile, header, STORAGE_HEADER_PREFIX_BYTES, &count);
+    complete = slot.result == FR_OK && count == STORAGE_HEADER_PREFIX_BYTES;
+    slot.error = "image header read failed";
+    if (complete) {
+        if (!std::memcmp(header, "H75I", MEDIA_MAGIC_BYTES) &&
+            header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_PHOTO) {
+            headerBytes = HeaderBytes;
+        } else if (!std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
+                   header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LEGACY_SAVED_PHOTO) {
+            headerBytes = LegacyLastHeaderBytes;
+        } else if (!std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
+                   header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_SAVED_PHOTO) {
+            headerBytes = LastHeaderBytes;
+        }
+        slot.error = "invalid stored image header";
+        complete = headerBytes != 0;
+    }
+    if (complete) {
+        slot.error = "invalid stored image size";
+        complete = f_size(&storage_.imageFile) == SOURCE_FRAME_SIZE_BYTES + headerBytes;
+    }
+    if (complete) {
+        slot.result = f_read(&storage_.imageFile, header + STORAGE_HEADER_PREFIX_BYTES,
+                             UINT(headerBytes - STORAGE_HEADER_PREFIX_BYTES), &count);
+        slot.error = "image header read failed";
+        complete = slot.result == FR_OK && count == headerBytes - STORAGE_HEADER_PREFIX_BYTES;
+    }
+    expectedCrc = 0;
+    crc = STORAGE_CRC32_INITIAL_U;
+    if (complete) {
+        slot.error = "invalid stored image header";
+        if (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_SAVED_PHOTO) {
+            slot.generation = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_GENERATION_OFFSET);
+            expectedCrc = ReadUnsigned32LittleEndian(header + SAVED_PHOTO_PAYLOAD_CRC_OFFSET);
+            complete =
+                header[STORAGE_HEADER_RESERVED_OFFSET] == 0 &&
+                MediaMetadataCodec::ReadUnsigned16LittleEndian(header + STORAGE_HEADER_LENGTH_OFFSET) ==
+                    LastHeaderBytes &&
+                ReadUnsigned32LittleEndian(header + SAVED_PHOTO_HEADER_CRC_OFFSET) ==
+                    ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, SAVED_PHOTO_HEADER_CRC_OFFSET) &&
+                MediaMetadataCodec::DecodeMediaDescriptor(header + STORAGE_HEADER_METADATA_OFFSET,
+                                                          MediaMetadataCodec::HeaderBytes, slot.metadata) &&
+                slot.metadata.pixelFormat == PixelFormat::RGB888 &&
+                slot.metadata.IsPhotoFor(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);
+        } else {
+            // Legacy files had no media type/FPS/format. They were
+            // single RGB888 panel photos, so synthesize that descriptor.
+            slot.metadata = MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);
+            BuildPhotoStorageHeader(expected,
+                                    ReadUnsigned32LittleEndian(header + PHOTO_HEADER_CHECKSUM_OFFSET));
+            if (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LEGACY_SAVED_PHOTO) {
+                std::memcpy(expected, "H75L", MEDIA_MAGIC_BYTES);
+                expected[MEDIA_MAGIC_BYTES] = STORAGE_VERSION_LEGACY_SAVED_PHOTO;
+                slot.generation = ReadUnsigned32LittleEndian(header + PHOTO_LEGACY_GENERATION_OFFSET);
+                WriteUnsigned32LittleEndian(expected + PHOTO_LEGACY_GENERATION_OFFSET, slot.generation);
+                WriteUnsigned32LittleEndian(
+                    expected + PHOTO_LEGACY_CHECKSUM_OFFSET,
+                    ReadUnsigned32LittleEndian(header + PHOTO_LEGACY_CHECKSUM_OFFSET));
+                crc = UpdateImageCrc32(crc, header, PHOTO_LEGACY_CHECKSUM_OFFSET);
+            }
+            complete = !std::memcmp(header, expected, headerBytes);
+            checksumOffset = {};
+            if (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_PHOTO) {
+                checksumOffset = PHOTO_HEADER_CHECKSUM_OFFSET;
+            } else {
+                checksumOffset = PHOTO_LEGACY_CHECKSUM_OFFSET;
+            }
+            expectedCrc = ReadUnsigned32LittleEndian(header + checksumOffset);
+        }
+    }
+
+    // Read bounded chunks and verify their checksum; delivered pixels remain provisional.
+    for (offset = 0; complete && offset < SOURCE_FRAME_SIZE_BYTES;) {
+        bytes = UINT(std::min(ChunkBytes, SOURCE_FRAME_SIZE_BYTES - offset));
+        slot.result = f_read(&storage_.imageFile, storage_.readBuffer, bytes, &count);
+        slot.error = "image data read failed";
+        complete = slot.result == FR_OK && count == bytes;
+        if (complete) {
+            crc = UpdateImageCrc32(crc, storage_.readBuffer, bytes);
+            if (sink && !sink(context, storage_.readBuffer, bytes, offset)) {
+                slot.error = "image consumer rejected data";
+                complete = false;
+            }
+        }
+        offset += count;
+    }
+
+    // Accept the payload only when its complete CRC matches the stored checksum.
+    if (complete && ~crc != expectedCrc) {
+        complete = false;
+        slot.error = "stored image checksum mismatch";
+    }
+
+    // Close the file and preserve any transfer or close error before reporting success.
+    closeResult = f_close(&storage_.imageFile);
+
+    if (slot.result != FR_OK || closeResult != FR_OK) {
+        if (slot.result == FR_OK) {
+            slot.result = closeResult;
+            slot.error = "image close failed";
+        }
+        slot.state = SlotState::IoError;
+    } else if (complete) {
+        slot.state = SlotState::Valid;
+    }
+    return slot;
+} // ReadAndValidatePhotoFile
 
 /**
     Reads and validates one retained photo, optionally delivering its pixels.
 
-    Both the fixed RGB888 description and exact file length are checked before
-    streaming. Sink fragments remain provisional until the prefix/payload CRC
-    and file close succeed. Missing or damaged content is kept distinct from an
-    I/O failure so callers do not overwrite a card they cannot safely inspect.
+    Both retained slots use the same version-aware reader as named images.
+    Legacy files gain their known RGB888 photo descriptor without being rewritten.
 
     @param index Retained slot index, zero or one.
     @param sink Optional synchronous consumer; null performs validation only.
     @param context Borrowed consumer state valid until the read returns.
 
-    @return slot - Validity, generation and the relevant filesystem/error result.
+    @return slot - Validity, metadata, generation and any filesystem/error result.
 */
 MemoryManager::SavedPhotoSlot
 MemoryManager::ReadSavedPhotoSlot (
@@ -713,76 +831,14 @@ MemoryManager::ReadSavedPhotoSlot (
     void* context
     )
 {
-    SavedPhotoSlot slot;
     const char* path = nullptr;
-    uint8_t header[SAVED_PHOTO_HEADER_BYTES];
-    uint8_t expected[SAVED_PHOTO_HEADER_BYTES];
-    UINT count;
-    FRESULT result;
-    FRESULT closed;
-    bool good;
-    uint32_t checksum;
-    uint32_t crc;
-    size_t offset;
-    UINT bytes;
 
     if (index == 0) {
         path = "0:/LASTA.H75";
     } else {
         path = "0:/LASTB.H75";
     }
-    result = f_open(&storage_.imageFile, path, FA_READ);
-    slot.result = result;
-    if (result == FR_NO_FILE) {
-        return slot;
-    }
-    if (result != FR_OK) {
-        slot.state = SlotState::IoError;
-        slot.error = "saved photo open failed";
-        return slot;
-    }
-
-    slot.state = SlotState::Invalid;
-    std::memset(header, 0, sizeof(header));
-    count = 0;
-    result = f_read(&storage_.imageFile, header, sizeof(header), &count);
-    slot.generation = ReadUnsigned32LittleEndian(header + SAVED_PHOTO_GENERATION_OFFSET);
-    checksum = ReadUnsigned32LittleEndian(header + SAVED_PHOTO_CHECKSUM_OFFSET);
-    BuildSavedPhotoHeader(expected, slot.generation, checksum);
-    good = result == FR_OK && count == sizeof(header) &&
-           f_size(&storage_.imageFile) == SOURCE_FRAME_SIZE_BYTES + sizeof(header) &&
-           !std::memcmp(header, expected, sizeof(header));
-    crc = UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, SAVED_PHOTO_CHECKSUM_OFFSET);
-
-    for (offset = 0; good && offset < SOURCE_FRAME_SIZE_BYTES;) {
-        bytes = UINT(std::min(ChunkBytes, SOURCE_FRAME_SIZE_BYTES - offset));
-        result = f_read(&storage_.imageFile, storage_.readBuffer, bytes, &count);
-        good = result == FR_OK && count == bytes;
-        if (good) {
-            crc = UpdateImageCrc32(crc, storage_.readBuffer, count);
-            if (sink && !sink(context, storage_.readBuffer, count, offset)) {
-                slot.error = "saved photo consumer rejected data";
-                good = false;
-            }
-        }
-        offset += count;
-    }
-    if (good && ~crc != checksum) {
-        slot.error = "saved photo checksum mismatch";
-        good = false;
-    }
-    closed = f_close(&storage_.imageFile);
-    if (result == FR_OK) {
-        result = closed;
-    }
-    slot.result = result;
-    if (result != FR_OK) {
-        slot.state = SlotState::IoError;
-        slot.error = "saved photo read/close failed";
-    } else if (good) {
-        slot.state = SlotState::Valid;
-    }
-    return slot;
+    return ReadAndValidatePhotoFile(path, sink, context);
 } // ReadSavedPhotoSlot
 
 /**
@@ -817,13 +873,14 @@ MemoryManager::FindNewestSavedPhoto (
 /**
     Streams a new retained photo into the selected alternate slot.
 
-    The source is read in bounded chunks while CRC state includes the generation
-    header prefix. Only after the payload is written is its final header installed
+    The source is read in bounded chunks while its payload CRC accumulates.
+    Metadata and generation have a separate checksum in the final header. Only after the payload is written is its final header installed
     and the file closed. A failed write leaves the other retained generation intact.
     Actual card I/O failure avoids additional cleanup writes to that session.
 
     @param index Destination slot index, zero or one.
     @param generation New generation number.
+    @param metadata Validated exact-panel RGB888 photo description.
     @param source Synchronous stable RGB888 pixel producer.
     @param context Borrowed source state for this save.
     @param result Output filesystem status for failure reporting.
@@ -835,13 +892,14 @@ bool
 MemoryManager::WriteSavedPhotoSlot (
     unsigned index,
     uint32_t generation,
+    const MediaMetadata& metadata,
     ImageSource source,
     void* context,
     int& result
     )
 {
     const char* path = nullptr;
-    uint8_t header[SAVED_PHOTO_HEADER_BYTES];
+    uint8_t header[LastHeaderBytes];
     uint32_t crc;
     UINT count;
     FRESULT status;
@@ -860,8 +918,8 @@ MemoryManager::WriteSavedPhotoSlot (
     if (status != FR_OK) {
         return false;
     }
-    BuildSavedPhotoHeader(header, generation, 0);
-    crc = UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, SAVED_PHOTO_CHECKSUM_OFFSET);
+    BuildSavedPhotoHeader(header, metadata, generation, 0);
+    crc = STORAGE_CRC32_INITIAL_U;
     count = 0;
     status = f_write(&storage_.imageFile, header, sizeof(header), &count);
     good = status == FR_OK && count == sizeof(header);
@@ -877,7 +935,7 @@ MemoryManager::WriteSavedPhotoSlot (
         offset += count;
     }
     if (good) {
-        BuildSavedPhotoHeader(header, generation, ~crc);
+        BuildSavedPhotoHeader(header, metadata, generation, ~crc);
         status = f_lseek(&storage_.imageFile, 0);
         if (status == FR_OK) {
             status = f_write(&storage_.imageFile, header, sizeof(header), &count);
@@ -904,6 +962,28 @@ MemoryManager::WriteSavedPhotoSlot (
 } // WriteSavedPhotoSlot
 
 /**
+    Saves a retained RGB888 photo with the default full-panel descriptor.
+
+    Existing callers keep the raw-photo API. The metadata-aware overload performs
+    all validation, locking, alternate-slot selection and readback verification.
+
+    @param source Stable logical RGB888 pixel producer.
+    @param context Borrowed source state valid until the save completes.
+
+    @return true - A new photo generation was saved and verified.
+    @return false - Availability, input, I/O or verification prevented the save.
+*/
+bool
+MemoryManager::SaveLastImage (
+    ImageSource source,
+    void* context
+    )
+{
+    return SaveLastImage(MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT),
+                         source, context);
+} // SaveLastImage
+
+/**
     Saves a new retained photo while keeping the previous valid generation.
 
     Inspects both retained slots before choosing the alternate destination. Source
@@ -911,6 +991,7 @@ MemoryManager::WriteSavedPhotoSlot (
     save is reported successful. A source callback must not re-enter storage, and
     its image must stay stable throughout the call. No extra full frame is allocated.
 
+    @param metadata Exact-panel RGB888 photo descriptor to retain with the pixels.
     @param source Stable logical RGB888 pixel producer.
     @param context Borrowed source state valid until this call completes.
 
@@ -919,6 +1000,7 @@ MemoryManager::WriteSavedPhotoSlot (
 */
 bool
 MemoryManager::SaveLastImage (
+    const MediaMetadata& metadata,
     ImageSource source,
     void* context
     )
@@ -934,6 +1016,10 @@ MemoryManager::SaveLastImage (
     StorageGuard guard;
     if (!guard.acquired || !ready_ || !source) {
         return ReportStorageFailure("photo storage busy/unavailable or missing source");
+    }
+    if (metadata.pixelFormat != PixelFormat::RGB888 ||
+        !metadata.IsPhotoFor(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) {
+        return ReportStorageFailure("unsupported photo metadata");
     }
     for (index = 0; index < SAVED_PHOTO_SLOT_COUNT; ++index) {
         slots[index] = ReadSavedPhotoSlot(unsigned(index));
@@ -952,7 +1038,7 @@ MemoryManager::SaveLastImage (
         generation = slots[latest].generation + 1;
     }
     result = FR_OK;
-    if (!WriteSavedPhotoSlot(target, generation, source, context, result)) {
+    if (!WriteSavedPhotoSlot(target, generation, metadata, source, context, result)) {
         return ReportStorageFailure("saved photo write failed", result);
     }
     verified = ReadSavedPhotoSlot(target);
@@ -973,6 +1059,7 @@ MemoryManager::SaveLastImage (
 
     @param sink Synchronous consumer of logical RGB888 fragments.
     @param context Borrowed consumer state valid until this call completes.
+    @param metadata Optional descriptor output; unchanged unless the read succeeds.
 
     @return true - The selected retained photo was streamed and verified.
     @return false - No valid copy exists or availability, callback or I/O failed.
@@ -980,7 +1067,8 @@ MemoryManager::SaveLastImage (
 bool
 MemoryManager::ReadLastImage (
     ImageSink sink,
-    void* context
+    void* context,
+    MediaMetadata* metadata
     )
 {
     SavedPhotoSlot slots[SAVED_PHOTO_SLOT_COUNT];
@@ -1005,6 +1093,9 @@ MemoryManager::ReadLastImage (
     loaded = ReadSavedPhotoSlot(unsigned(latest), sink, context);
     if (loaded.state != SlotState::Valid) {
         return ReportStorageFailure(loaded.error, loaded.result);
+    }
+    if (metadata) {
+        *metadata = loaded.metadata;
     }
     error_ = "none";
     return true;
