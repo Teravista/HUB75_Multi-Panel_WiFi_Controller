@@ -197,6 +197,9 @@ for field meanings, the binary layout and compatibility.
 SD bulk I/O uses a negotiated clock, larger reads and faster CRC32 checks.
 See [SD throughput](docs/SD-OPTIMIZATION.md) for behavior, RAM cost and diagnostics.
 
+Raw videos can be uploaded from Python, verified on SD and replayed after reboot.
+See [video upload and playback](docs/VIDEO-UPLOAD.md) for defaults, protocol and storage.
+
 ## WiFi State Machine
 
 The state machine has three states - `NoWifi`, `WifiNoTcp`, and `Ready` - advanced once per main loop iteration by `UpdateNetworkStateMachine()`.

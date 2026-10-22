@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // is single frame flashed as base image or the animation used as default display
-#define USE_ANIMATION 1
+#define USE_ANIMATION 0
 
 
 #if USE_ANIMATION

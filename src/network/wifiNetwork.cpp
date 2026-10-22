@@ -1,4 +1,5 @@
 #include "network/wifiNetwork.hpp"
+#include "network/include/TcpVideoUploadClass.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -13,10 +14,19 @@
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "networkConfig.h"
 
-WifiNetwork::WifiNetwork(FrameBufferController *networkUpload)
-    : m_networkUpload(networkUpload)
+/**
+    Connects the Wi-Fi lifecycle to photo and video upload services.
+
+    @param networkUpload Existing raw-photo TCP service.
+    @param videoUpload Optional raw-video listener stopped before radio teardown.
+*/
+WifiNetwork::WifiNetwork (
+    FrameBufferController* networkUpload,
+    TcpVideoUpload* videoUpload
+    ) : m_networkUpload(networkUpload), m_videoUpload(videoUpload)
 {
-}
+    return;
+} // WifiNetwork
 
 /*
     Returns a human-readable name for a CYW43 link status code.
@@ -100,6 +110,9 @@ void WifiNetwork::EnterNoWifiState(const char *reason)
         tcp_abort(m_gatewayProbePcb);
         m_gatewayProbePcb = nullptr;
         cyw43_arch_lwip_end();
+    }
+    if (m_videoUpload != nullptr) {
+        m_videoUpload->Stop();
     }
     if (m_networkUpload != nullptr) {
         m_networkUpload->StopFrameUploadServer();
@@ -257,6 +270,9 @@ void WifiNetwork::RunWifiConnectSequence()
     printf("[net] connect sequence start\n");
 
     // Stop any existing listener and reset state before starting a new connection attempt.
+    if (m_videoUpload != nullptr) {
+        m_videoUpload->Stop();
+    }
     if (m_networkUpload != nullptr) {
         m_networkUpload->StopFrameUploadServer();
     }
@@ -377,7 +393,8 @@ void WifiNetwork::UpdateNetworkStateMachine()
         // Attempt to bind the TCP listener if the retry interval has elapsed.
         if (absolute_time_diff_us(get_absolute_time(), m_nextBindAttemptTime) <= 0) {
             m_nextBindAttemptTime = make_timeout_time_ms(TCP_BIND_RETRY_INTERVAL_MS);
-            if (m_networkUpload != nullptr && m_networkUpload->StartFrameUploadServer(IMAGE_UPLOAD_PORT)) {
+            if (m_networkUpload != nullptr && m_networkUpload->StartFrameUploadServer(IMAGE_UPLOAD_PORT) &&
+                (m_videoUpload == nullptr || m_videoUpload->Start())) {
                 printf("[net] -> ready\n");
                 m_netState = NetState::Ready;
             }

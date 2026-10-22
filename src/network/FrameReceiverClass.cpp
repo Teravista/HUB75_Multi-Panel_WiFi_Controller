@@ -262,3 +262,60 @@ FrameReceiver::Release (
     received_ = carryLength_ = 0;
     state_.store(next, std::memory_order_release);
 } // Release
+
+/**
+    Claims exclusive framebuffer access for saved-media work.
+
+    @return true - External media owns the framebuffer until explicitly released.
+    @return false - Another operation currently owns the framebuffer.
+*/
+bool
+FrameReceiver::TryBeginExternal (
+    void
+    )
+{
+    State expected;
+
+    expected = State::Idle;
+    return state_.compare_exchange_strong(expected, State::External, std::memory_order_acquire);
+} // TryBeginExternal
+
+/**
+    Releases exclusive saved-media framebuffer ownership.
+*/
+void
+FrameReceiver::EndExternal (
+    void
+    )
+{
+    state_.store(State::Idle, std::memory_order_release);
+} // EndExternal
+
+/**
+    Marks a saved-media frame as complete and advances its revision.
+
+    Foreground only while holding Render. Playback does not create an upload transaction, and
+    keeps ownership until the driver submission finishes.
+*/
+void
+FrameReceiver::PublishStoredFrame (
+    void
+    )
+{
+    if (++sequence_ == 0) {
+        ++sequence_;
+    }
+    frameRevision_.store(sequence_, std::memory_order_release);
+    hasFrame_.store(true, std::memory_order_release);
+} // PublishStoredFrame
+
+/**
+    Clears the availability of the previously published frame.
+*/
+void
+FrameReceiver::ClearStoredFrame (
+    void
+    )
+{
+    hasFrame_.store(false, std::memory_order_release);
+} // ClearStoredFrame

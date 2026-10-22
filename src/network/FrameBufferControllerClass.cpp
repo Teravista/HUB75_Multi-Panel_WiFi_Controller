@@ -701,6 +701,7 @@ FrameBufferController::FinishFrame (
         return false;
     }
     m_metadata = m_pendingMetadata;
+    m_fromStorage = false;
     return m_receiver.Finish(owner);
 } // FinishFrame
 
@@ -719,3 +720,135 @@ FrameBufferController::GetFrameMetadata (
 {
     return m_metadata;
 } // GetFrameMetadata
+
+/**
+    Claims exclusive framebuffer ownership for saved-media work.
+
+    @return true - External media owns the framebuffer until explicitly released.
+    @return false - Another operation currently owns the framebuffer.
+*/
+bool
+FrameBufferController::TryBeginExternalMedia (
+    void
+    )
+{
+    return m_receiver.TryBeginExternal();
+} // TryBeginExternalMedia
+
+/**
+    Releases exclusive saved-media framebuffer ownership.
+*/
+void
+FrameBufferController::EndExternalMedia (
+    void
+    )
+{
+    m_receiver.EndExternal();
+} // EndExternalMedia
+
+/**
+    Reports whether the current frame came from saved media.
+
+    @return true - The current published frame came from SD storage.
+    @return false - The current frame did not come from SD storage.
+*/
+bool
+FrameBufferController::IsStoredFrame (
+    void
+    ) const
+{
+    return m_fromStorage;
+} // IsStoredFrame
+
+/**
+    Publishes saved-media metadata and marks the frame complete.
+
+    @param metadata Media dimensions, pixel format, placement and playback settings.
+*/
+void
+FrameBufferController::PublishStoredFrame (
+    const MediaMetadata& metadata
+    )
+{
+    m_metadata = metadata;
+    m_fromStorage = true;
+    m_receiver.PublishStoredFrame();
+} // PublishStoredFrame
+
+/**
+    Clears the availability of the current saved frame.
+*/
+void
+FrameBufferController::ClearStoredFrame (
+    void
+    )
+{
+    m_receiver.ClearStoredFrame();
+} // ClearStoredFrame
+
+/**
+    Maps a stored RGB888 frame fragment into the CPU framebuffer.
+
+    The caller already holds render ownership. Mapping is calculated once for
+    each logical panel-row run; a signed stride then advances through physical
+    pixels. CpuFrame stores the configured CPU format without another full buffer.
+
+    @param bytes Read-only logical RGB888 pixels.
+    @param count Number of bytes in this complete-pixel fragment.
+    @param offset Byte offset in the logical full-panel frame.
+
+    @return true - Every pixel in the bounded fragment was mapped.
+    @return false - The pointer, range or RGB alignment is invalid.
+*/
+bool
+FrameBufferController::WriteStoredFramePixels (
+    const uint8_t* bytes,
+    size_t count,
+    size_t offset
+    )
+{
+    size_t pixel;
+    size_t remaining;
+    size_t run;
+    size_t index;
+    int logicalX;
+    int logicalY;
+    int x;
+    int y;
+    int nextX;
+    int nextY;
+    ptrdiff_t destination;
+    ptrdiff_t stride;
+
+    if (!bytes || offset > SOURCE_FRAME_SIZE_BYTES || count > SOURCE_FRAME_SIZE_BYTES - offset ||
+        offset % IMAGE_BYTES_PER_PIXEL || count % IMAGE_BYTES_PER_PIXEL) {
+        return false;
+    }
+    pixel = offset / IMAGE_BYTES_PER_PIXEL;
+    remaining = count / IMAGE_BYTES_PER_PIXEL;
+    while (remaining) {
+        logicalX = int(pixel % LOGICAL_IMAGE_WIDTH);
+        logicalY = int(pixel / LOGICAL_IMAGE_WIDTH);
+        run = std::min(remaining, size_t(LOGICAL_PANEL_WIDTH - logicalX % LOGICAL_PANEL_WIDTH));
+        x = 0;
+        y = 0;
+        m_displayHelpers->ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, x, y);
+        destination = (ptrdiff_t(y) * MATRIX_PANEL_WIDTH + x) * CpuFrame::PixelBytes;
+        stride = 0;
+        if (run > 1) {
+            nextX = 0;
+            nextY = 0;
+            m_displayHelpers->ConvertLogicalToPhysicalCoordinates(logicalX + 1, logicalY, nextX, nextY);
+            stride = (ptrdiff_t(nextY - y) * MATRIX_PANEL_WIDTH + nextX - x) * ptrdiff_t(CpuFrame::PixelBytes);
+        }
+        for (index = 0; index < run; ++index) {
+            CpuFrame::Store(m_frameBuffer + destination, bytes[IMAGE_RED_BYTE_OFFSET],
+                            bytes[IMAGE_GREEN_BYTE_OFFSET], bytes[IMAGE_BLUE_BYTE_OFFSET]);
+            destination += stride;
+            bytes += IMAGE_BYTES_PER_PIXEL;
+        }
+        pixel += run;
+        remaining -= run;
+    }
+    return true;
+} // WriteStoredFramePixels

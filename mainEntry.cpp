@@ -8,8 +8,10 @@
 #include "network/wifiNetwork.hpp"
 #include "sd/include/MemoryManagerClass.hpp"
 #include "media/include/PhotoPersistenceClass.hpp"
+#include "media/include/MediaPlayerClass.hpp"
+#include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "photo-media-metadata"
+#define WIFI_STATE_MACHINE_REV "raw-video-storage"
 
 /**
     Prepares and submits display frames while advancing photo and network services.
@@ -24,6 +26,8 @@
     @param wifiNetwork Existing local-network state controller.
     @param memory SD image-storage boundary.
     @param photos Automatic photo-save and startup-restore bridge.
+    @param player Verified saved-media playback scheduler.
+    @param video Bounded raw-video upload and verification service.
     @param graphics Shared CPU graphics source buffer.
 */
 static void
@@ -33,12 +37,15 @@ RenderLoop (
     WifiNetwork& wifiNetwork,
     MemoryManager& memory,
     PhotoPersistence& photos,
+    MediaPlayer& player,
+    TcpVideoUpload& video,
     CpuGraphics& graphics
     )
 {
     size_t frameIndex;
     bool animationMovingForward;
     bool storageStarted;
+    bool reloadVideo;
     uint32_t lastFrameCount;
     absolute_time_t lastFpsTime;
     uint32_t framesPerSecond;
@@ -62,24 +69,36 @@ RenderLoop (
         wifiNetwork.UpdateNetworkStateMachine();
         if (!storageStarted && wifiNetwork.IsRadioInitialized()) {
             storageStarted = true;
-            if (!memory.Initialize()) {
+            if (memory.Initialize()) {
+                player.RequestReload();
+            } else {
                 printf("[memory] saves unavailable: %s\n", memory.GetLastError());
             }
+        }
+        video.Update();
+        reloadVideo = video.TakeReloadRequest();
+        if (reloadVideo) {
+            player.RequestReload();
         }
         if (!upload.TryBeginRender()) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
             continue;
         }
 
-        // Save unmodified logical pixels before drawing connection status.
-        saved = photos.SaveUploadedImage();
-        if (saved == PhotoPersistence::SaveResult::Saved) {
-            metadata = upload.GetFrameMetadata();
-            printf("[memory] photo saved format=%s frames=%u fps=%u/%u\n",
-                   metadata.FormatName(), unsigned(metadata.frameCount),
-                   unsigned(metadata.fpsNumerator), unsigned(metadata.fpsDenominator));
-        } else if (saved == PhotoPersistence::SaveResult::Failed) {
-            printf("[memory] photo save failed: %s; keeping live photo\n", memory.GetLastError());
+        // Completed photo uploads replace playback; video transactions request a reload.
+        if (!reloadVideo && upload.GetUploadedFrameData() && !upload.IsStoredFrame()) {
+            player.Stop();
+            saved = photos.SaveUploadedImage();
+            if (saved == PhotoPersistence::SaveResult::Saved) {
+                metadata = upload.GetFrameMetadata();
+                printf("[memory] photo saved format=%s frames=%u fps=%u/%u\n",
+                       metadata.FormatName(), unsigned(metadata.frameCount),
+                       unsigned(metadata.fpsNumerator), unsigned(metadata.fpsDenominator));
+            } else if (saved == PhotoPersistence::SaveResult::Failed) {
+                printf("[memory] photo save failed: %s; keeping live photo\n", memory.GetLastError());
+            }
+        } else {
+            player.Update(to_ms_since_boot(get_absolute_time()));
         }
         uploadedFrame = upload.GetUploadedFrameData();
         if (!uploadedFrame) {
@@ -114,7 +133,7 @@ RenderLoop (
     Initializes the controller and restores a saved photo before networking starts.
 
     The flashed frame is queued first so display scanning has visible content
-    during SD probing. A verified retained photo replaces it; missing or damaged
+    during SD probing. A verified saved photo or first video frame replaces it; missing or damaged
     storage leaves the flashed image available. Startup temporarily releases SD
     resources for the initial radio claim and re-enables them from RenderLoop.
 
@@ -128,8 +147,10 @@ main (
     alignas(DMA_BUFFER_ALIGNMENT) static unsigned char frameBuffer[FRAME_BUFFER_SIZE_BYTES];
     DisplayHelpers displayHelpers;
     FrameBufferController upload(&displayHelpers, frameBuffer, true);
-    WifiNetwork wifiNetwork(&upload);
     MemoryManager memory;
+    static TcpVideoUpload video(memory, upload);
+    WifiNetwork wifiNetwork(&upload, &video);
+    MediaPlayer player(memory, upload);
     PhotoPersistence photos(memory, upload);
     CpuGraphics graphics(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, frameBuffer);
     bool restored;
@@ -154,12 +175,16 @@ main (
 
     restored = false;
     if (memory.Initialize()) {
-        restored = photos.RestoreLastImage();
+        if (upload.TryBeginRender()) {
+            restored = player.Restore(to_ms_since_boot(get_absolute_time()));
+            upload.EndRender();
+        }
         if (restored) {
             printf("[memory] saved photo restored\n");
         } else {
             printf("[memory] using flashed image: %s\n", memory.GetLastError());
         }
+        player.Stop();
         memory.Shutdown();
     } else {
         printf("[memory] using flashed image: %s\n", memory.GetLastError());
@@ -175,5 +200,5 @@ main (
         }
         upload.EndRender();
     }
-    RenderLoop(displayHelpers, upload, wifiNetwork, memory, photos, graphics);
+    RenderLoop(displayHelpers, upload, wifiNetwork, memory, photos, player, video, graphics);
 } // main

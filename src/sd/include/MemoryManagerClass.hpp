@@ -5,18 +5,18 @@
 #include "config/include/storageConfig.hpp"
 #include "config/defines.h"
 #include "media/include/mediaMetadata.hpp"
+#include "media/include/mediaTransfer.hpp"
 
 /**
-    Provides the initial SD image-storage boundary for the panel controller.
+    Provides the foreground SD storage boundary for saved photos and raw videos.
 
-    Foreground callers mount storage and save or stream one named logical RGB888
-    image through this class. It owns the filesystem handle, one shared 24 KiB read
-    buffer and hardware lifecycle without allocating another complete framebuffer.
-    Versioned descriptors retain per-photo metadata; legacy headers remain readable.
-    Exact file/header checks and payload/header CRCs protect readback; delivered fragments
-    remain provisional until the complete read succeeds. A non-waiting guard rejects
-    reentrant access, and a temporary-file self-check exercises save/read/cleanup. Alternating retained
-    photo slots preserve the previous valid generation during a replacement save.
+    It owns SPI, the filesystem, file handles and one shared 24 KiB I/O buffer.
+    Named photos and alternating retained generations use checked metadata and
+    CRCs; video transactions write and verify bounded segments without keeping
+    the clip in RAM. Playback streams one verified frame at a time. A non-waiting
+    guard protects files and scratch storage from reentrant access, while the
+    previous valid generation remains available during replacement. Consumers
+    publish pixel fragments only after their complete read succeeds.
 */
 class MemoryManager {
 public:
@@ -55,6 +55,33 @@ public:
 
     // Saves, rereads, and removes an unused temporary test image.
     bool RunReadWriteCheck(const uint8_t* pixels, size_t bytes);
+
+    // Starts an unpublished raw-video save while retaining the previous valid slot.
+    bool BeginMediaSave(const MediaMetadata& metadata, uint32_t payloadChecksum);
+
+    // Adds received video bytes to the bounded storage write buffer.
+    bool AppendMediaBytes(const uint8_t* bytes, size_t count);
+
+    // Flushes the completed upload and begins incremental readback verification.
+    bool StartMediaVerification(void);
+
+    // Verifies the next saved segment and publishes only after complete success.
+    bool VerifyMediaSaveStep(bool& complete);
+
+    // Cancels an unpublished video save and releases its temporary resources.
+    void AbortMediaSave(void);
+
+    // Reports whether a video save owns the shared storage buffer.
+    bool IsMediaSaveActive(void) const;
+
+    // Opens the newest valid photo or video for checked frame playback.
+    bool OpenLastMedia(MediaMetadata& metadata);
+
+    // Reads and verifies one frame from the selected saved media.
+    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context);
+
+    // Closes the active playback file and clears its runtime state.
+    void CloseMediaPlayback(void);
 
 private:
     static constexpr size_t HeaderBytes = PHOTO_HEADER_BYTES;
@@ -116,6 +143,10 @@ private:
         SlotState state = SlotState::Missing;
         uint32_t generation = 0;
         MediaMetadata metadata;
+        size_t dataOffset = 0;
+        uint32_t checksum = 0;
+        uint32_t crcSeed = STORAGE_CRC32_INITIAL_U;
+        bool frameChecksums = false;
         int result = 0;
         const char* error = "invalid saved photo";
     };
@@ -134,6 +165,63 @@ private:
 
     // Streams a new retained photo into the selected alternate slot.
     static bool WriteSavedPhotoSlot(unsigned index, uint32_t generation, const MediaMetadata& metadata, ImageSource source, void* context, int& result);
+
+    enum class SavePhase { Idle, Writing, Verifying };
+
+    struct SaveSession {
+        SavePhase phase = SavePhase::Idle;
+        MediaMetadata metadata;
+        unsigned target = 0;
+        uint32_t generation = 0;
+        uint32_t expectedCrc = 0;
+        uint64_t total = 0;
+        uint64_t received = 0;
+        uint64_t verified = 0;
+        uint32_t frameBytes = 0;
+        uint32_t verifyFrameBytes = 0;
+        uint32_t crc = STORAGE_CRC32_INITIAL_U;
+        uint32_t frameCrc = STORAGE_CRC32_INITIAL_U;
+        uint32_t verifyCrc = STORAGE_CRC32_INITIAL_U;
+        uint32_t verifyFrameCrc = STORAGE_CRC32_INITIAL_U;
+        size_t bufferedBytes = 0;
+        bool open = false;
+    };
+
+    struct PlaybackSession {
+        SavedPhotoSlot description;
+        int slot = SAVED_PHOTO_NO_SLOT;
+        bool open = false;
+    };
+
+    struct FrameResult {
+        bool complete = false;
+        int result = 0;
+        const char* error = "media frame read failed";
+    };
+
+    // Returns the reserved path for one alternating media slot.
+    static const char* GetSavedMediaPath(unsigned index);
+
+    // Flushes buffered transaction bytes to the active save file.
+    static bool FlushMediaWrites(int& result);
+
+    // Queues video payload and checksum records through the shared buffer.
+    static bool QueueMediaWrite(const uint8_t* bytes, size_t count, int& result);
+
+    // Closes playback without acquiring a second storage guard.
+    static void CloseSavedMediaPlayback(void);
+
+    // Discards an unpublished save without reacquiring storage ownership.
+    static void DiscardIncompleteMediaSave(bool safe);
+
+    // Builds the checked raw-video header for the current save.
+    static void BuildVideoStorageHeader(uint8_t* header);
+
+    // Inspects either a photo or raw video in a retained slot.
+    static SavedPhotoSlot InspectSavedMediaSlot(unsigned index);
+
+    // Streams and checks a raw frame from the inspection or playback handle.
+    static FrameResult ReadAndVerifyRawVideoFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting);
 
     bool ready_ = false;
     const char* error_ = "storage not initialized";

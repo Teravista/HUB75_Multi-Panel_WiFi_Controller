@@ -18,6 +18,7 @@ enum class PixelFormat : uint8_t { RGB888 = 1 };
 struct MediaMetadata {
     MediaType type = MediaType::Photo;
     PixelFormat pixelFormat = PixelFormat::RGB888;
+    bool pingPong = false;
     uint16_t width = 0;
     uint16_t height = 0;
     uint32_t frameCount = 1;
@@ -48,6 +49,7 @@ struct MediaMetadata {
 namespace MediaMetadataCodec {
 constexpr size_t HeaderBytes = 32;
 constexpr uint8_t Version = 1;
+constexpr uint8_t PingPongFlag = 1;
 
 // Writes a 16-bit unsigned value in little-endian byte order.
 void WriteUnsigned16LittleEndian(uint8_t* out, uint16_t value);

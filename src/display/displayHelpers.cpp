@@ -3,7 +3,7 @@
 #define RGB_CHANNEL_MAX 255
 
 // Returns the built-in image data for the requested animation frame.
-const unsigned char *DisplayHelpers::GetImageDataForFrame(size_t frameIndex)
+const unsigned char *DisplayHelpers::GetImageDataForFrame([[maybe_unused]] size_t frameIndex)
 {
 #if USE_ANIMATION
     return FLASHED_IMAGE_DATA[frameIndex];
@@ -159,8 +159,8 @@ size_t DisplayHelpers::GetNextPingPongFrameIndex(
 
 // Selects the next frame according to the built-in animation mode.
 size_t DisplayHelpers::GetNextAnimationFrameIndex(
-    size_t currentFrameIndex,
-    bool &animationMovingForward)
+    [[maybe_unused]] size_t currentFrameIndex,
+    [[maybe_unused]] bool &animationMovingForward)
 {
 #if USE_ANIMATION
     // Use the animation frame count when the build includes an animation.
