@@ -1,4 +1,4 @@
-# Raw video upload and SD playback
+# Video upload and SD playback
 
 The Python uploader converts a source video to logical 128 × 256 RGB888 frames
 on the PC, streams them to TCP port 5002 and waits for verified SD publication.
@@ -13,20 +13,21 @@ Install `utilityScripts/requirements.txt`, then run:
 python utilityScripts/sendVideoOverTCP.py "clip.mp4" --ip 192.168.1.48 --fps 30 --seconds 10
 python utilityScripts/sendVideoOverTCP.py "clip.mp4" --prepare-only --output clip.h75v --ping-pong
 python utilityScripts/sendVideoOverTCP.py "clip.h75v" --ip 192.168.1.48
+python utilityScripts/sendVideoOverTCP.py "clip.mp4" --ip 192.168.1.48 --pixel-format jpeg --jpeg-quality 85
 ```
 
 At the top of the script, configure `DEFAULT_VIDEO_PATH`, `DEFAULT_PICO_IP`,
-`DEFAULT_FPS`, `MAX_VIDEO_SECONDS` and `PING_PONG`. Blank IP uses `.env` PICO_IP.
+`DEFAULT_FPS`, `MAX_VIDEO_SECONDS`, `PING_PONG`, `PIXEL_FORMAT` and `JPEG_QUALITY`. Blank IP uses `.env` PICO_IP.
 A configured path lets you run the script without a positional argument.
 The FPS range is 1–60 and accepts rational values such as 30000/1001. Duration
 limits conversion to the shorter of that setting and the source. The default
-is 30 FPS, 10 seconds and ordinary looping. `--ping-pong` / `--no-ping-pong`
+is RGB565, 30 FPS, 10 seconds and ordinary looping. JPEG quality defaults to 85. `--ping-pong` / `--no-ping-pong`
 override loop mode; prepared files otherwise keep their stored mode.
 
 FFmpeg is resolved from `--ffmpeg`, PATH or `imageio-ffmpeg`. It scales to cover
 the panel and crops centrally. Audio is omitted. Preparation holds one raw
 frame at a time and writes a temporary disk-backed file. A `.h75v` prepared
-file is a 36-byte request plus raw pixels; it is not an MP4 or the Pico's SD
+file is a 36-byte request plus the selected raw or indexed JPEG payload; it is not an MP4 or the Pico's SD
 container. Do not copy it onto the card as a saved-media slot.
 
 ## Bounded TCP protocol
@@ -34,7 +35,8 @@ container. Do not copy it onto the card as a saved-media slot.
 The normal request is a 32-byte [media descriptor](MEDIA-METADATA.md) followed
 by little-endian payload CRC32. Magic `H75V` opts into 6144-byte chunks; `H75M`
 retains 1536-byte chunks. The descriptor otherwise uses canonical `H75M`
-fields, RGB888 format and Video type. The checksum covers only ordered pixels.
+fields and Video type. Raw descriptors use version 1; JPEG uses version 2.
+The checksum covers the complete incoming payload.
 
 1. Send the 36-byte request and wait for `READY 6144\n` or `READY\n`.
 2. Send one negotiated chunk and wait for `NEXT\n` before sending another.
@@ -54,7 +56,7 @@ saved-media updates during reception/verification; panel scanning retains the
 last submitted driver buffer. Failure or cancellation releases ownership and
 requests restoration of the newest usable saved content.
 
-## Raw-video SD container, version 4
+## Raw-video SD container, version 4 (RGB888 / RGB565)
 
 Photos and videos share the alternating `LASTA.H75` / `LASTB.H75` generations.
 The previous valid generation is retained while replacing the other slot. A

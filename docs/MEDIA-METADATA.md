@@ -2,12 +2,12 @@
 
 `MediaMetadata` describes logical pixels before panel mapping: type, dimensions,
 format, frame count and rational FPS. It owns no pixels. This step keeps existing
-photo uploads unchanged and also describes raw video uploads and saved playback.
+photo uploads unchanged and also describes raw and indexed JPEG video uploads and saved playback.
 
 | Field | Photo | Video descriptor |
 | --- | --- | --- |
 | Type | `Photo` (1) | `Video` (2) |
-| Format | `RGB888` (1) | `RGB888` (1) |
+| Format | `RGB888` (1) | `RGB888` (1), `RGB565` (2), `JPEG` (3) |
 | Dimensions | 128 × 256 for current photo APIs | Positive width and height |
 | Frames | 1 | Positive frame count |
 | FPS | 0/1 | Positive numerator and denominator |
@@ -41,7 +41,7 @@ metadata is published together with a completed frame.
 TCP photo uploads still contain only the original 98,304 RGB bytes and receive
 their descriptor automatically. Do not prepend a descriptor to this endpoint.
 
-## Descriptor layout, version 1
+## Descriptor layout, versions 1 and 2
 
 The fixed 32-byte encoding is independent of C++ padding. Multibyte values are
 little-endian. Never transmit `sizeof(MediaMetadata)` structure bytes.
@@ -49,7 +49,7 @@ little-endian. Never transmit `sizeof(MediaMetadata)` structure bytes.
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
 | 0 | 4 | `H75M` |
-| 4 | 1 | Version 1 |
+| 4 | 1 | Version 1 for raw, version 2 for indexed JPEG |
 | 5 | 1 | Media type |
 | 6 | 1 | Pixel format |
 | 7 | 1 | Bit 0: video ping-pong; other bits reserved zero |
@@ -58,7 +58,7 @@ little-endian. Never transmit `sizeof(MediaMetadata)` structure bytes.
 | 12 | 4 | Frame count |
 | 16 | 4 | FPS numerator |
 | 20 | 4 | FPS denominator |
-| 24 | 8 | Calculated payload length |
+| 24 | 8 | Calculated raw payload length or exact indexed JPEG size |
 
 `MediaMetadataCodec::EncodeMediaDescriptor` validates before writing.
 `DecodeMediaDescriptor` checks version, reserved flag bits and calculated length
@@ -96,3 +96,7 @@ Video descriptors permit ping-pong looping; photos must leave the flag false.
 The raw receiver requires full-panel RGB888 frames at 1–60 FPS and a total
 stored file below 4 GiB. Photo APIs remain single-frame RGB888. See the
 [video guide](VIDEO-UPLOAD.md) for the separate request and version-4 SD layout.
+
+RGB565 uses little-endian R5G6B5 words. JPEG has no fixed raw frame stride;
+`encodedBytes` describes its index plus records and `FrameBytes()` returns zero.
+See [JPEG layout and bounded decoder memory](JPEG-VIDEO.md).

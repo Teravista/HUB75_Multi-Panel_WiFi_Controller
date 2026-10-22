@@ -105,3 +105,13 @@ one checked frame and `CloseMediaPlayback` releases its file. A corrupt later
 frame excludes its generation on the next open. MediaPlayer connects that
 storage boundary to the shared framebuffer under render ownership. See
 [video upload and playback](VIDEO-UPLOAD.md) for layouts and failure behavior.
+
+## Compact and JPEG video
+
+Video transactions also accept RGB565 and indexed baseline JPEG. RGB565 retains
+the raw version-4 record layout with two bytes per pixel. JPEG uses version 5,
+validates the complete saved payload and every decoded frame before publishing,
+and checks each selected frame again during playback. A four-KiB bounded index
+cache avoids rereading offsets for each frame. JPEG shares the existing 24 KiB
+scratch allocation between compressed input and decoder workspace; no extra
+full framebuffer is allocated. See [JPEG video](JPEG-VIDEO.md).

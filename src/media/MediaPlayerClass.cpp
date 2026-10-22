@@ -95,7 +95,7 @@ MediaPlayer::Restore (
         if (!memory_.OpenLastMedia(metadata_)) {
             break;
         }
-        if (memory_.ReadMediaFrame(0, Consume, &upload_)) {
+        if (memory_.ReadMediaFrame(0, Consume, this)) {
             upload_.PublishStoredFrame(metadata_);
             active_ = metadata_.type == MediaType::Video;
             epochMs_ = nowMs;
@@ -157,7 +157,7 @@ MediaPlayer::Update (
     if (frame == lastFrame_) {
         return false;
     }
-    if (!memory_.ReadMediaFrame(frame, Consume, &upload_)) {
+    if (!memory_.ReadMediaFrame(frame, Consume, this)) {
         return Restore(nowMs);
     }
     upload_.PublishStoredFrame(metadata_);
@@ -171,8 +171,8 @@ MediaPlayer::Update (
     The enclosing frame read owns publication: these pixels stay provisional until
     its CRC succeeds.
 
-    @param context Borrowed FrameBufferController for this read.
-    @param bytes Logical RGB888 fragment.
+    @param context Borrowed MediaPlayer with the active frame format.
+    @param bytes Logical raw fragment; JPEG emits decoded RGB888 rows.
     @param count Number of complete-pixel bytes.
     @param offset Byte offset within the logical frame.
 
@@ -187,5 +187,13 @@ MediaPlayer::Consume (
     size_t offset
     )
 {
-    return static_cast<FrameBufferController*>(context)->WriteStoredFramePixels(bytes, count, offset);
+    MediaPlayer* player = nullptr;
+    PixelFormat format;
+
+    player = static_cast<MediaPlayer*>(context);
+    format = PixelFormat::RGB888;
+    if (player->metadata_.pixelFormat == PixelFormat::RGB565) {
+        format = PixelFormat::RGB565;
+    }
+    return player->upload_.WriteStoredFramePixels(bytes, count, offset, format);
 } // Consume

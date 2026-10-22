@@ -4,6 +4,10 @@
 #include "pico/time.h"
 #include <cstdio>
 
+#define RGB888_RED_CHANNEL_INDEX 0
+#define RGB888_GREEN_CHANNEL_INDEX 1
+#define RGB888_BLUE_CHANNEL_INDEX 2
+
 /**
     Returns elapsed boot time in milliseconds for transport deadlines.
 
@@ -787,7 +791,7 @@ FrameBufferController::ClearStoredFrame (
 } // ClearStoredFrame
 
 /**
-    Maps a stored RGB888 frame fragment into the CPU framebuffer.
+    Maps a stored raw frame fragment into the CPU framebuffer.
 
     The caller already holds render ownership. Mapping is calculated once for
     each logical panel-row run; a signed stride then advances through physical
@@ -804,10 +808,17 @@ bool
 FrameBufferController::WriteStoredFramePixels (
     const uint8_t* bytes,
     size_t count,
-    size_t offset
+    size_t offset,
+    PixelFormat format
     )
 {
     size_t pixel;
+    size_t pixelBytes;
+    size_t frameBytes;
+    uint16_t packed;
+    uint32_t color;
+    uint8_t unpacked[IMAGE_BYTES_PER_PIXEL];
+    const uint8_t* channels = nullptr;
     size_t remaining;
     size_t run;
     size_t index;
@@ -820,12 +831,19 @@ FrameBufferController::WriteStoredFramePixels (
     ptrdiff_t destination;
     ptrdiff_t stride;
 
-    if (!bytes || offset > SOURCE_FRAME_SIZE_BYTES || count > SOURCE_FRAME_SIZE_BYTES - offset ||
-        offset % IMAGE_BYTES_PER_PIXEL || count % IMAGE_BYTES_PER_PIXEL) {
+    pixelBytes = IMAGE_BYTES_PER_PIXEL;
+    if (format == PixelFormat::RGB565) {
+        pixelBytes = RGB565_PIXEL_BYTES;
+    } else if (format != PixelFormat::RGB888) {
         return false;
     }
-    pixel = offset / IMAGE_BYTES_PER_PIXEL;
-    remaining = count / IMAGE_BYTES_PER_PIXEL;
+    frameBytes = size_t(LOGICAL_IMAGE_WIDTH) * LOGICAL_IMAGE_HEIGHT * pixelBytes;
+    if (!bytes || offset > frameBytes || count > frameBytes - offset ||
+        offset % pixelBytes || count % pixelBytes) {
+        return false;
+    }
+    pixel = offset / pixelBytes;
+    remaining = count / pixelBytes;
     while (remaining) {
         logicalX = int(pixel % LOGICAL_IMAGE_WIDTH);
         logicalY = int(pixel / LOGICAL_IMAGE_WIDTH);
@@ -842,10 +860,20 @@ FrameBufferController::WriteStoredFramePixels (
             stride = (ptrdiff_t(nextY - y) * MATRIX_PANEL_WIDTH + nextX - x) * ptrdiff_t(CpuFrame::PixelBytes);
         }
         for (index = 0; index < run; ++index) {
-            CpuFrame::Store(m_frameBuffer + destination, bytes[IMAGE_RED_BYTE_OFFSET],
-                            bytes[IMAGE_GREEN_BYTE_OFFSET], bytes[IMAGE_BLUE_BYTE_OFFSET]);
+            channels = bytes;
+            if (format == PixelFormat::RGB565) {
+                packed = MediaMetadataCodec::ReadUnsigned16LittleEndian(bytes);
+                color = CpuFrame::Expand565(packed);
+                unpacked[RGB888_RED_CHANNEL_INDEX] = uint8_t(color >> RGB888_RED_SHIFT);
+                unpacked[RGB888_GREEN_CHANNEL_INDEX] = uint8_t(color >> RGB888_GREEN_SHIFT);
+                unpacked[RGB888_BLUE_CHANNEL_INDEX] = uint8_t(color);
+                channels = unpacked;
+            }
+            // Keep the same physical channel correction for every stored encoding.
+            CpuFrame::Store(m_frameBuffer + destination, channels[IMAGE_RED_BYTE_OFFSET],
+                            channels[IMAGE_GREEN_BYTE_OFFSET], channels[IMAGE_BLUE_BYTE_OFFSET]);
             destination += stride;
-            bytes += IMAGE_BYTES_PER_PIXEL;
+            bytes += pixelBytes;
         }
         pixel += run;
         remaining -= run;

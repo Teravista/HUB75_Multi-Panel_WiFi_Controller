@@ -11,7 +11,7 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "raw-video-storage"
+#define WIFI_STATE_MACHINE_REV "jpeg-video-storage"
 
 /**
     Prepares and submits display frames while advancing photo and network services.

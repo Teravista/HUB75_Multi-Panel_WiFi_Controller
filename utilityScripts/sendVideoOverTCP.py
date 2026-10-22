@@ -1,4 +1,4 @@
-"""Convert a video to panel RGB888 frames, upload to SD, then loop on the Pico.
+"""Convert a video to RGB565, RGB888 or JPEG frames, upload to SD, then loop on the Pico.
 
     python utilityScripts/sendVideoOverTCP.py clip.mp4 --ip 192.168.1.48 --fps 3
     python utilityScripts/sendVideoOverTCP.py clip.mp4 --prepare-only --output clip.h75v
@@ -10,6 +10,9 @@ The PC never keeps the whole converted video in RAM. Audio is not transferred.
 from __future__ import annotations
 
 import argparse
+import io
+from array import array
+import sys
 from dataclasses import dataclass
 from fractions import Fraction
 import os
@@ -28,6 +31,8 @@ DEFAULT_VIDEO_PATH = ""       # Set a source MP4 path to run without a positiona
 DEFAULT_PICO_IP = ""          # Blank uses PICO_IP from the local .env file.
 DEFAULT_FPS = 30                # Playback/conversion FPS, from 1 to 60.
 MAX_VIDEO_SECONDS = 10       # None = whole video; e.g. 20 = first 20 seconds.
+PIXEL_FORMAT = "rgb565"      # "rgb565", "rgb888", or "jpeg" for new conversions.
+JPEG_QUALITY = 85            # Baseline JPEG quality, 1..95.
 PING_PONG = False            # True = forward/backward; False = restart at frame 0.
 
 WIDTH, HEIGHT = 128, 256
@@ -35,6 +40,10 @@ PIXEL_BYTES = 3
 DESCRIPTOR_VERSION = 1
 VIDEO_MEDIA_TYPE = 2
 RGB888_FORMAT_ID = 1
+PIXEL_FORMAT_IDS = {"rgb888": 1, "rgb565": 2, "jpeg": 3}
+JPEG_INDEX = struct.Struct("<III")
+JPEG_RECORD = struct.Struct("<II")
+MAX_JPEG_BYTES = 128 * 1024
 MAXIMUM_FPS = 60
 FILE_HEADER_BYTES = 64
 FRAME_CHECKSUM_BYTES = 4
@@ -56,58 +65,121 @@ class VideoMetadata:
     frames: int
     fps: Fraction
     ping_pong: bool = False
+    pixel_format: str = "rgb888"
+    encoded_bytes: int = 0
 
-    # Calculates the RGB888 pixel payload size.
+    # Returns the stored byte size of one raw frame, or zero for JPEG.
     #
-    # @return bytes - Total RGB888 pixel payload length, excluding headers and checksums.
+    # @param self Instance on which this method operates.
+    #
+    # @return value - Uncompressed bytes per frame for the selected raw format.
+    # @return 0 - JPEG frames have variable encoded lengths.
+    @property
+    def frame_bytes(self) -> int:
+        if self.pixel_format == "jpeg":
+            return 0  # Variable encoded frame lengths are described by the index.
+        if self.pixel_format == "rgb565":
+            pixel_bytes = 2
+        else:
+            pixel_bytes = 3
+        return WIDTH * HEIGHT * pixel_bytes
+
+    # Returns the complete raw or indexed JPEG payload size.
+    #
+    # @param self Instance on which this method operates.
+    #
+    # @return value - Total encoded or raw video payload size in bytes.
     @property
     def payload_bytes(self) -> int:
-        return self.frames * FRAME_BYTES
+        if self.pixel_format == "jpeg":
+            return self.encoded_bytes
+        else:
+            return self.frames * self.frame_bytes
 
-    # Rejects unsupported frame counts, rates, flags and FAT32 file sizes.
+    # Checks video metadata against supported panel, format, and transfer limits.
     #
-    # Validation runs before preparing or uploading media; ValueError prevents unsupported descriptors from reaching the controller.
+    # @param self Instance on which this method operates.
     def validate(self) -> None:
+        if self.pixel_format not in PIXEL_FORMAT_IDS:
+            raise ValueError("Pixel format must be rgb888, rgb565 or jpeg")
         if not isinstance(self.ping_pong, bool):
             raise ValueError("Ping-pong must be True or False")
         if not 1 <= self.frames <= 0xFFFFFFFF:
             raise ValueError("Video must contain at least one frame")
         if not 1 <= self.fps <= MAXIMUM_FPS:
-            raise ValueError("FPS must be between 1 and 30; start with 3 for the current SD wiring")
+            raise ValueError("FPS must be between 1 and 60")
         if self.fps.numerator > 0xFFFFFFFF or self.fps.denominator > 0xFFFFFFFF:
             raise ValueError("FPS numerator/denominator exceeds the metadata format")
-        if 64 + self.frames * (FRAME_BYTES + 4) > MAX_FILE_BYTES:
+        if self.pixel_format == "jpeg":
+            if self.encoded_bytes < self.frames * 24 or self.encoded_bytes > MAX_FILE_BYTES-64:
+                raise ValueError("Invalid indexed JPEG payload length")
+        elif self.encoded_bytes:
+            raise ValueError("Raw videos cannot specify an encoded payload size")
+        if self.pixel_format == "jpeg":
+            frame_checksum_bytes = 0
+        else:
+            frame_checksum_bytes = self.frames * 4
+        if 64 + self.payload_bytes + frame_checksum_bytes > MAX_FILE_BYTES:
             raise ValueError("Converted video exceeds this firmware's FAT32-compatible 4 GiB limit")
 
-    # Serializes the checked 32-byte video descriptor.
+    # Serializes validated video metadata into its transfer descriptor.
     #
-    # The layout matches firmware metadata, including rational FPS and ping-pong. The payload checksum follows separately in prepared files and TCP requests.
+    # @param self Instance on which this method operates.
     #
-    # @return bytes - Checked 32-byte version-1 descriptor.
+    # @return value - Serialized media descriptor bytes, after validating all metadata fields.
     def encode(self) -> bytes:
         self.validate()
-        if self.ping_pong:
-            conditional_value_1 = PING_PONG_FLAG
+        if self.pixel_format == "jpeg":
+            descriptor_version = 2
         else:
-            conditional_value_1 = 0
-        return DESCRIPTOR.pack(b"H75M", DESCRIPTOR_VERSION, VIDEO_MEDIA_TYPE, RGB888_FORMAT_ID, conditional_value_1, WIDTH, HEIGHT, self.frames,
+            descriptor_version = 1
+        if self.ping_pong:
+            flags = PING_PONG_FLAG
+        else:
+            flags = 0
+        return DESCRIPTOR.pack(b"H75M", descriptor_version, 2, PIXEL_FORMAT_IDS[self.pixel_format], flags, WIDTH, HEIGHT, self.frames,
                                        self.fps.numerator, self.fps.denominator, self.payload_bytes)
 
-    # Validates a prepared descriptor and reconstructs its metadata.
+    # Validates and decodes a stored video transfer descriptor.
     #
-    # Rejects unsupported versions, reserved bits, formats and inconsistent payload lengths before returning an upload description.
+    # @param cls Metadata class used to construct the decoded result.
+    # @param data Binary payload or encoded descriptor bytes.
     #
-    # @param data Encoded metadata bytes.
-    #
-    # @return metadata - Validated logical RGB888 video description.
+    # @return value - Validated VideoMetadata instance reconstructed from descriptor bytes.
     @classmethod
     def decode(cls, data: bytes) -> VideoMetadata:
         if len(data) != DESCRIPTOR.size:
             raise ValueError("Truncated video descriptor")
         magic, version, kind, fmt, flags, width, height, frames, num, den, payload = DESCRIPTOR.unpack(data)
-        if (magic, version, kind, fmt, width, height) != (b"H75M", 1, 2, 1, WIDTH, HEIGHT) or flags & ~PING_PONG_FLAG or not den:
+        invalid_descriptor = (magic, kind, width, height) != (b"H75M", 2, WIDTH, HEIGHT)
+        if not invalid_descriptor:
+            invalid_descriptor = fmt not in PIXEL_FORMAT_IDS.values()
+        if not invalid_descriptor:
+            invalid_descriptor = flags & ~PING_PONG_FLAG
+        if not invalid_descriptor:
+            invalid_descriptor = not den
+        if not invalid_descriptor:
+            if fmt == 3:
+                expected_version = 2
+            else:
+                expected_version = 1
+            invalid_descriptor = version != (expected_version)
+        if invalid_descriptor:
             raise ValueError("Unsupported video descriptor")
-        metadata = cls(frames, Fraction(num, den), bool(flags & PING_PONG_FLAG))
+        if fmt == 3:
+            pixel_format = "jpeg"
+        else:
+            if fmt == 2:
+                pixel_format = "rgb565"
+            else:
+                pixel_format = "rgb888"
+        if fmt == 3:
+            encoded_bytes = payload
+        else:
+            encoded_bytes = 0
+        metadata = cls(frames, Fraction(num, den), bool(flags & PING_PONG_FLAG),
+                               pixel_format,
+                               encoded_bytes)
         metadata.validate()
         if payload != metadata.payload_bytes:
             raise ValueError("Video payload length does not match its frame count")
@@ -152,7 +224,24 @@ def read_frame(stream) -> bytes:
     return bytes(chunks)
 
 
-# Converts source video into a disk-backed raw RGB888 upload.
+# Packs complete RGB888 pixels into canonical little-endian RGB565 words.
+#
+# The uploader preserves logical channel order; panel wiring correction is applied
+# on the Pico. Incomplete source pixels are rejected before encoding.
+#
+# @param frame Complete logical RGB888 source pixels.
+#
+# @return bytes - Packed two-byte pixels in little-endian R5G6B5 format.
+def pack_rgb565(frame: bytes) -> bytes:
+    if len(frame) % 3:
+        raise ValueError("RGB888 input must contain complete pixels")
+    words = array("H", ((frame[i] >> 3) << 11 | (frame[i+1] >> 2) << 5 | frame[i+2] >> 3
+                        for i in range(0, len(frame), 3)))
+    if sys.byteorder != "little":
+        words.byteswap()
+    return words.tobytes()
+
+# Converts source video into a disk-backed raw or indexed JPEG upload.
 #
 # FFmpeg scales and crops each frame on the PC. Only one frame is held at a time; payload CRC and frame count are accumulated before atomically publishing the prepared file. Failures remove only this conversion's temporary output.
 #
@@ -162,13 +251,22 @@ def read_frame(stream) -> bytes:
 # @param ffmpeg Optional explicit FFmpeg executable path.
 # @param overwrite Whether an existing prepared output may be replaced.
 # @param seconds Optional maximum source duration to convert.
-# @param ping_pong Loop mode override; None preserves a prepared file setting.
+# @param ping_pong Whether the converted clip plays forward and backward.
+# @param pixel_format Raw RGB888, little-endian RGB565, or indexed baseline JPEG.
+# @param jpeg_quality JPEG encoder quality from 1 to 95; ignored for raw formats.
 #
 # @return metadata - Description of the successfully published prepared file.
 def prepare_video(source: Path, output: Path, fps: Fraction, *, ffmpeg: str | None = None,
                   overwrite: bool = False, seconds: float | None = None,
-                  ping_pong: bool = False) -> VideoMetadata:
-    VideoMetadata(1, fps, ping_pong).validate()
+                  ping_pong: bool = False, pixel_format: str = "rgb888",
+                  jpeg_quality: int = JPEG_QUALITY) -> VideoMetadata:
+    if pixel_format == "jpeg":
+        minimum_encoded_bytes = 24
+    else:
+        minimum_encoded_bytes = 0
+    VideoMetadata(1, fps, ping_pong, pixel_format, minimum_encoded_bytes).validate()
+    if not isinstance(jpeg_quality, int) or not 1 <= jpeg_quality <= 95:
+        raise ValueError("JPEG quality must be an integer from 1 to 95")
     if seconds is not None and (not 0 < seconds < float("inf")):
         raise ValueError("--seconds must be a positive finite duration")
     if not source.is_file():
@@ -189,19 +287,37 @@ def prepare_video(source: Path, output: Path, fps: Fraction, *, ffmpeg: str | No
     temporary: Path | None = None
     process = None
     try:
-        with tempfile.NamedTemporaryFile(dir=output.parent, suffix=".part", delete=False) as converted, \
+        with tempfile.TemporaryFile() as jpeg_records, \
+                tempfile.NamedTemporaryFile(dir=output.parent, suffix=".part", delete=False) as converted, \
                 tempfile.TemporaryFile() as diagnostics:
             temporary = Path(converted.name)
             converted.write(bytes(REQUEST_BYTES))
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                        stderr=diagnostics)
             count = checksum = 0
+            jpeg_offsets = []
             try:
                 while frame := read_frame(process.stdout):
+                    if pixel_format == "rgb565":
+                        frame = pack_rgb565(frame)
                     count += 1
-                    VideoMetadata(count, fps).validate()
-                    checksum = zlib.crc32(frame, checksum)
-                    converted.write(frame)
+                    if pixel_format == "jpeg":
+                        from PIL import Image
+                        encoded = io.BytesIO()
+                        Image.frombytes("RGB", (WIDTH, HEIGHT), frame).save(encoded, format="JPEG",
+                            quality=jpeg_quality, subsampling=2, progressive=False, optimize=False)
+                        frame = encoded.getvalue()
+                        if len(frame) > MAX_JPEG_BYTES:
+                            raise ValueError("JPEG frame exceeds firmware's 128 KiB bound")
+                        jpeg_offsets.append((jpeg_records.tell(), len(frame)))
+                        jpeg_records.write(JPEG_RECORD.pack(len(frame), zlib.crc32(frame) & 0xffffffff))
+                        jpeg_records.write(frame)
+                        VideoMetadata(count, fps, ping_pong, pixel_format,
+                                      count * JPEG_INDEX.size + jpeg_records.tell()).validate()
+                    else:
+                        VideoMetadata(count, fps, ping_pong, pixel_format).validate()
+                        checksum = zlib.crc32(frame, checksum)
+                        converted.write(frame)
                 return_code = process.wait()
             finally:
                 process.stdout.close()
@@ -212,9 +328,24 @@ def prepare_video(source: Path, output: Path, fps: Fraction, *, ffmpeg: str | No
                 diagnostics.seek(0, os.SEEK_END)
                 diagnostics.seek(max(0, diagnostics.tell() - 4096))
                 raise RuntimeError("Video conversion failed: " + diagnostics.read().decode(errors="replace").strip())
-            metadata = VideoMetadata(count, fps, ping_pong)
+            if pixel_format == "jpeg":
+                metadata = VideoMetadata(count, fps, ping_pong, pixel_format,
+                                         count * JPEG_INDEX.size + jpeg_records.tell())
+                metadata.validate()
+                for index, (offset, length) in enumerate(jpeg_offsets):
+                    offset += count * JPEG_INDEX.size
+                    check = zlib.crc32(struct.pack("<III", offset, length, index)) & 0xffffffff
+                    entry = JPEG_INDEX.pack(offset, length, check)
+                    converted.write(entry)
+                    checksum = zlib.crc32(entry, checksum)
+                jpeg_records.seek(0)
+                while part := jpeg_records.read(1024*1024):
+                    converted.write(part)
+                    checksum = zlib.crc32(part, checksum)
+            else:
+                metadata = VideoMetadata(count, fps, ping_pong, pixel_format)
             converted.seek(0)
-            converted.write(metadata.encode() + struct.pack("<I", checksum & CRC32_MASK))
+            converted.write(metadata.encode() + struct.pack("<I", checksum & 0xFFFFFFFF))
         if overwrite:
             os.replace(temporary, output)
         else:
@@ -251,12 +382,41 @@ def inspect_prepared(path: Path) -> tuple[VideoMetadata, bytes]:
         if path.stat().st_size != REQUEST_BYTES + metadata.payload_bytes:
             raise ValueError("Prepared video's file size does not match its metadata")
         checksum = 0
-        while part := prepared.read(BYTES_PER_MIB):
+        while part := prepared.read(1024 * 1024):
             checksum = zlib.crc32(part, checksum)
-        if checksum & CRC32_MASK != struct.unpack("<I", request[DESCRIPTOR.size:])[0]:
+        if checksum & 0xFFFFFFFF != struct.unpack("<I", request[DESCRIPTOR.size:])[0]:
             raise ValueError("Prepared video checksum mismatch; convert the source again")
+        if metadata.pixel_format == "jpeg":
+            inspect_jpeg_records(prepared, metadata)
     return metadata, request
 
+
+# Validates indexed JPEG frame records and computes their payload checksum.
+#
+# @param prepared Prepared media path or open prepared media stream.
+# @param metadata Frame count and exact indexed-JPEG payload length.
+def inspect_jpeg_records(prepared, metadata: VideoMetadata) -> None:
+    from PIL import Image
+    expected = metadata.frames * JPEG_INDEX.size
+    for index in range(metadata.frames):
+        prepared.seek(REQUEST_BYTES + index*JPEG_INDEX.size)
+        offset, length, check = JPEG_INDEX.unpack(prepared.read(JPEG_INDEX.size))
+        if offset != expected or not 4 <= length <= MAX_JPEG_BYTES or offset+8+length > metadata.payload_bytes:
+            raise ValueError("Invalid JPEG frame offset/length")
+        if check != zlib.crc32(struct.pack("<III",offset,length,index)) & 0xffffffff:
+            raise ValueError("JPEG index checksum mismatch")
+        prepared.seek(REQUEST_BYTES + offset)
+        count, crc = JPEG_RECORD.unpack(prepared.read(JPEG_RECORD.size))
+        data = prepared.read(length)
+        if count != length or len(data) != length or zlib.crc32(data) & 0xffffffff != crc or not data.endswith(b"\xff\xd9"):
+            raise ValueError("JPEG frame checksum/length mismatch")
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format != "JPEG" or image.size != (WIDTH,HEIGHT) or image.info.get("progressive"):
+                raise ValueError("JPEG frames must be baseline 128x256")
+            image.load()
+        expected += JPEG_RECORD.size + length
+    if expected != metadata.payload_bytes:
+        raise ValueError("JPEG payload has extra or missing records")
 
 # Reads one bounded newline-terminated protocol response.
 #
@@ -351,7 +511,8 @@ def upload_prepared(path: Path, host: str, port: int = PORT, *, timeout: float =
         # Override only the wire descriptor; pixels/CRC and the prepared file
         # stay unchanged. None preserves the mode already in a prepared clip.
         if ping_pong is not None:
-            metadata = VideoMetadata(metadata.frames, metadata.fps, ping_pong)
+            metadata = VideoMetadata(metadata.frames, metadata.fps, ping_pong,
+                                 metadata.pixel_format, metadata.encoded_bytes)
             request = metadata.encode() + request[DESCRIPTOR.size:]
         if metadata.ping_pong:
             conditional_value_21 = 'ping-pong'
@@ -451,6 +612,10 @@ def main() -> None:
     parser.add_argument("--ping-pong", action=argparse.BooleanOptionalAction, default=None,
                         help=f"Play forward then backward; --no-ping-pong restarts at frame 0 "
                              f"(source default: {PING_PONG}; prepared files keep their saved mode)")
+    parser.add_argument("--pixel-format", choices=tuple(PIXEL_FORMAT_IDS), default=None,
+                        help=f"Source format (default: {PIXEL_FORMAT}); prepared files retain their format")
+    parser.add_argument("--jpeg-quality", type=int, default=JPEG_QUALITY,
+                        help=f"Baseline JPEG quality, 1..95 (default {JPEG_QUALITY})")
     args = parser.parse_args()
     if args.video is None:
         parser.error("Provide a video path or set DEFAULT_VIDEO_PATH at the top of this script")
@@ -458,6 +623,8 @@ def main() -> None:
         parser.error("Set .env PICO_IP or supply --ip")
     if args.video.suffix.lower() == ".h75v":
         metadata, _ = inspect_prepared(args.video)
+        if args.pixel_format is not None and args.pixel_format != metadata.pixel_format:
+            parser.error("Prepared video retains its format; convert the source again to change it")
         print(f"Prepared video: {metadata.frames} frames, {float(metadata.fps):g} FPS")
         if not args.prepare_only:
             upload_prepared(args.video, args.ip, args.port, timeout=args.timeout,
@@ -472,7 +639,9 @@ def main() -> None:
             conditional_value_51 = args.ping_pong
         metadata = prepare_video(args.video, output, args.fps, ffmpeg=args.ffmpeg,
                                          overwrite=args.overwrite, seconds=args.seconds,
-                                         ping_pong=conditional_value_51)
+                                         ping_pong=conditional_value_51,
+                                         pixel_format=args.pixel_format or PIXEL_FORMAT,
+                                         jpeg_quality=args.jpeg_quality)
         print(f"Prepared {output}: {metadata.frames} frames, {metadata.payload_bytes / BYTES_PER_MIB:.1f} MiB")
         if not args.prepare_only:
             upload_prepared(output, args.ip, args.port, timeout=args.timeout,
@@ -485,7 +654,9 @@ def main() -> None:
             else:
                 conditional_value_61 = args.ping_pong
             metadata = prepare_video(args.video, output, args.fps, ffmpeg=args.ffmpeg, seconds=args.seconds,
-                                                 ping_pong=conditional_value_61)
+                                                 ping_pong=conditional_value_61,
+                                                 pixel_format=args.pixel_format or PIXEL_FORMAT,
+                                                 jpeg_quality=args.jpeg_quality)
             print(f"Prepared {metadata.frames} frames at {float(args.fps):g} FPS; uploading...")
             upload_prepared(output, args.ip, args.port, timeout=args.timeout,
                             verification_timeout=args.verification_timeout, legacy_chunks=args.legacy_chunks)
