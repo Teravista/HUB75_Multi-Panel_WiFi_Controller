@@ -229,3 +229,6 @@ WiFi is up and the TCP upload listener is bound and accepting connections - this
 This project's original code is licensed under the [MIT License](LICENSE).
 Vendored and derived components remain subject to their respective licenses;
 see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Video upload supports RGB565, RGB888 and indexed JPEG, with JPEG quality 85 by
+default. See [JPEG video and compact storage](docs/JPEG-VIDEO.md).

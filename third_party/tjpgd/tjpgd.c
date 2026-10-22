@@ -26,6 +26,14 @@
 
 #include "tjpgd.h"
 
+#if JD_INLINE_ENTROPY && JD_FASTDECODE == 2 && defined(__GNUC__)
+#define JD_SLOW_PATH __attribute__((noinline))
+#define JD_FAST_PATH static inline __attribute__((always_inline))
+#else
+#define JD_SLOW_PATH
+#define JD_FAST_PATH static inline
+#endif
+
 
 #if JD_FASTDECODE == 2
 #define HUFF_BIT	10	/* Bit length to apply fast huffman decode */
@@ -279,7 +287,7 @@ static JRESULT create_huffman_tbl (	/* 0:OK, !0:Failed */
 /* Extract a huffman decoded data from input stream                      */
 /*-----------------------------------------------------------------------*/
 
-static int huffext (	/* >=0: decoded data, <0: error code */
+static JD_SLOW_PATH int huffext_slow (	/* >=0: decoded data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int id,	/* Table ID (0:Y, 1:C) */
 	unsigned int cls	/* Table class (0:DC, 1:AC) */
@@ -413,6 +421,26 @@ static int huffext (	/* >=0: decoded data, <0: error code */
 	return 0 - (int)JDR_FMT1;	/* Err: code not found (may be collapted data) */
 }
 
+/* Keep the common short-code path small and inline. Buffer refill, markers,
+   long codes and invalid codes retain the original checked implementation. */
+JD_FAST_PATH int huffext(JDEC* jd, unsigned int id, unsigned int cls)
+{
+#if JD_INLINE_ENTROPY && JD_FASTDECODE == 2
+	const unsigned int bits = jd->dbit % 32;
+	if (bits >= 16) {
+		const uint32_t word = jd->wreg & ((1UL << bits) - 1);
+		const unsigned int index = (unsigned int)(word >> (bits - HUFF_BIT));
+		const unsigned int code = cls ? jd->hufflut_ac[id][index] : jd->hufflut_dc[id][index];
+		if (code != (cls ? 0xFFFFu : 0xFFu)) {
+			jd->wreg = word;
+			jd->dbit = bits - (cls ? (code >> 8) : (code >> 4));
+			return code & (cls ? 0xFF : 0xF);
+		}
+	}
+#endif
+	return huffext_slow(jd, id, cls);
+}
+
 
 
 
@@ -420,7 +448,7 @@ static int huffext (	/* >=0: decoded data, <0: error code */
 /* Extract N bits from input stream                                      */
 /*-----------------------------------------------------------------------*/
 
-static int bitext (	/* >=0: extracted data, <0: error code */
+static JD_SLOW_PATH int bitext_slow (	/* >=0: extracted data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int nbit	/* Number of bits to extract (1 to 16) */
 )
@@ -496,6 +524,20 @@ static int bitext (	/* >=0: extracted data, <0: error code */
 
 	return (int)(w >> ((wbit - nbit) % 32));
 #endif
+}
+
+JD_FAST_PATH int bitext(JDEC* jd, unsigned int nbit)
+{
+#if JD_INLINE_ENTROPY && JD_FASTDECODE == 2
+	const unsigned int bits = jd->dbit % 32;
+	if (bits >= nbit) {
+		const uint32_t word = jd->wreg & ((1UL << bits) - 1);
+		jd->wreg = word;
+		jd->dbit = bits - nbit;
+		return (int)(word >> ((bits - nbit) % 32));
+	}
+#endif
+	return bitext_slow(jd, nbit);
 }
 
 
@@ -717,7 +759,7 @@ static JRESULT mcu_load (
 		cmp = (blk < nby) ? 0 : blk - nby + 1;	/* Component number 0:Y, 1:Cb, 2:Cr */
 
 		if (cmp && jd->ncomp != 3) {		/* Clear C blocks if not exist (monochrome image) */
-			for (i = 0; i < 64; bp[i++] = 128) ;
+			if (!jd->validate_only) for (i = 0; i < 64; bp[i++] = 128) ;
 
 		} else {							/* Load Y/C blocks from input stream */
 			id = cmp ? 1 : 0;						/* Huffman table ID of this component */
@@ -736,10 +778,10 @@ static JRESULT mcu_load (
 				jd->dcv[cmp] = (int16_t)d;			/* Save current DC value for next block */
 			}
 			dqf = jd->qttbl[jd->qtid[cmp]];			/* De-quantizer table ID for this component */
-			tmp[0] = d * dqf[0] >> 8;				/* De-quantize, apply scale factor of Arai algorithm and descale 8 bits */
+			if (!jd->validate_only) tmp[0] = d * dqf[0] >> 8;	/* Pixel reconstruction is unnecessary during stream validation. */
 
 			/* Extract following 63 AC elements from input stream */
-			memset(&tmp[1], 0, 63 * sizeof (int32_t));	/* Initialize all AC elements */
+			if (!jd->validate_only) memset(&tmp[1], 0, 63 * sizeof (int32_t));	/* Initialize all AC elements */
 			z = 1;		/* Top of the AC elements (in zigzag-order) */
 			do {
 				d = huffext(jd, id, 1);				/* Extract a huffman coded value (zero runs and bit length) */
@@ -754,12 +796,14 @@ static JRESULT mcu_load (
 					bc = 1 << (bc - 1);				/* MSB position */
 					if (!(d & bc)) d -= (bc << 1) - 1;	/* Restore negative value if needed */
 					i = Zig[z];						/* Get raster-order index */
-					tmp[i] = d * dqf[i] >> 8;		/* De-quantize, apply scale factor of Arai algorithm and descale 8 bits */
+					if (!jd->validate_only) tmp[i] = d * dqf[i] >> 8;	/* Still consume and validate every entropy code. */
 				}
 			} while (++z < 64);		/* Next AC element */
 
-			if (JD_FORMAT != 2 || !cmp) {	/* C components may not be processed if in grayscale output */
+			if (!jd->validate_only && (JD_FORMAT != 2 || !cmp)) {	/* Validation needs no IDCT/MCU pixels. */
+				const uint64_t started = jd->profile ? jd->profile->clock(jd->profile->context) : 0;
 				if (z == 1 || (JD_USE_SCALE && jd->scale == 3)) {	/* If no AC element or scale ratio is 1/8, IDCT can be ommited and the block is filled with DC value */
+					if (jd->profile) jd->profile->dc_blocks++;
 					d = (jd_yuv_t)((*tmp / 256) + 128);
 					if (JD_FASTDECODE >= 1) {
 						for (i = 0; i < 64; bp[i++] = d) ;
@@ -767,8 +811,10 @@ static JRESULT mcu_load (
 						memset(bp, d, 64);
 					}
 				} else {
+					if (jd->profile) jd->profile->idct_blocks++;
 					block_idct(tmp, bp);	/* Apply IDCT and store the block to the MCU buffer */
 				}
+				if (jd->profile) jd->profile->transform_us += jd->profile->clock(jd->profile->context) - started;
 			}
 		}
 
@@ -784,6 +830,34 @@ static JRESULT mcu_load (
 /*-----------------------------------------------------------------------*/
 /* Output an MCU: Convert YCrCb to RGB and output it in RGB form         */
 /*-----------------------------------------------------------------------*/
+
+#if JD_REUSE_CHROMA && JD_FORMAT == 0 && !JD_USE_SCALE
+/* A 4:2:0 MCU has four Y blocks and one Cb/Cr pair. Compute each chroma
+   contribution once for its four pixels, retaining signed division rounding. */
+static void color_420(JDEC* jd)
+{
+	const int accuracy = (sizeof(int) > 2) ? 1024 : 128;
+	uint8_t* rgb = (uint8_t*)jd->workbuf;
+	for (unsigned int cy = 0; cy < 8; cy++) {
+		const jd_yuv_t* chroma = jd->mcubuf + 256 + cy * 8;
+		const unsigned int ybase = (cy >= 4 ? 128 : 0) + (cy % 4) * 16;
+		for (unsigned int cx = 0; cx < 8; cx++) {
+			const int cb = chroma[cx] - 128, cr = chroma[cx + 64] - 128;
+			const int red = (int)(1.402 * accuracy) * cr / accuracy;
+			const int green = ((int)(0.344 * accuracy) * cb + (int)(0.714 * accuracy) * cr) / accuracy;
+			const int blue = (int)(1.772 * accuracy) * cb / accuracy;
+			const jd_yuv_t* ypixels = jd->mcubuf + ybase + (cx >= 4 ? 64 : 0) + (cx % 4) * 2;
+			uint8_t* output = rgb + (cy * 32 + cx * 2) * 3;
+			for (unsigned int row = 0; row < 2; row++) {
+				const int y0 = ypixels[row * 8], y1 = ypixels[row * 8 + 1];
+				uint8_t* pixels = output + row * 48;
+				pixels[0] = BYTECLIP(y0 + red); pixels[1] = BYTECLIP(y0 - green); pixels[2] = BYTECLIP(y0 + blue);
+				pixels[3] = BYTECLIP(y1 + red); pixels[4] = BYTECLIP(y1 - green); pixels[5] = BYTECLIP(y1 + blue);
+			}
+		}
+	}
+}
+#endif
 
 static JRESULT mcu_output (
 	JDEC* jd,			/* Pointer to the decompressor object */
@@ -816,6 +890,12 @@ static JRESULT mcu_output (
 		pix = (uint8_t*)jd->workbuf;
 
 		if (JD_FORMAT != 2) {	/* RGB output (build an RGB MCU from Y/C component) */
+#if JD_REUSE_CHROMA && JD_FORMAT == 0 && !JD_USE_SCALE
+			if (mx == 16 && my == 16) {
+				color_420(jd);
+			} else
+#endif
+			{
 			for (iy = 0; iy < my; iy++) {
 				pc = py = jd->mcubuf;
 				if (my == 16) {		/* Double block height? */
@@ -839,6 +919,7 @@ static JRESULT mcu_output (
 					*pix++ = /*G*/ BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
 					*pix++ = /*B*/ BYTECLIP(yy + ((int)(1.772 * CVACC) * cb) / CVACC);
 				}
+			}
 			}
 		} else {	/* Monochrome output (build a grayscale MCU from Y comopnent) */
 			for (iy = 0; iy < my; iy++) {
@@ -946,7 +1027,7 @@ static JRESULT mcu_output (
 	}
 
 	/* Output the rectangular */
-	return outfunc(jd, jd->workbuf, &rect) ? JDR_OK : JDR_INTR; 
+	return outfunc(jd, jd->workbuf, &rect) ? JDR_OK : JDR_INTR;
 }
 
 
@@ -1124,10 +1205,12 @@ JRESULT jd_decomp (
 	unsigned int x, y, mx, my;
 	uint16_t rst, rsc;
 	JRESULT rc;
+	uint64_t started;
 
 
 	if (scale > (JD_USE_SCALE ? 3 : 0)) return JDR_PAR;
 	jd->scale = scale;
+	jd->validate_only = outfunc == NULL;
 
 	mx = jd->msx * 8; my = jd->msy * 8;			/* Size of the MCU (pixel) */
 
@@ -1142,10 +1225,19 @@ JRESULT jd_decomp (
 				if (rc != JDR_OK) return rc;
 				rst = 1;
 			}
+			started = jd->profile ? jd->profile->clock(jd->profile->context) : 0;
 			rc = mcu_load(jd);					/* Load an MCU (decompress huffman coded stream, dequantize and apply IDCT) */
+			if (jd->profile) {
+				jd->profile->load_us += jd->profile->clock(jd->profile->context) - started;
+				jd->profile->mcus++;
+			}
 			if (rc != JDR_OK) return rc;
-			rc = mcu_output(jd, outfunc, x, y);	/* Output the MCU (YCbCr to RGB, scaling and output) */
-			if (rc != JDR_OK) return rc;
+			if (!jd->validate_only) {
+				started = jd->profile ? jd->profile->clock(jd->profile->context) : 0;
+				rc = mcu_output(jd, outfunc, x, y);	/* Output the MCU (YCbCr to RGB, scaling and output) */
+				if (jd->profile) jd->profile->color_us += jd->profile->clock(jd->profile->context) - started;
+				if (rc != JDR_OK) return rc;
+			}
 		}
 	}
 

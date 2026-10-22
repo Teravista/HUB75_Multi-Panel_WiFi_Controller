@@ -86,8 +86,8 @@ public:
     // Clears availability after stored-frame failure.
     void ClearStoredFrame(void);
 
-    // Maps a stored RGB888 frame fragment into the CPU framebuffer.
-    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset);
+    // Maps a stored raw frame fragment into the CPU framebuffer.
+    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset, PixelFormat format = PixelFormat::RGB888);
 
 private:
     // Returns elapsed boot time in milliseconds for transport deadlines.

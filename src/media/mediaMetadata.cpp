@@ -3,6 +3,7 @@
 #include <cstring>
 
 #define MEDIA_MAGIC_BYTES 4
+#define JPEG_MINIMUM_RECORD_BYTES 24
 #define MEDIA_VERSION_OFFSET 4
 #define MEDIA_TYPE_OFFSET 5
 #define MEDIA_FORMAT_OFFSET 6
@@ -46,6 +47,8 @@ MediaMetadata::Photo (
     Returns the readable name of the pixel format.
 
     @return "RGB888" - Pixels contain one unsigned byte for each RGB channel.
+    @return "RGB565" - Pixels contain a little-endian packed 16-bit color.
+    @return "JPEG" - Payload contains indexed baseline JPEG frames.
     @return "unknown" - The descriptor contains an unsupported format identifier.
 */
 const char*
@@ -56,6 +59,12 @@ MediaMetadata::FormatName (
     if (pixelFormat == PixelFormat::RGB888) {
         return "RGB888";
     }
+    if (pixelFormat == PixelFormat::RGB565) {
+        return "RGB565";
+    }
+    if (pixelFormat == PixelFormat::JPEG) {
+        return "JPEG";
+    }
     return "unknown";
 } // FormatName
 
@@ -63,7 +72,8 @@ MediaMetadata::FormatName (
     Returns the number of bytes occupied by one raw pixel.
 
     @return IMAGE_BYTES_PER_PIXEL - One RGB888 pixel occupies three bytes.
-    @return 0 - The pixel format is unsupported.
+    @return RGB565_PIXEL_BYTES - One RGB565 pixel occupies two bytes.
+    @return 0 - JPEG is variable-length or the pixel format is unsupported.
 */
 size_t
 MediaMetadata::PixelBytes (
@@ -72,6 +82,9 @@ MediaMetadata::PixelBytes (
 {
     if (pixelFormat == PixelFormat::RGB888) {
         return IMAGE_BYTES_PER_PIXEL;
+    }
+    if (pixelFormat == PixelFormat::RGB565) {
+        return RGB565_PIXEL_BYTES;
     }
     return 0;
 } // PixelBytes
@@ -110,7 +123,7 @@ MediaMetadata::PayloadBytes (
 {
     uint64_t frameBytes;
 
-    if (!width || !height || !frameCount || !fpsDenominator || !PixelBytes()) {
+    if (!width || !height || !frameCount || !fpsDenominator || (!PixelBytes() && pixelFormat != PixelFormat::JPEG)) {
         return false;
     }
     if (type == MediaType::Photo) {
@@ -118,6 +131,19 @@ MediaMetadata::PayloadBytes (
             return false;
         }
     } else if (type != MediaType::Video || !fpsNumerator) {
+        return false;
+    }
+
+    // JPEG payloads contain an index and variable records rather than raw frames.
+    if (pixelFormat == PixelFormat::JPEG) {
+        if (type != MediaType::Video || encodedBytes < uint64_t(frameCount) * JPEG_MINIMUM_RECORD_BYTES ||
+            encodedBytes > UINT32_MAX) {
+            return false;
+        }
+        bytes = encodedBytes;
+        return true;
+    }
+    if (encodedBytes) {
         return false;
     }
 
@@ -147,7 +173,7 @@ MediaMetadata::IsPhotoFor (
 {
     uint64_t bytes;
 
-    return PayloadBytes(bytes) && type == MediaType::Photo && width == panelWidth &&
+    return PayloadBytes(bytes) && type == MediaType::Photo && pixelFormat == PixelFormat::RGB888 && width == panelWidth &&
            height == panelHeight;
 } // IsPhotoFor
 
@@ -261,7 +287,7 @@ MediaMetadataCodec::ReadUnsigned64LittleEndian (
     @param out Writable destination containing at least HeaderBytes bytes.
     @param capacity Number of bytes available at out.
 
-    @return true - A complete version-1 descriptor was written.
+    @return true - A complete version-1 raw or version-2 JPEG descriptor was written.
     @return false - Metadata, output pointer or capacity is invalid; output is unchanged.
 */
 bool
@@ -279,7 +305,11 @@ MediaMetadataCodec::EncodeMediaDescriptor (
 
     // Serialize every field explicitly; no structure bytes are copied.
     std::memcpy(out, "H75M", MEDIA_MAGIC_BYTES);
-    out[MEDIA_VERSION_OFFSET] = Version;
+    if (metadata.pixelFormat == PixelFormat::JPEG) {
+        out[MEDIA_VERSION_OFFSET] = JpegVersion;
+    } else {
+        out[MEDIA_VERSION_OFFSET] = Version;
+    }
     out[MEDIA_TYPE_OFFSET] = uint8_t(metadata.type);
     out[MEDIA_FORMAT_OFFSET] = uint8_t(metadata.pixelFormat);
     if (metadata.pingPong) {
@@ -322,7 +352,7 @@ MediaMetadataCodec::DecodeMediaDescriptor (
     uint64_t payload;
 
     if (!in || bytes != HeaderBytes || std::memcmp(in, "H75M", MEDIA_MAGIC_BYTES) ||
-        in[MEDIA_VERSION_OFFSET] != Version || (in[MEDIA_FLAGS_OFFSET] & ~PingPongFlag) != 0) {
+        (in[MEDIA_VERSION_OFFSET] != Version && in[MEDIA_VERSION_OFFSET] != JpegVersion) || (in[MEDIA_FLAGS_OFFSET] & ~PingPongFlag) != 0) {
         return false;
     }
 
@@ -335,6 +365,14 @@ MediaMetadataCodec::DecodeMediaDescriptor (
     decoded.frameCount = ReadUnsigned32LittleEndian(in + MEDIA_FRAME_COUNT_OFFSET);
     decoded.fpsNumerator = ReadUnsigned32LittleEndian(in + MEDIA_FPS_NUMERATOR_OFFSET);
     decoded.fpsDenominator = ReadUnsigned32LittleEndian(in + MEDIA_FPS_DENOMINATOR_OFFSET);
+    if (decoded.pixelFormat == PixelFormat::JPEG) {
+        if (in[MEDIA_VERSION_OFFSET] != JpegVersion) {
+            return false;
+        }
+        decoded.encodedBytes = ReadUnsigned64LittleEndian(in + MEDIA_PAYLOAD_BYTES_OFFSET);
+    } else if (in[MEDIA_VERSION_OFFSET] != Version) {
+        return false;
+    }
     if (!decoded.PayloadBytes(payload) ||
         ReadUnsigned64LittleEndian(in + MEDIA_PAYLOAD_BYTES_OFFSET) != payload) {
         return false;

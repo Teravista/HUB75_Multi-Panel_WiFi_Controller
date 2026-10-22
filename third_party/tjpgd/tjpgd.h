@@ -11,15 +11,8 @@ extern "C" {
 #include "tjpgdcnf.h"
 #include <string.h>
 
-#if defined(_WIN32)	/* VC++ or some compiler without stdint.h */
-typedef unsigned char	uint8_t;
-typedef unsigned short	uint16_t;
-typedef short			int16_t;
-typedef unsigned long	uint32_t;
-typedef long			int32_t;
-#else				/* Embedded platform */
+/* Local portability fix: modern host/embedded compilers all provide stdint.h. */
 #include <stdint.h>
-#endif
 
 #if JD_FASTDECODE >= 1
 typedef int16_t jd_yuv_t;
@@ -31,7 +24,7 @@ typedef uint8_t jd_yuv_t;
 /* Error code */
 typedef enum {
 	JDR_OK = 0,	/* 0: Succeeded */
-	JDR_INTR,	/* 1: Interrupted by output function */	
+	JDR_INTR,	/* 1: Interrupted by output function */
 	JDR_INP,	/* 2: Device error or wrong termination of input stream */
 	JDR_MEM1,	/* 3: Insufficient memory pool for the image */
 	JDR_MEM2,	/* 4: Insufficient stream input buffer */
@@ -54,6 +47,13 @@ typedef struct {
 
 
 /* Decompressor object structure */
+/* Local optional instrumentation. Clock excludes input/output callbacks. */
+typedef struct {
+	uint64_t (*clock)(void*);
+	void* context;
+	uint64_t load_us, transform_us, color_us;
+	uint32_t mcus, idct_blocks, dc_blocks;
+} JDPROFILE;
 typedef struct JDEC JDEC;
 struct JDEC {
 	size_t dctr;				/* Number of bytes available in the input buffer */
@@ -61,6 +61,7 @@ struct JDEC {
 	uint8_t* inbuf;				/* Bit stream input buffer */
 	uint8_t dbit;				/* Number of bits availavble in wreg or reading bit mask */
 	uint8_t scale;				/* Output scaling ratio */
+	uint8_t validate_only;       /* Parse every block; skip pixel reconstruction when output is NULL. */
 	uint8_t msx, msy;			/* MCU size in unit of block (width, height) */
 	uint8_t qtid[3];			/* Quantization table ID of each component, Y, Cb, Cr */
 	uint8_t ncomp;				/* Number of color components 1:grayscale, 3:color */
@@ -86,6 +87,7 @@ struct JDEC {
 	size_t sz_pool;				/* Size of momory pool (bytes available) */
 	size_t (*infunc)(JDEC*, uint8_t*, size_t);	/* Pointer to jpeg stream input function */
 	void* device;				/* Pointer to I/O device identifiler for the session */
+	JDPROFILE* profile; /* Optional; attach after jd_prepare clears this object. */
 };
 
 
