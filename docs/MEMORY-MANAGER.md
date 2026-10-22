@@ -53,7 +53,6 @@ if (memory.Initialize()) {
 }
 ```
 
-
 ## Automatic photo persistence
 
 Each completed raw TCP photo is saved once, before drawing the connection icon.
@@ -72,7 +71,7 @@ Startup queues the flashed image, then attempts to restore a verified saved
 photo or first video frame before Wi-Fi connection begins. Missing or unusable storage leaves the
 flashed image available. SD hardware is released for the first radio resource
 claim and initialized once afterward, even if association is still pending.
-This stage uses explicit initialization; automatic SD remount recovery is separate.
+Storage is mounted through explicit initialization.
 
 The `PhotoPersistence` bridge connects MemoryManager to FrameBufferController.
 FrameReceiver supplies ownership tokens and completed-frame revisions; TCP
@@ -105,3 +104,13 @@ one checked frame and `CloseMediaPlayback` releases its file. A corrupt later
 frame excludes its generation on the next open. MediaPlayer connects that
 storage boundary to the shared framebuffer under render ownership. See
 [video upload and playback](VIDEO-UPLOAD.md) for layouts and failure behavior.
+
+## Compact and JPEG video
+
+Video transactions also accept RGB565 and indexed baseline JPEG. RGB565 retains
+the raw version-4 record layout with two bytes per pixel. JPEG uses version 5,
+validates the complete saved payload and every decoded frame before publishing,
+and checks each selected frame again during playback. A four-KiB bounded index
+cache avoids rereading offsets for each frame. JPEG shares the existing 24 KiB
+scratch allocation between compressed input and decoder workspace; no extra
+full framebuffer is allocated. See [JPEG video](JPEG-VIDEO.md).

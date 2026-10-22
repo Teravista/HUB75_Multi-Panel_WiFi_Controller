@@ -12,7 +12,7 @@
 /  2: Grayscale (8-bit/pix)
 */
 
-#define	JD_USE_SCALE	1
+#define	JD_USE_SCALE	0
 /* Switches output descaling feature.
 /  0: Disable
 /  1: Enable
@@ -24,10 +24,20 @@
 /  1: Enable
 */
 
-#define JD_FASTDECODE	0
+#define JD_FASTDECODE	2
 /* Optimization level
 /  0: Basic optimization. Suitable for 8/16-bit MCUs.
 /  1: + 32-bit barrel shifter. Suitable for 32-bit MCUs.
 /  2: + Table conversion for huffman decoding (wants 6 << HUFF_BIT bytes of RAM)
 */
+
+/* Local short-code/available-bit fast paths; zero retains the reference path. */
+#ifndef JD_INLINE_ENTROPY
+#define JD_INLINE_ENTROPY 1
+#endif
+
+/* Reuse the identical chroma contribution of each 2x2 RGB888 pixel group. */
+#ifndef JD_REUSE_CHROMA
+#define JD_REUSE_CHROMA 1
+#endif
 

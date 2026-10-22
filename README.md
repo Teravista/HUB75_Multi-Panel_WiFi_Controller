@@ -6,7 +6,7 @@
       <img src="readmeAssets/DisplayWithAppleFlashed.png" alt="HUB75 multi-panel display showing an Apple logo">
     </td>
     <td width="50%">
-      A Raspberry Pi Pico 2 W controller for a 128x256 HUB75 LED display made from four daisy-chained 64x128 panels, with animation playback and live image uploads over WiFi/TCP. This README covers the hardware build, usage, roadmap, and internal architecture.
+      A Raspberry Pi Pico 2 W controller for a 128x256 HUB75 LED display made from four daisy-chained 64x128 panels, with animation playback and live image uploads over WiFi/TCP. This README covers the hardware build, usage, and internal architecture.
       <br><br>
       <a href="readmeAssets/WalkInTheForest.mp4">Watch the display demo (MP4)</a>
       <br><br>
@@ -33,16 +33,12 @@
   - [Flashing Your Own Image or Animation](#flashing-your-own-image-or-animation)
   - [Python Utility Setup](#python-utility-setup)
   - [Uploading an Image Over TCP](#uploading-an-image-over-tcp)
-- [4. Future Plans](#4-future-plans)
-  - [Save TCP-Uploaded Image to Flash](#save-tcp-uploaded-image-to-flash)
-  - [Flash-Backed Animation Upload Over TCP](#flash-backed-animation-upload-over-tcp)
-  - [External Storage for Longer Animations](#external-storage-for-longer-animations)
-- [5. Implementation Details / Architecture](#5-implementation-details--architecture)
+- [4. Implementation Details / Architecture](#4-implementation-details--architecture)
   - [Source folders](#source-folders)
   - [Program Flow](#program-flow)
   - [Driver Overview](#driver-overview)
   - [WiFi State Machine](#wifi-state-machine)
-- [6. Credits / License](#6-credits--license)
+- [5. Credits / License](#5-credits--license)
   - [Attribution](#attribution)
   - [License](#license)
 
@@ -127,22 +123,11 @@ python -m pip install -r utilityScripts/requirements.txt
 4. Set your image path (`IMAGE_PATH`) in `utilityScripts/sendImageOverTCP.py`, then run the script.
 5. The new image should be uploaded and displayed by the panel.
 
-NOTE: only still images can currently be sent over TCP, and the upload is lost on power-off - the panel reverts to the flashed default.
+Completed photo uploads are saved to microSD. Python video uploads use TCP port
+5002 and retain their format, frame rate and loop setting after restart. If no
+valid saved content is available, the controller uses the flashed fallback.
 
-# 4. Future Plans
-
-Several current hardware limitations may be addressed in future updates.
-
-## Save TCP-Uploaded Image to Flash
-Currently, a TCP-uploaded image lives only in RAM and is lost when the Pico is powered off. The plan is to add a step that writes the newly uploaded image into flash, replacing the previously flashed image, so the panel keeps showing it after a power cycle without needing to reconnect the Pico to a computer or upload over TCP.
-
-## Flash-Backed Animation Upload Over TCP
-Once uploaded images can be saved to flash, this opens the door to uploading multiple frames and flashing full animations over TCP. Currently, RAM only has room for a single frame at a time, so anything more would run out of memory.
-
-## External Storage for Longer Animations
-This is a longer-term idea, much further out than the two plans above. At 128x256 pixels and RGB888, each frame takes up a lot of space, and with the SDK's flash overhead, the current maximum is 38 frames - enough for a very short looping animation, but not much more. External storage would remove this limit, allowing long-form animations at a much higher frame count.
-
-# 5. Implementation Details / Architecture
+# 4. Implementation Details / Architecture
 
 ## Source folders
 
@@ -219,7 +204,7 @@ WiFi is up and the TCP upload listener is bound and accepting connections - this
 - Queries the radio for RSSI to catch an AP that vanished without dropping the link - allowed to fail a few times in a row before it's treated as lost.
 - Periodically opens a TCP probe to the gateway to confirm the path is actually alive (and to keep the connection from being dropped as idle)
 
-# 6. Credits / License
+# 5. Credits / License
 
 ## Attribution
 - [JuPfu/hub75](https://github.com/JuPfu/hub75) by Jürgen Pfundt and Christoph Mair - the DMA/PIO/BCM HUB75 driver core this project is forked from.
@@ -229,3 +214,6 @@ WiFi is up and the TCP upload listener is bound and accepting connections - this
 This project's original code is licensed under the [MIT License](LICENSE).
 Vendored and derived components remain subject to their respective licenses;
 see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Video upload supports RGB565, RGB888 and indexed JPEG, with JPEG quality 85 by
+default. See [JPEG video and compact storage](docs/JPEG-VIDEO.md).

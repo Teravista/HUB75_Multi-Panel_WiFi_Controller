@@ -8,7 +8,7 @@
 #include "media/include/mediaTransfer.hpp"
 
 /**
-    Provides the foreground SD storage boundary for saved photos and raw videos.
+    Provides the foreground SD storage boundary for saved photos and raw/indexed-JPEG videos.
 
     It owns SPI, the filesystem, file handles and one shared 24 KiB I/O buffer.
     Named photos and alternating retained generations use checked metadata and
@@ -26,13 +26,13 @@ public:
 
     using ImageSource = bool (*)(void* context, uint8_t* pixels, size_t bytes, size_t offset);
 
-    // Saves a new retained photo while keeping the previous valid generation.
+    // Saves a retained RGB888 photo with the default full-panel descriptor.
     bool SaveLastImage(ImageSource source, void* context);
 
-    // Saves a retained RGB888 photo with an explicit media descriptor.
+    // Saves a new retained photo while keeping the previous valid generation.
     bool SaveLastImage(const MediaMetadata& metadata, ImageSource source, void* context);
 
-    // Restores the newest verified retained photo and its optional metadata.
+    // Restores the newest verified retained photo through a chunk sink.
     bool ReadLastImage(ImageSink sink, void* context, MediaMetadata* metadata = nullptr);
 
     // Mounts the SD card for image storage.
@@ -56,7 +56,7 @@ public:
     // Saves, rereads, and removes an unused temporary test image.
     bool RunReadWriteCheck(const uint8_t* pixels, size_t bytes);
 
-    // Starts an unpublished raw-video save while retaining the previous valid slot.
+    // Starts an unpublished raw or indexed-JPEG video save while retaining the previous valid slot.
     bool BeginMediaSave(const MediaMetadata& metadata, uint32_t payloadChecksum);
 
     // Adds received video bytes to the bounded storage write buffer.
@@ -131,7 +131,7 @@ private:
     // Reads a 32-bit unsigned value in little-endian byte order.
     static uint32_t ReadUnsigned32LittleEndian(const uint8_t* p);
 
-    // Builds a stored-photo header with its payload checksum.
+    // Builds a photo storage header with dimensions and payload checksum.
     static void BuildPhotoStorageHeader(uint8_t* header, uint32_t checksum);
 
     // Compares readback pixels against the source used by the storage self-check.
@@ -147,14 +147,15 @@ private:
         uint32_t checksum = 0;
         uint32_t crcSeed = STORAGE_CRC32_INITIAL_U;
         bool frameChecksums = false;
+        bool indexedJpeg = false;
         int result = 0;
         const char* error = "invalid saved photo";
     };
 
-    // Builds a saved-photo header with metadata and separate checksums.
+    // Builds a saved-photo header with its generation and checksum.
     static void BuildSavedPhotoHeader(uint8_t* header, const MediaMetadata& metadata, uint32_t generation, uint32_t checksum);
 
-    // Validates a current or legacy stored photo and its provisional pixels.
+    // Validates a stored photo while streaming provisional pixel data.
     static SavedPhotoSlot ReadAndValidatePhotoFile(const char* path, ImageSink sink, void* context);
 
     // Reads and validates one retained photo, optionally delivering its pixels.
@@ -179,6 +180,7 @@ private:
         uint64_t verified = 0;
         uint32_t frameBytes = 0;
         uint32_t verifyFrameBytes = 0;
+        uint32_t jpegVerifiedFrames = 0;
         uint32_t crc = STORAGE_CRC32_INITIAL_U;
         uint32_t frameCrc = STORAGE_CRC32_INITIAL_U;
         uint32_t verifyCrc = STORAGE_CRC32_INITIAL_U;
@@ -214,14 +216,42 @@ private:
     // Discards an unpublished save without reacquiring storage ownership.
     static void DiscardIncompleteMediaSave(bool safe);
 
-    // Builds the checked raw-video header for the current save.
+    // Builds the checked raw or indexed-JPEG video header for the current save.
     static void BuildVideoStorageHeader(uint8_t* header);
 
-    // Inspects either a photo or raw video in a retained slot.
+    // Inspects a photo, raw video or indexed JPEG video in a retained slot.
     static SavedPhotoSlot InspectSavedMediaSlot(unsigned index);
 
     // Streams and checks a raw frame from the inspection or playback handle.
     static FrameResult ReadAndVerifyRawVideoFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting);
+
+    struct JpegIndexEntry {
+        uint32_t offset = 0;
+        uint32_t length = 0;
+    };
+
+    // Loads and checks a bounded index window for JPEG playback.
+    static bool LoadJpegIndexWindow(const SavedPhotoSlot& slot, uint32_t index, int& result);
+
+    struct JpegReadContext {
+        void* file = nullptr;
+        size_t remaining = 0;
+        size_t buffered = 0;
+        size_t cursor = 0;
+        uint32_t crc = STORAGE_CRC32_INITIAL_U;
+        int result = 0;
+        uint8_t previousByte = 0;
+        uint8_t lastByte = 0;
+    };
+
+    // Supplies bounded compressed bytes and checksums their exact record data.
+    static size_t ReadJpegInput(void* context, uint8_t* bytes, size_t count);
+
+    // Validates an indexed JPEG record before completing provisional frame output.
+    static FrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting, bool verifying = false);
+
+    // Checks one bounded JPEG payload block or one complete encoded frame.
+    bool VerifyJpegSaveStep(bool& finished);
 
     bool ready_ = false;
     const char* error_ = "storage not initialized";

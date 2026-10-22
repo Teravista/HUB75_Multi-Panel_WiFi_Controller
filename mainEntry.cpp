@@ -11,7 +11,7 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "raw-video-storage"
+#define WIFI_STATE_MACHINE_REV "jpeg-video-storage"
 
 /**
     Prepares and submits display frames while advancing photo and network services.
@@ -66,6 +66,8 @@ RenderLoop (
     lastStatusMs = to_ms_since_boot(get_absolute_time());
 
     for (;;) {
+
+        // Advance network services before claiming the shared rendering buffer.
         wifiNetwork.UpdateNetworkStateMachine();
         if (!storageStarted && wifiNetwork.IsRadioInitialized()) {
             storageStarted = true;
@@ -75,6 +77,8 @@ RenderLoop (
                 printf("[memory] saves unavailable: %s\n", memory.GetLastError());
             }
         }
+
+        // Finish deferred upload or verification work and schedule any saved-media reload.
         video.Update();
         reloadVideo = video.TakeReloadRequest();
         if (reloadVideo) {
@@ -100,6 +104,8 @@ RenderLoop (
         } else {
             player.Update(to_ms_since_boot(get_absolute_time()));
         }
+
+        // Draw the fallback only when no verified or newly uploaded frame is available.
         uploadedFrame = upload.GetUploadedFrameData();
         if (!uploadedFrame) {
             displayHelpers.RenderLogicalImageToGraphics(
@@ -108,6 +114,7 @@ RenderLoop (
         }
         displayHelpers.DrawWifiStatusIcon(graphics, wifiNetwork.IsNetworkReady());
 
+        // Measure completed panel scans independently of saved-video frame selection.
         currentFrameCount = hub75_frame_count;
         uptimeMs = to_ms_since_boot(get_absolute_time());
         elapsedMs = uptimeMs - to_ms_since_boot(lastFpsTime);
@@ -121,6 +128,8 @@ RenderLoop (
                    framesPerSecond, wifiNetwork.GetNetStateName(), wifiNetwork.GetWifiIpText());
             lastStatusMs = uptimeMs;
         }
+
+        // Submit only when the driver can accept a complete frame, then release render ownership.
         if (hub75_ready_for_update()) {
             update(&graphics);
         }
@@ -155,6 +164,7 @@ main (
     CpuGraphics graphics(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, frameBuffer);
     bool restored;
 
+    // Start clocks, serial output and panel scanning before performing storage or Wi-Fi work.
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
     stdio_init_all();
 #if HUB75_VERBOSE_LOGS
@@ -168,11 +178,13 @@ main (
     setIntensity(DISPLAY_INTENSITY);
     printf("[boot] hub75 driver up\n");
 
+    // Queue visible fallback content while the saved-media slot is inspected.
     displayHelpers.RenderLogicalImageToGraphics(
         graphics, displayHelpers.GetImageDataForFrame(FIRST_FRAME_INDEX));
     displayHelpers.DrawWifiStatusIcon(graphics, false);
     update(&graphics);
 
+    // Restore a checked saved frame, retaining the fallback when storage or decoding fails.
     restored = false;
     if (memory.Initialize()) {
         if (upload.TryBeginRender()) {
@@ -184,11 +196,15 @@ main (
         } else {
             printf("[memory] using flashed image: %s\n", memory.GetLastError());
         }
+
+        // Release the startup SD session before the initial radio resource claim.
         player.Stop();
         memory.Shutdown();
     } else {
         printf("[memory] using flashed image: %s\n", memory.GetLastError());
     }
+
+    // Submit restored content before entering the foreground service loop.
     if (upload.TryBeginRender()) {
         if (!restored) {
             displayHelpers.RenderLogicalImageToGraphics(

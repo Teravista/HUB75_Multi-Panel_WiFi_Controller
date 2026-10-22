@@ -3,6 +3,7 @@
 #include "sd/include/storageCrc32.hpp"
 #include "config/defines.h"
 #include "ff.h"
+#include "media/jpeg/include/jpegFrameDecoder.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -21,6 +22,9 @@ struct MemoryManager::StorageState {
     FIL playbackFile{};
     SaveSession save;
     PlaybackSession playback;
+    JpegIndexEntry jpegIndex[JPEG_INDEX_CACHE_ENTRIES];
+    uint32_t jpegIndexFirst = 0;
+    uint32_t jpegIndexCount = 0;
     int rejectedSlot = SAVED_PHOTO_NO_SLOT;
     alignas(DMA_BUFFER_ALIGNMENT) uint8_t readBuffer[ChunkBytes];
     std::atomic_flag storageBusy = ATOMIC_FLAG_INIT;
@@ -274,6 +278,7 @@ MemoryManager::Initialize (
 
     // Claim the shared storage buffer before filesystem access or user callbacks.
     StorageGuard guard;
+
     if (!guard.acquired) {
         return ReportStorageFailure("storage busy");
     }
@@ -324,6 +329,7 @@ MemoryManager::Shutdown (
 
     // Claim the shared storage buffer before filesystem access or user callbacks.
     StorageGuard guard;
+
     if (!guard.acquired) {
         return ReportStorageFailure("storage busy");
     }
@@ -407,6 +413,7 @@ MemoryManager::SaveImage (
 
     // Claim the shared storage buffer before filesystem access or user callbacks.
     StorageGuard guard;
+
     if (!guard.acquired) {
         return ReportStorageFailure("storage busy");
     }
@@ -493,6 +500,7 @@ MemoryManager::ReadImage (
     SavedPhotoSlot loaded;
 
     StorageGuard guard;
+
     if (!guard.acquired) {
         return ReportStorageFailure("storage busy");
     }
@@ -912,6 +920,7 @@ MemoryManager::WriteSavedPhotoSlot (
     size_t offset;
     UINT bytes;
 
+    // Open the alternate retained slot; the preceding valid generation remains untouched.
     if (index == 0) {
         path = "0:/LASTA.H75";
     } else {
@@ -922,6 +931,8 @@ MemoryManager::WriteSavedPhotoSlot (
     if (status != FR_OK) {
         return false;
     }
+
+    // Reserve the header and stream stable source chunks while accumulating the payload CRC.
     BuildSavedPhotoHeader(header, metadata, generation, 0);
     crc = STORAGE_CRC32_INITIAL_U;
     count = 0;
@@ -938,6 +949,8 @@ MemoryManager::WriteSavedPhotoSlot (
         good = status == FR_OK && count == bytes;
         offset += count;
     }
+
+    // Install the final payload checksum only after every source chunk was written.
     if (good) {
         BuildSavedPhotoHeader(header, metadata, generation, ~crc);
         status = f_lseek(&storage_.imageFile, 0);
@@ -946,11 +959,15 @@ MemoryManager::WriteSavedPhotoSlot (
         }
         good = status == FR_OK && count == sizeof(header);
     }
+
+    // Avoid additional filesystem cleanup writes after communication with the card has failed.
     if (status == FR_DISK_ERR || status == FR_NOT_READY) {
         storage_.imageFile = {};
         result = status;
         return false;
     }
+
+    // Close to flush the completed file; remove an incomplete target only while storage is usable.
     closed = f_close(&storage_.imageFile);
     if (status == FR_OK) {
         status = closed;
@@ -1017,7 +1034,9 @@ MemoryManager::SaveLastImage (
     int result;
     size_t index;
 
+    // Claim storage and reject unsupported input before inspecting or changing retained files.
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || !source) {
         return ReportStorageFailure("photo storage busy/unavailable or missing source");
     }
@@ -1028,12 +1047,16 @@ MemoryManager::SaveLastImage (
         !metadata.IsPhotoFor(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) {
         return ReportStorageFailure("unsupported photo metadata");
     }
+
+    // Inspect both generations so the destination can preserve the newest usable content.
     for (index = 0; index < SAVED_PHOTO_SLOT_COUNT; ++index) {
         slots[index] = InspectSavedMediaSlot(unsigned(index));
         if (slots[index].state == SlotState::IoError) {
             return ReportStorageFailure(slots[index].error, slots[index].result);
         }
     }
+
+    // Close any old playback handle and select the replacement generation and alternate slot.
     CloseSavedMediaPlayback();
     latest = FindNewestSavedPhoto(slots);
     if (latest == 0) {
@@ -1045,6 +1068,8 @@ MemoryManager::SaveLastImage (
     if (latest >= 0) {
         generation = slots[latest].generation + 1;
     }
+
+    // Write the new slot, then independently reread it before reporting a successful save.
     result = FR_OK;
     if (!WriteSavedPhotoSlot(target, generation, metadata, source, context, result)) {
         return ReportStorageFailure("saved photo write failed", result);
@@ -1085,6 +1110,7 @@ MemoryManager::ReadLastImage (
     int latest;
 
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || !sink) {
         return ReportStorageFailure("photo storage busy/unavailable or missing sink");
     }
@@ -1215,6 +1241,7 @@ MemoryManager::CloseSavedMediaPlayback (
     }
     storage_.playbackFile = {};
     storage_.playback = {};
+    storage_.jpegIndexCount = 0;
 } // CloseSavedMediaPlayback
 
 /**
@@ -1244,7 +1271,7 @@ MemoryManager::DiscardIncompleteMediaSave (
 } // DiscardIncompleteMediaSave
 
 /**
-    Builds the checked raw-video header for the current save.
+    Builds the checked raw or indexed-JPEG video header for the current save.
 
     The final header includes frame stride, generation, descriptor and expected
     payload checksum. It is installed only after complete SD readback succeeds.
@@ -1259,13 +1286,20 @@ MemoryManager::BuildVideoStorageHeader (
     std::memset(header, 0, MediaTransfer::FileHeaderBytes);
     std::memcpy(header, "H75L", MEDIA_MAGIC_BYTES);
     header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_RAW_VIDEO;
+    if (storage_.save.metadata.pixelFormat == PixelFormat::JPEG) {
+        header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_JPEG_VIDEO;
+    }
     MediaMetadataCodec::WriteUnsigned16LittleEndian(header + STORAGE_HEADER_LENGTH_OFFSET, MediaTransfer::FileHeaderBytes);
     WriteUnsigned32LittleEndian(header + STORAGE_HEADER_GENERATION_OFFSET, storage_.save.generation);
     MediaMetadataCodec::EncodeMediaDescriptor(storage_.save.metadata, header + STORAGE_HEADER_METADATA_OFFSET,
                                             MediaMetadataCodec::HeaderBytes);
     WriteUnsigned32LittleEndian(header + VIDEO_FRAME_BYTES_OFFSET, uint32_t(storage_.save.metadata.FrameBytes()));
-    WriteUnsigned32LittleEndian(header + VIDEO_FRAME_STRIDE_OFFSET,
-                               uint32_t(storage_.save.metadata.FrameBytes()) + FRAME_CHECKSUM_BYTES);
+    if (storage_.save.metadata.pixelFormat == PixelFormat::JPEG) {
+        WriteUnsigned32LittleEndian(header + VIDEO_FRAME_STRIDE_OFFSET, MediaTransfer::JpegIndexBytes);
+    } else {
+        WriteUnsigned32LittleEndian(header + VIDEO_FRAME_STRIDE_OFFSET,
+                                   uint32_t(storage_.save.metadata.FrameBytes()) + FRAME_CHECKSUM_BYTES);
+    }
     WriteUnsigned32LittleEndian(header + VIDEO_DATA_OFFSET_FIELD, MediaTransfer::FileHeaderBytes);
     WriteUnsigned32LittleEndian(header + VIDEO_PAYLOAD_CRC_OFFSET, storage_.save.expectedCrc);
     WriteUnsigned32LittleEndian(header + VIDEO_HEADER_CRC_OFFSET,
@@ -1309,6 +1343,7 @@ MemoryManager::ReadAndVerifyRawVideoFrame (
     size_t chunk;
     uint8_t checksum[FRAME_CHECKSUM_BYTES];
 
+    // Choose the owned file handle and the checksum layout used by this saved generation.
     file = &storage_.playbackFile;
     if (inspecting) {
         file = &storage_.imageFile;
@@ -1319,15 +1354,19 @@ MemoryManager::ReadAndVerifyRawVideoFrame (
         stride += FRAME_CHECKSUM_BYTES;
         crc = STORAGE_CRC32_INITIAL_U;
     }
+
+    // Seek only when the selected frame is not already next in the file stream.
     position = slot.dataOffset + stride * index;
     if (f_tell(file) != position) {
         read.result = f_lseek(file, FSIZE_t(position));
     }
+
+    // Read bounded whole-pixel fragments; use a short prefix to reach a sector boundary.
     for (offset = 0; read.result == FR_OK && offset < slot.metadata.FrameBytes();) {
         chunk = ChunkBytes;
         if (f_tell(file) % SD_SECTOR_BYTES) {
             chunk = SD_SECTOR_BYTES - size_t(f_tell(file) % SD_SECTOR_BYTES);
-            while (chunk % IMAGE_BYTES_PER_PIXEL) {
+            while (chunk % slot.metadata.PixelBytes()) {
                 chunk += SD_SECTOR_BYTES;
             }
         }
@@ -1346,6 +1385,8 @@ MemoryManager::ReadAndVerifyRawVideoFrame (
     if (read.result != FR_OK) {
         return read;
     }
+
+    // Accept provisional pixels only when the frame checksum matches its stored record.
     expected = slot.checksum;
     if (slot.frameChecksums) {
         read.result = f_read(file, checksum, sizeof(checksum), &count);
@@ -1360,7 +1401,7 @@ MemoryManager::ReadAndVerifyRawVideoFrame (
 } // ReadAndVerifyRawVideoFrame
 
 /**
-    Inspects either a photo or raw video in a retained slot.
+    Inspects a photo, raw video or indexed JPEG video in a retained slot.
 
     Legacy photos retain complete validation. Video headers must match supported
     dimensions, stride and exact file size; their first frame is checked before
@@ -1382,7 +1423,11 @@ MemoryManager::InspectSavedMediaSlot (
     FRESULT closed;
     bool valid;
     FrameResult first;
+    bool jpeg;
+    uint64_t expectedSize;
+    uint32_t expectedStride;
 
+    // Classify missing and inaccessible slots before attempting to parse their headers.
     slot.result = f_open(&storage_.imageFile, GetSavedMediaPath(index), FA_READ);
     if (slot.result == FR_NO_FILE) {
         return slot;
@@ -1391,12 +1436,15 @@ MemoryManager::InspectSavedMediaSlot (
         slot.state = SlotState::IoError;
         return slot;
     }
+
+    // Recognize older photo containers and delegate their complete validation to the photo reader.
     std::memset(header, 0, sizeof(header));
     slot.result = f_read(&storage_.imageFile, header, STORAGE_HEADER_PREFIX_BYTES, &count);
     if (slot.result == FR_OK && count == STORAGE_HEADER_PREFIX_BYTES &&
         (!std::memcmp(header, "H75I", MEDIA_MAGIC_BYTES) ||
          (!std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
-          header[STORAGE_HEADER_VERSION_OFFSET] != STORAGE_VERSION_RAW_VIDEO))) {
+          header[STORAGE_HEADER_VERSION_OFFSET] != STORAGE_VERSION_RAW_VIDEO &&
+          header[STORAGE_HEADER_VERSION_OFFSET] != STORAGE_VERSION_JPEG_VIDEO))) {
         closed = f_close(&storage_.imageFile);
         if (closed != FR_OK) {
             slot.state = SlotState::IoError;
@@ -1405,6 +1453,8 @@ MemoryManager::InspectSavedMediaSlot (
         }
         return ReadSavedPhotoSlot(index);
     }
+
+    // Validate the video header checksum and descriptor before trusting any offsets or lengths.
     slot.state = SlotState::Invalid;
     valid = slot.result == FR_OK && count == STORAGE_HEADER_PREFIX_BYTES;
     if (valid) {
@@ -1412,7 +1462,8 @@ MemoryManager::InspectSavedMediaSlot (
                              sizeof(header) - STORAGE_HEADER_PREFIX_BYTES, &count);
         valid = slot.result == FR_OK && count == sizeof(header) - STORAGE_HEADER_PREFIX_BYTES &&
                 !std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
-                header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_RAW_VIDEO &&
+                (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_RAW_VIDEO ||
+                 header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_JPEG_VIDEO) &&
                 header[STORAGE_HEADER_RESERVED_OFFSET] == 0 &&
                 MediaMetadataCodec::ReadUnsigned16LittleEndian(header + STORAGE_HEADER_LENGTH_OFFSET) == sizeof(header) &&
                 ReadUnsigned32LittleEndian(header + VIDEO_HEADER_CRC_OFFSET) ==
@@ -1421,20 +1472,42 @@ MemoryManager::InspectSavedMediaSlot (
                                                           MediaMetadataCodec::HeaderBytes, slot.metadata) &&
                 MediaTransfer::IsSupportedVideo(slot.metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT) &&
                 ReadUnsigned32LittleEndian(header + VIDEO_FRAME_BYTES_OFFSET) == slot.metadata.FrameBytes() &&
-                ReadUnsigned32LittleEndian(header + VIDEO_FRAME_STRIDE_OFFSET) == slot.metadata.FrameBytes() + FRAME_CHECKSUM_BYTES &&
-                ReadUnsigned32LittleEndian(header + VIDEO_DATA_OFFSET_FIELD) == sizeof(header) &&
-                uint64_t(f_size(&storage_.imageFile)) == sizeof(header) +
-                    uint64_t(slot.metadata.frameCount) * (slot.metadata.FrameBytes() + FRAME_CHECKSUM_BYTES);
+                ReadUnsigned32LittleEndian(header + VIDEO_DATA_OFFSET_FIELD) == sizeof(header);
     }
     if (valid) {
+
+        // Apply the exact raw-record or indexed-JPEG file layout and reject extra or missing bytes.
+        jpeg = slot.metadata.pixelFormat == PixelFormat::JPEG;
+        expectedSize = sizeof(header) + slot.metadata.FrameBytes() * slot.metadata.frameCount +
+                       uint64_t(FRAME_CHECKSUM_BYTES) * slot.metadata.frameCount;
+        expectedStride = uint32_t(slot.metadata.FrameBytes()) + FRAME_CHECKSUM_BYTES;
+        if (jpeg) {
+            expectedSize = sizeof(header) + slot.metadata.encodedBytes;
+            expectedStride = MediaTransfer::JpegIndexBytes;
+        }
+        valid = uint64_t(f_size(&storage_.imageFile)) == expectedSize &&
+                ReadUnsigned32LittleEndian(header + VIDEO_FRAME_STRIDE_OFFSET) == expectedStride &&
+                ((jpeg && header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_JPEG_VIDEO) ||
+                 (!jpeg && header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_RAW_VIDEO));
+    }
+    if (valid) {
+
+        // Check the first frame without loading the whole clip; later frames are checked during playback.
         slot.generation = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_GENERATION_OFFSET);
         slot.dataOffset = sizeof(header);
         slot.frameChecksums = true;
-        first = ReadAndVerifyRawVideoFrame(slot, 0, nullptr, nullptr, true);
+        slot.indexedJpeg = jpeg;
+        if (jpeg) {
+            first = ReadAndVerifyJpegFrame(slot, 0, nullptr, nullptr, true);
+        } else {
+            first = ReadAndVerifyRawVideoFrame(slot, 0, nullptr, nullptr, true);
+        }
         valid = first.complete;
         slot.result = first.result;
         slot.error = first.error;
     }
+
+    // Publish a usable candidate only after closing succeeds and no playback rejection excludes it.
     closed = f_close(&storage_.imageFile);
     if (slot.result != FR_OK || closed != FR_OK) {
         slot.state = SlotState::IoError;
@@ -1462,13 +1535,13 @@ MemoryManager::IsMediaSaveActive (
 } // IsMediaSaveActive
 
 /**
-    Starts an unpublished raw-video save while retaining the previous valid slot.
+    Starts an unpublished raw or indexed-JPEG video save while retaining the previous valid slot.
 
     Closes playback, inspects both generations and chooses the alternate target.
     An invalid staging header prevents booting partial content. Incoming bytes are
     written incrementally; only successful readback can install the final header.
 
-    @param metadata Validated logical raw-video description.
+    @param metadata Validated raw or indexed-JPEG video description.
     @param payloadChecksum Expected CRC32 of the incoming pixel payload.
 
     @return true - The unpublished transaction is ready for payload appends.
@@ -1489,12 +1562,15 @@ MemoryManager::BeginMediaSave (
     UINT count;
 
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
         return ReportStorageFailure("video storage busy/unavailable");
     }
     if (!MediaTransfer::IsSupportedVideo(metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) {
-        return ReportStorageFailure("unsupported raw video metadata");
+        return ReportStorageFailure("unsupported video metadata");
     }
+
+    // Release playback and inspect both retained generations before choosing a replacement slot.
     CloseSavedMediaPlayback();
     for (index = 0; index < SAVED_PHOTO_SLOT_COUNT; ++index) {
         slots[index] = InspectSavedMediaSlot(unsigned(index));
@@ -1502,6 +1578,8 @@ MemoryManager::BeginMediaSave (
             return ReportStorageFailure("saved media lookup failed", slots[index].result);
         }
     }
+
+    // Initialize transaction counters while keeping the preceding generation available.
     latest = FindNewestSavedPhoto(slots);
     storage_.save = {};
     storage_.save.metadata = metadata;
@@ -1514,6 +1592,8 @@ MemoryManager::BeginMediaSave (
     if (latest >= 0) {
         storage_.save.generation = slots[latest].generation + 1;
     }
+
+    // Create an invalid staging header; startup must never restore a partially received clip.
     status = f_open(&storage_.mediaFile, GetSavedMediaPath(storage_.save.target), FA_WRITE | FA_CREATE_ALWAYS);
     if (status != FR_OK) {
         return ReportStorageFailure("video create failed", status);
@@ -1555,12 +1635,26 @@ MemoryManager::AppendMediaBytes (
     uint8_t checksum[FRAME_CHECKSUM_BYTES];
 
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Writing) {
         return ReportStorageFailure("no writable video transaction");
     }
     if (!bytes || !count || count > storage_.save.total - storage_.save.received) {
         return ReportStorageFailure("invalid video chunk");
     }
+
+    // JPEG already carries its index and per-frame CRC records, so store its payload unchanged.
+    if (storage_.save.metadata.pixelFormat == PixelFormat::JPEG) {
+        if (!QueueMediaWrite(bytes, count, result)) {
+            return ReportStorageFailure("JPEG video write failed", result);
+        }
+        storage_.save.crc = UpdateImageCrc32(storage_.save.crc, bytes, count);
+        storage_.save.received += count;
+        error_ = "none";
+        return true;
+    }
+
+    // Split raw payload fragments at frame boundaries so each completed frame gets its own CRC record.
     while (count) {
         part = std::min(count, size_t(storage_.save.metadata.FrameBytes() - storage_.save.frameBytes));
         if (!QueueMediaWrite(bytes, part, result)) {
@@ -1572,6 +1666,8 @@ MemoryManager::AppendMediaBytes (
         storage_.save.received += part;
         bytes += part;
         count -= part;
+
+        // Append the raw frame checksum and reset only the per-frame running state.
         if (storage_.save.frameBytes == storage_.save.metadata.FrameBytes()) {
             WriteUnsigned32LittleEndian(checksum, ~storage_.save.frameCrc);
             if (!QueueMediaWrite(checksum, sizeof(checksum), result)) {
@@ -1603,16 +1699,21 @@ MemoryManager::StartMediaVerification (
     int result;
 
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Writing ||
         storage_.save.received != storage_.save.total || storage_.save.frameBytes) {
         return ReportStorageFailure("incomplete video upload");
     }
+
+    // Require the complete ordered upload and its transfer checksum before starting readback.
     if (~storage_.save.crc != storage_.save.expectedCrc) {
         return ReportStorageFailure("uploaded video checksum mismatch");
     }
     if (!FlushMediaWrites(result)) {
         return ReportStorageFailure("video final flush failed", result);
     }
+
+    // Flush and reopen the unpublished file so verification reads actual saved data.
     result = f_close(&storage_.mediaFile);
     storage_.save.open = false;
     if (result != FR_OK) {
@@ -1655,33 +1756,50 @@ MemoryManager::VerifyMediaSaveStep (
     int result;
     uint8_t checksum[FRAME_CHECKSUM_BYTES];
     uint8_t header[MediaTransfer::FileHeaderBytes];
+    bool jpegFinished;
 
     complete = false;
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Verifying) {
         return ReportStorageFailure("no video verification transaction");
     }
-    bytes = UINT(std::min({uint64_t(ChunkBytes), storage_.save.total - storage_.save.verified,
-                          storage_.save.metadata.FrameBytes() - storage_.save.verifyFrameBytes}));
-    result = f_read(&storage_.mediaFile, storage_.readBuffer, bytes, &count);
-    if (result != FR_OK || count != bytes) {
-        return ReportStorageFailure("video verification read failed", result);
-    }
-    storage_.save.verifyCrc = UpdateImageCrc32(storage_.save.verifyCrc, storage_.readBuffer, bytes);
-    storage_.save.verifyFrameCrc = UpdateImageCrc32(storage_.save.verifyFrameCrc, storage_.readBuffer, bytes);
-    storage_.save.verified += bytes;
-    storage_.save.verifyFrameBytes += bytes;
-    if (storage_.save.verifyFrameBytes == storage_.save.metadata.FrameBytes()) {
-        result = f_read(&storage_.mediaFile, checksum, sizeof(checksum), &count);
-        if (result != FR_OK || count != sizeof(checksum)) {
-            return ReportStorageFailure("video verification CRC read failed", result);
+
+    // Advance format-specific readback while preserving the invalid staging header.
+    if (storage_.save.metadata.pixelFormat == PixelFormat::JPEG) {
+        if (!VerifyJpegSaveStep(jpegFinished)) {
+            return false;
         }
-        if (ReadUnsigned32LittleEndian(checksum) != ~storage_.save.verifyFrameCrc) {
-            return ReportStorageFailure("stored video frame checksum mismatch");
+        if (!jpegFinished) {
+            return true;
         }
-        storage_.save.verifyFrameBytes = 0;
-        storage_.save.verifyFrameCrc = STORAGE_CRC32_INITIAL_U;
+    } else {
+
+        // Bound raw reads by the scratch buffer, payload end and next frame-checksum boundary.
+        bytes = UINT(std::min({uint64_t(ChunkBytes), storage_.save.total - storage_.save.verified,
+                              storage_.save.metadata.FrameBytes() - storage_.save.verifyFrameBytes}));
+        result = f_read(&storage_.mediaFile, storage_.readBuffer, bytes, &count);
+        if (result != FR_OK || count != bytes) {
+            return ReportStorageFailure("video verification read failed", result);
+        }
+        storage_.save.verifyCrc = UpdateImageCrc32(storage_.save.verifyCrc, storage_.readBuffer, bytes);
+        storage_.save.verifyFrameCrc = UpdateImageCrc32(storage_.save.verifyFrameCrc, storage_.readBuffer, bytes);
+        storage_.save.verified += bytes;
+        storage_.save.verifyFrameBytes += bytes;
+        if (storage_.save.verifyFrameBytes == storage_.save.metadata.FrameBytes()) {
+            result = f_read(&storage_.mediaFile, checksum, sizeof(checksum), &count);
+            if (result != FR_OK || count != sizeof(checksum)) {
+                return ReportStorageFailure("video verification CRC read failed", result);
+            }
+            if (ReadUnsigned32LittleEndian(checksum) != ~storage_.save.verifyFrameCrc) {
+                return ReportStorageFailure("stored video frame checksum mismatch");
+            }
+            storage_.save.verifyFrameBytes = 0;
+            storage_.save.verifyFrameCrc = STORAGE_CRC32_INITIAL_U;
+        }
     }
+
+    // Publish the checked header only after all payload and frame checks have passed.
     if (storage_.save.verified == storage_.save.total) {
         if (~storage_.save.verifyCrc != storage_.save.expectedCrc) {
             return ReportStorageFailure("stored video checksum mismatch");
@@ -1720,6 +1838,7 @@ MemoryManager::AbortMediaSave (
     )
 {
     StorageGuard guard;
+
     if (!guard.acquired) {
         ReportStorageFailure("storage busy");
         return;
@@ -1750,6 +1869,7 @@ MemoryManager::OpenLastMedia (
     int result;
 
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
         return ReportStorageFailure("media playback busy/unavailable");
     }
@@ -1800,13 +1920,18 @@ MemoryManager::ReadMediaFrame (
     FrameResult read;
 
     StorageGuard guard;
+
     if (!guard.acquired || !ready_ || !storage_.playback.open || storage_.save.phase != SavePhase::Idle) {
         return ReportStorageFailure("media playback not open");
     }
     if (!sink || frameIndex >= storage_.playback.description.metadata.frameCount) {
         return ReportStorageFailure("invalid media frame request");
     }
-    read = ReadAndVerifyRawVideoFrame(storage_.playback.description, frameIndex, sink, context, false);
+    if (storage_.playback.description.indexedJpeg) {
+        read = ReadAndVerifyJpegFrame(storage_.playback.description, frameIndex, sink, context, false);
+    } else {
+        read = ReadAndVerifyRawVideoFrame(storage_.playback.description, frameIndex, sink, context, false);
+    }
     if (!read.complete) {
         storage_.rejectedSlot = storage_.playback.slot;
         CloseSavedMediaPlayback();
@@ -1825,9 +1950,361 @@ MemoryManager::CloseMediaPlayback (
     )
 {
     StorageGuard guard;
+
     if (!guard.acquired) {
         ReportStorageFailure("storage busy");
         return;
     }
     CloseSavedMediaPlayback();
 } // CloseMediaPlayback
+
+/**
+    Supplies bounded compressed bytes and checksums their exact record data.
+
+    The first half of shared storage scratch is a refill buffer. Even skipped
+    bytes update the encoded CRC and final-marker history; no callback can read
+    outside the selected record. A failed or short read stops the decoder.
+
+    @param context Borrowed bounded file reader for this JPEG record.
+    @param bytes Writable destination, or null when the decoder skips input.
+    @param count Maximum bytes requested by the decoder.
+
+    @return count - Actual bytes copied or skipped, possibly fewer than requested.
+    @return 0 - The record ended or a filesystem read failed.
+*/
+size_t
+MemoryManager::ReadJpegInput (
+    void* context,
+    uint8_t* bytes,
+    size_t count
+    )
+{
+    JpegReadContext* reader = nullptr;
+    FIL* file = nullptr;
+    size_t copied;
+    size_t part;
+    UINT actual;
+
+    reader = static_cast<JpegReadContext*>(context);
+    file = static_cast<FIL*>(reader->file);
+    copied = 0;
+
+    // Refill only within this encoded record; the other half of scratch belongs to the decoder.
+    while (copied < count) {
+        if (reader->cursor == reader->buffered) {
+            if (!reader->remaining || reader->result != FR_OK) {
+                break;
+            }
+            part = std::min(reader->remaining, size_t(JPEG_INPUT_BUFFER_BYTES));
+            reader->result = f_read(file, storage_.readBuffer, UINT(part), &actual);
+            if (reader->result != FR_OK || actual != part) {
+                break;
+            }
+            reader->remaining -= part;
+            reader->buffered = part;
+            reader->cursor = 0;
+        }
+
+        // Track every consumed or skipped byte so CRC and final-marker checks cover the entire record.
+        part = std::min(count - copied, reader->buffered - reader->cursor);
+        reader->crc = UpdateImageCrc32(reader->crc, storage_.readBuffer + reader->cursor, part);
+        if (part >= JPEG_MARKER_BYTES) {
+            reader->previousByte = storage_.readBuffer[reader->cursor + part - JPEG_MARKER_BYTES];
+        } else {
+            reader->previousByte = reader->lastByte;
+        }
+        reader->lastByte = storage_.readBuffer[reader->cursor + part - 1];
+        if (bytes) {
+            std::memcpy(bytes + copied, storage_.readBuffer + reader->cursor, part);
+        }
+        reader->cursor += part;
+        copied += part;
+    }
+    return copied;
+} // ReadJpegInput
+
+/**
+    Validates an indexed JPEG record before completing provisional frame output.
+
+    Checks index CRC, payload bounds, record length, and adjacent-record continuity
+    before decoding. The same bounded memory handles startup, random/reverse
+    playback and incremental save validation. Full decoding plus encoded CRC and
+    end-marker checks must all succeed before a caller publishes the frame.
+
+    @param slot Checked JPEG slot metadata and payload offset.
+    @param index Zero-based independently seekable frame.
+    @param sink Optional synchronous consumer of provisional RGB888 rows.
+    @param context Borrowed pixel-consumer state.
+    @param inspecting Selects the startup inspection handle.
+    @param verifying Selects the active unpublished save handle instead.
+
+    @return result - Completion, filesystem status and a stable failure description.
+*/
+MemoryManager::FrameResult
+MemoryManager::ReadAndVerifyJpegFrame (
+    const SavedPhotoSlot& slot,
+    uint32_t index,
+    ImageSink sink,
+    void* context,
+    bool inspecting,
+    bool verifying
+    )
+{
+    FrameResult read;
+    FIL* file = nullptr;
+    uint8_t entry[MediaTransfer::JpegIndexBytes];
+    uint8_t record[MediaTransfer::JpegRecordBytes];
+    UINT count;
+    uint32_t offset;
+    uint32_t length;
+    uint32_t expectedCrc;
+    uint32_t nextOffset;
+    uint64_t end;
+    JpegReadContext input;
+    int decoderError;
+    bool decoded;
+
+    // Choose inspection, playback or verification ownership without opening another file handle.
+    read.error = "invalid indexed JPEG frame";
+    file = &storage_.playbackFile;
+    if (inspecting) {
+        file = &storage_.imageFile;
+    }
+    if (verifying) {
+        file = &storage_.mediaFile;
+    }
+
+    // Playback uses a checked index window; inspection and verification read independent index records.
+    if (!inspecting && !verifying) {
+        if (!LoadJpegIndexWindow(slot, index, read.result)) {
+            return read;
+        }
+        offset = storage_.jpegIndex[index - storage_.jpegIndexFirst].offset;
+        length = storage_.jpegIndex[index - storage_.jpegIndexFirst].length;
+    } else {
+        read.result = f_lseek(file, FSIZE_t(slot.dataOffset + uint64_t(index) * MediaTransfer::JpegIndexBytes));
+        if (read.result == FR_OK) {
+            read.result = f_read(file, entry, sizeof(entry), &count);
+        }
+        if (read.result != FR_OK || count != sizeof(entry)) {
+            return read;
+        }
+
+        // Validate the selected index checksum and encoded bounds before using its record offset.
+        offset = ReadUnsigned32LittleEndian(entry + JPEG_ENTRY_OFFSET_FIELD);
+        length = ReadUnsigned32LittleEndian(entry + JPEG_ENTRY_LENGTH_FIELD);
+        expectedCrc = ReadUnsigned32LittleEndian(entry + JPEG_ENTRY_CHECKSUM_FIELD);
+        WriteUnsigned32LittleEndian(entry + JPEG_ENTRY_CHECKSUM_FIELD, index);
+        end = uint64_t(offset) + MediaTransfer::JpegRecordBytes + length;
+        if (expectedCrc != ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, entry, sizeof(entry)) ||
+            length < JPEG_MINIMUM_ENCODED_BYTES || length > MediaTransfer::MaximumJpegBytes ||
+            offset < uint64_t(slot.metadata.frameCount) * MediaTransfer::JpegIndexBytes ||
+            end > slot.metadata.encodedBytes) {
+            return read;
+        }
+        if (index == 0 && offset != uint64_t(slot.metadata.frameCount) * MediaTransfer::JpegIndexBytes) {
+            return read;
+        }
+
+        // Require contiguous records and an exact payload end to reject aliases, gaps and trailing data.
+        if (index + 1 < slot.metadata.frameCount) {
+            read.result = f_read(file, entry, sizeof(entry), &count);
+            if (read.result != FR_OK || count != sizeof(entry)) {
+                return read;
+            }
+            nextOffset = ReadUnsigned32LittleEndian(entry);
+            if (end != nextOffset) {
+                return read;
+            }
+        } else if (end != slot.metadata.encodedBytes) {
+            return read;
+        }
+    }
+
+    // Continue adjacent forward records without seeking, then cross-check their declared lengths.
+    if (f_tell(file) != slot.dataOffset + offset) {
+        read.result = f_lseek(file, FSIZE_t(slot.dataOffset + offset));
+    }
+    if (read.result == FR_OK) {
+        read.result = f_read(file, record, sizeof(record), &count);
+    }
+    if (read.result != FR_OK || count != sizeof(record) || ReadUnsigned32LittleEndian(record) != length) {
+        return read;
+    }
+    expectedCrc = ReadUnsigned32LittleEndian(record + FRAME_CHECKSUM_BYTES);
+
+    // Decode into provisional pixel callbacks using the shared input and workspace halves.
+    input.file = file;
+    input.remaining = length;
+    decoded = JpegFrameDecoder::Decode(ReadJpegInput, &input, sink, context,
+                                      slot.metadata.width, slot.metadata.height,
+                                      storage_.readBuffer + JPEG_INPUT_BUFFER_BYTES,
+                                      JPEG_WORK_BUFFER_BYTES, decoderError);
+    if (!decoded) {
+        read.result = input.result;
+        read.error = "invalid/unsupported JPEG frame";
+        return read;
+    }
+    // The decoder can stop before consuming trailing markers; drain within this record only.
+    while (ReadJpegInput(&input, nullptr, JPEG_INPUT_BUFFER_BYTES)) {
+    }
+    read.result = input.result;
+    read.complete = read.result == FR_OK && !input.remaining && input.cursor == input.buffered &&
+                    ~input.crc == expectedCrc && input.previousByte == JPEG_MARKER_PREFIX &&
+                    input.lastByte == JPEG_END_MARKER;
+    return read;
+} // ReadAndVerifyJpegFrame
+
+/**
+    Checks one bounded JPEG payload block or one complete encoded frame.
+
+    First streams the complete saved payload to validate the transfer CRC. Later
+    calls validate one independently decodable frame at a time, including its index
+    and record checksums. This keeps the staging header invalid until every frame
+    has passed and leaves the previous retained generation untouched.
+
+    @param finished True only after the payload CRC and every indexed frame pass.
+
+    @return true - This verification step passed; finished reports full completion.
+    @return false - Readback, payload checksum, indexing or JPEG decoding failed.
+*/
+bool
+MemoryManager::VerifyJpegSaveStep (
+    bool& finished
+    )
+{
+    UINT bytes;
+    UINT count;
+    int result;
+    SavedPhotoSlot slot;
+    FrameResult frame;
+
+    finished = false;
+
+    // First verify the exact saved payload in bounded reads without decoding pixels.
+    if (storage_.save.verified < storage_.save.total) {
+        bytes = UINT(std::min(uint64_t(ChunkBytes), storage_.save.total - storage_.save.verified));
+        result = f_read(&storage_.mediaFile, storage_.readBuffer, bytes, &count);
+        if (result != FR_OK || count != bytes) {
+            return ReportStorageFailure("JPEG payload verification read failed", result);
+        }
+        storage_.save.verifyCrc = UpdateImageCrc32(storage_.save.verifyCrc, storage_.readBuffer, bytes);
+        storage_.save.verified += bytes;
+        if (storage_.save.verified == storage_.save.total &&
+            ~storage_.save.verifyCrc != storage_.save.expectedCrc) {
+            return ReportStorageFailure("stored JPEG payload checksum mismatch");
+        }
+        return true;
+    }
+
+    // After payload CRC succeeds, check one indexed frame per call before allowing publication.
+    slot.metadata = storage_.save.metadata;
+    slot.dataOffset = MediaTransfer::FileHeaderBytes;
+    slot.indexedJpeg = true;
+    frame = ReadAndVerifyJpegFrame(slot, storage_.save.jpegVerifiedFrames, nullptr, nullptr, false, true);
+    if (!frame.complete) {
+        return ReportStorageFailure(frame.error, frame.result);
+    }
+    ++storage_.save.jpegVerifiedFrames;
+    finished = storage_.save.jpegVerifiedFrames == storage_.save.metadata.frameCount;
+    return true;
+} // VerifyJpegSaveStep
+
+
+/**
+    Loads and checks a bounded index window for JPEG playback.
+
+    Caches offset/length pairs for at most 512 frames in four KiB. Every entry
+    CRC, bound and local continuity check passes before the window is published.
+    A preceding entry validates the window boundary, and the final entry must end
+    exactly at the payload boundary. Cache ownership ends whenever playback closes.
+
+    @param slot Checked JPEG metadata for the active playback handle.
+    @param index Frame whose index window is required.
+    @param result Receives filesystem status; stays zero for invalid index content.
+
+    @return true - The selected entry belongs to the checked active window.
+    @return false - Index readback, CRC, bounds or record continuity failed.
+*/
+bool
+MemoryManager::LoadJpegIndexWindow (
+    const SavedPhotoSlot& slot,
+    uint32_t index,
+    int& result
+    )
+{
+    uint32_t first;
+    uint32_t readFirst;
+    uint32_t entries;
+    uint32_t prefix;
+    uint32_t entryIndex;
+    uint32_t frame;
+    uint32_t offset;
+    uint32_t length;
+    uint32_t checksum;
+    uint64_t previousEnd;
+    uint8_t* encoded = nullptr;
+    UINT bytes;
+    UINT count;
+
+    // Reuse the active window without touching the index file again.
+    result = FR_OK;
+    if (storage_.jpegIndexCount && index >= storage_.jpegIndexFirst &&
+        index - storage_.jpegIndexFirst < storage_.jpegIndexCount) {
+        return true;
+    }
+
+    // Invalidate the old window before loading a replacement and include its preceding boundary entry.
+    storage_.jpegIndexCount = 0;
+    first = index / JPEG_INDEX_CACHE_ENTRIES * JPEG_INDEX_CACHE_ENTRIES;
+    readFirst = first;
+    prefix = 0;
+    if (first) {
+        --readFirst;
+        prefix = 1;
+    }
+    entries = std::min(uint32_t(JPEG_INDEX_CACHE_ENTRIES), slot.metadata.frameCount - first);
+    bytes = UINT((entries + prefix) * MediaTransfer::JpegIndexBytes);
+    static_assert((JPEG_INDEX_CACHE_ENTRIES + 1) * MediaTransfer::JpegIndexBytes <= JPEG_INPUT_BUFFER_BYTES,
+                  "JPEG index window exceeds shared input scratch");
+
+    // Read the complete bounded window into shared scratch before publishing any cached entry.
+    result = f_lseek(&storage_.playbackFile, FSIZE_t(slot.dataOffset + uint64_t(readFirst) * MediaTransfer::JpegIndexBytes));
+    if (result == FR_OK) {
+        result = f_read(&storage_.playbackFile, storage_.readBuffer, bytes, &count);
+    }
+    if (result != FR_OK || count != bytes) {
+        return false;
+    }
+
+    // Validate index CRCs, frame bounds and continuity, including the window and payload boundaries.
+    previousEnd = 0;
+    for (entryIndex = 0; entryIndex < entries + prefix; ++entryIndex) {
+        frame = readFirst + entryIndex;
+        encoded = storage_.readBuffer + entryIndex * MediaTransfer::JpegIndexBytes;
+        offset = ReadUnsigned32LittleEndian(encoded + JPEG_ENTRY_OFFSET_FIELD);
+        length = ReadUnsigned32LittleEndian(encoded + JPEG_ENTRY_LENGTH_FIELD);
+        checksum = ReadUnsigned32LittleEndian(encoded + JPEG_ENTRY_CHECKSUM_FIELD);
+        WriteUnsigned32LittleEndian(encoded + JPEG_ENTRY_CHECKSUM_FIELD, frame);
+        if (checksum != ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, encoded, MediaTransfer::JpegIndexBytes) ||
+            length < JPEG_MINIMUM_ENCODED_BYTES || length > MediaTransfer::MaximumJpegBytes ||
+            offset < uint64_t(slot.metadata.frameCount) * MediaTransfer::JpegIndexBytes ||
+            uint64_t(offset) + MediaTransfer::JpegRecordBytes + length > slot.metadata.encodedBytes ||
+            (entryIndex && offset != previousEnd) ||
+            (!frame && offset != uint64_t(slot.metadata.frameCount) * MediaTransfer::JpegIndexBytes)) {
+            return false;
+        }
+        previousEnd = uint64_t(offset) + MediaTransfer::JpegRecordBytes + length;
+        if (frame + 1 == slot.metadata.frameCount && previousEnd != slot.metadata.encodedBytes) {
+            return false;
+        }
+        if (entryIndex >= prefix) {
+            storage_.jpegIndex[entryIndex - prefix] = {offset, length};
+        }
+    }
+
+    // Expose the replacement window only after every loaded entry has passed validation.
+    storage_.jpegIndexFirst = first;
+    storage_.jpegIndexCount = entries;
+    return true;
+} // LoadJpegIndexWindow

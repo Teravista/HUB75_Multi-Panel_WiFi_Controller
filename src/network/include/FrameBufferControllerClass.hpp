@@ -44,19 +44,19 @@ public:
     // Returns the revision of the most recently published frame.
     Token GetFrameRevision(void) const;
 
-    // Starts a full-panel RGB888 photo upload with the expected payload size.
+    // Starts a full-panel RGB888 photo upload with default metadata.
     Token BeginFrame(size_t bytes);
 
-    // Starts a photo upload with a validated explicit media descriptor.
+    // Starts a photo upload with the requested frame size and metadata.
     Token BeginFrame(size_t bytes, const MediaMetadata& metadata);
 
-    // Returns metadata for the current completed frame under render ownership.
+    // Returns metadata for the current completed frame.
     MediaMetadata GetFrameMetadata(void) const;
 
     // Feeds bytes to the frame upload identified by its ownership token.
     bool FeedFrame(Token owner, const uint8_t* bytes, size_t count);
 
-    // Publishes a complete upload through its current ownership token.
+    // Publishes a complete upload with its pending photo metadata.
     bool FinishFrame(Token owner);
 
     // Aborts the frame upload identified by its ownership token.
@@ -71,23 +71,23 @@ public:
     // Reports whether the raw TCP photo listener is active.
     bool IsFrameUploadServerListening(void);
 
-    // Claims exclusive framebuffer ownership for a saved-media transaction.
+    // Claims exclusive framebuffer ownership for saved-media work.
     bool TryBeginExternalMedia(void);
 
     // Releases exclusive saved-media framebuffer ownership.
     void EndExternalMedia(void);
 
-    // Reports whether the current frame came from verified SD media.
+    // Reports whether the current frame came from saved media.
     bool IsStoredFrame(void) const;
 
-    // Publishes a verified saved-media frame and its descriptor.
+    // Publishes saved-media metadata and marks the frame complete.
     void PublishStoredFrame(const MediaMetadata& metadata);
 
-    // Clears availability after stored-frame failure.
+    // Clears the availability of the current saved frame.
     void ClearStoredFrame(void);
 
-    // Maps a stored RGB888 frame fragment into the CPU framebuffer.
-    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset);
+    // Maps a stored raw frame fragment into the CPU framebuffer.
+    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset, PixelFormat format = PixelFormat::RGB888);
 
 private:
     // Returns elapsed boot time in milliseconds for transport deadlines.
