@@ -8,13 +8,15 @@
 #include "media/include/mediaMetadata.hpp"
 
 /**
-    Connects raw photo reception and storage readback to the shared CPU framebuffer.
+    Connects photo reception and saved-media playback to the shared CPU framebuffer.
 
     FrameReceiver serializes uploads and rendering so foreground SD saves can read
     stable pixels before status overlays are drawn. RGB888 network input is mapped
     into panel order and the configured CPU pixel format; readback reverses that
     mapping for persistence. The controller owns TCP receive state and references
-    a caller-owned framebuffer rather than allocating another full image.
+    a caller-owned framebuffer rather than allocating another full image. Exclusive
+    media ownership pauses rendering during video uploads, and verified SD frames
+    are mapped and published without being mistaken for new photo uploads.
 */
 class FrameBufferController {
 public:
@@ -69,6 +71,24 @@ public:
     // Reports whether the raw TCP photo listener is active.
     bool IsFrameUploadServerListening(void);
 
+    // Claims exclusive framebuffer ownership for a saved-media transaction.
+    bool TryBeginExternalMedia(void);
+
+    // Releases exclusive saved-media framebuffer ownership.
+    void EndExternalMedia(void);
+
+    // Reports whether the current frame came from verified SD media.
+    bool IsStoredFrame(void) const;
+
+    // Publishes a verified saved-media frame and its descriptor.
+    void PublishStoredFrame(const MediaMetadata& metadata);
+
+    // Clears availability after stored-frame failure.
+    void ClearStoredFrame(void);
+
+    // Maps a stored RGB888 frame fragment into the CPU framebuffer.
+    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset);
+
 private:
     // Returns elapsed boot time in milliseconds for transport deadlines.
     static uint32_t GetPhotoUploadTimeMs(void);
@@ -87,6 +107,7 @@ private:
     FrameReceiver m_receiver;
     MediaMetadata m_metadata = MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);
     MediaMetadata m_pendingMetadata;
+    bool m_fromStorage = false;
     tcp_pcb* m_listenerPcb = nullptr;
     uint16_t m_listenerPort = 0;
     tcp_pcb* m_clientPcb = nullptr;

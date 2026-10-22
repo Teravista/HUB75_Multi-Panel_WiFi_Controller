@@ -52,8 +52,20 @@ public:
     // Discards the owning upload and releases its framebuffer lock.
     void Abort(Token token);
 
+    // Claims exclusive framebuffer ownership for an incremental media upload.
+    bool TryBeginExternal(void);
+
+    // Releases exclusive saved-media framebuffer ownership.
+    void EndExternal(void);
+
+    // Marks a verified stored-media frame complete and advances its revision.
+    void PublishStoredFrame(void);
+
+    // Clears availability after failed stored-media restoration.
+    void ClearStoredFrame(void);
+
 private:
-    enum class State : uint32_t { Idle, Render, Upload, Pending };
+    enum class State : uint32_t { Idle, Render, Upload, Pending, External };
 
     // Checks whether a token belongs to the current upload.
     bool Owns(Token token) const;

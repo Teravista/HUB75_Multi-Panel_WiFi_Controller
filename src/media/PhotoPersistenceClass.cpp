@@ -67,7 +67,7 @@ PhotoPersistence::SaveUploadedImage (
 
     // Save each completed upload once, before status overlays are drawn into its pixels.
     revision = upload_.GetFrameRevision();
-    if (!upload_.GetUploadedFrameData() || revision == attemptedRevision_) {
+    if (upload_.IsStoredFrame() || !upload_.GetUploadedFrameData() || revision == attemptedRevision_) {
         return SaveResult::Unchanged;
     }
     attemptedRevision_ = revision;

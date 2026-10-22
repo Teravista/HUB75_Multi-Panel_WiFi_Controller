@@ -114,7 +114,7 @@ MediaMetadata::PayloadBytes (
         return false;
     }
     if (type == MediaType::Photo) {
-        if (frameCount != 1 || fpsNumerator != 0 || fpsDenominator != 1) {
+        if (frameCount != 1 || fpsNumerator != 0 || fpsDenominator != 1 || pingPong) {
             return false;
         }
     } else if (type != MediaType::Video || !fpsNumerator) {
@@ -254,7 +254,7 @@ MediaMetadataCodec::ReadUnsigned64LittleEndian (
     Serializes valid metadata into a fixed-size transfer descriptor.
 
     Validates before writing any output. The explicit versioned layout keeps
-    file/transfer metadata independent of compiler padding. Reserved flags stay
+    file/transfer metadata independent of compiler padding. Only the ping-pong flag is used; other bits stay
     zero; the pixel payload is described but is never accessed by this function.
 
     @param metadata Logical media description to encode.
@@ -282,7 +282,11 @@ MediaMetadataCodec::EncodeMediaDescriptor (
     out[MEDIA_VERSION_OFFSET] = Version;
     out[MEDIA_TYPE_OFFSET] = uint8_t(metadata.type);
     out[MEDIA_FORMAT_OFFSET] = uint8_t(metadata.pixelFormat);
-    out[MEDIA_FLAGS_OFFSET] = 0;
+    if (metadata.pingPong) {
+        out[MEDIA_FLAGS_OFFSET] = PingPongFlag;
+    } else {
+        out[MEDIA_FLAGS_OFFSET] = 0;
+    }
     WriteUnsigned16LittleEndian(out + MEDIA_WIDTH_OFFSET, metadata.width);
     WriteUnsigned16LittleEndian(out + MEDIA_HEIGHT_OFFSET, metadata.height);
     WriteUnsigned32LittleEndian(out + MEDIA_FRAME_COUNT_OFFSET, metadata.frameCount);
@@ -318,13 +322,14 @@ MediaMetadataCodec::DecodeMediaDescriptor (
     uint64_t payload;
 
     if (!in || bytes != HeaderBytes || std::memcmp(in, "H75M", MEDIA_MAGIC_BYTES) ||
-        in[MEDIA_VERSION_OFFSET] != Version || in[MEDIA_FLAGS_OFFSET] != 0) {
+        in[MEDIA_VERSION_OFFSET] != Version || (in[MEDIA_FLAGS_OFFSET] & ~PingPongFlag) != 0) {
         return false;
     }
 
     // Reconstruct into a temporary value to keep rejected input private.
     decoded.type = MediaType(in[MEDIA_TYPE_OFFSET]);
     decoded.pixelFormat = PixelFormat(in[MEDIA_FORMAT_OFFSET]);
+    decoded.pingPong = (in[MEDIA_FLAGS_OFFSET] & PingPongFlag) != 0;
     decoded.width = ReadUnsigned16LittleEndian(in + MEDIA_WIDTH_OFFSET);
     decoded.height = ReadUnsigned16LittleEndian(in + MEDIA_HEIGHT_OFFSET);
     decoded.frameCount = ReadUnsigned32LittleEndian(in + MEDIA_FRAME_COUNT_OFFSET);

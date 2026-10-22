@@ -2,7 +2,7 @@
 
 `MediaMetadata` describes logical pixels before panel mapping: type, dimensions,
 format, frame count and rational FPS. It owns no pixels. This step keeps existing
-photo uploads unchanged and prepares a shared description for video support.
+photo uploads unchanged and also describes raw video uploads and saved playback.
 
 | Field | Photo | Video descriptor |
 | --- | --- | --- |
@@ -17,7 +17,8 @@ A one-frame video still needs a positive frame rate. Fractional rates such as
 30000/1001 do not require floating point. Unknown types/formats, empty fields,
 inconsistent photo timing and payload overflow are rejected. The descriptor
 can describe video; photo upload/storage APIs still accept only a full-panel
-RGB888 photo. This commit does not add a video listener or playback.
+RGB888 photo. Raw video uses a separate TCP listener and checked record container; see
+[video upload and playback](VIDEO-UPLOAD.md).
 
 ## API
 
@@ -51,7 +52,7 @@ little-endian. Never transmit `sizeof(MediaMetadata)` structure bytes.
 | 4 | 1 | Version 1 |
 | 5 | 1 | Media type |
 | 6 | 1 | Pixel format |
-| 7 | 1 | Reserved zero |
+| 7 | 1 | Bit 0: video ping-pong; other bits reserved zero |
 | 8 | 2 | Width |
 | 10 | 2 | Height |
 | 12 | 4 | Frame count |
@@ -60,7 +61,7 @@ little-endian. Never transmit `sizeof(MediaMetadata)` structure bytes.
 | 24 | 8 | Calculated payload length |
 
 `MediaMetadataCodec::EncodeMediaDescriptor` validates before writing.
-`DecodeMediaDescriptor` checks version, reserved fields and calculated length
+`DecodeMediaDescriptor` checks version, reserved flag bits and calculated length
 before publishing its output. Neither operation reads image pixels.
 
 ## Photo container, version 3
@@ -88,3 +89,10 @@ load. The reader supplies their known photo/RGB888/one-frame/FPS-0/1 metadata
 without rewriting them. Mixed old/new saved slots retain generation ordering,
 including counter rollover. New uploads write version 3; no card conversion is
 needed. Earlier firmware cannot read the new version-3 files after a downgrade.
+
+## Raw video
+
+Video descriptors permit ping-pong looping; photos must leave the flag false.
+The raw receiver requires full-panel RGB888 frames at 1–60 FPS and a total
+stored file below 4 GiB. Photo APIs remain single-frame RGB888. See the
+[video guide](VIDEO-UPLOAD.md) for the separate request and version-4 SD layout.

@@ -1,0 +1,102 @@
+# Raw video upload and SD playback
+
+The Python uploader converts a source video to logical 128 × 256 RGB888 frames
+on the PC, streams them to TCP port 5002 and waits for verified SD publication.
+The Pico loops the saved clip by reading one checked frame at a time. JPEG,
+browser conversion and managed media libraries are separate features.
+
+## Python use
+
+Install `utilityScripts/requirements.txt`, then run:
+
+```powershell
+python utilityScripts/sendVideoOverTCP.py "clip.mp4" --ip 192.168.1.48 --fps 30 --seconds 10
+python utilityScripts/sendVideoOverTCP.py "clip.mp4" --prepare-only --output clip.h75v --ping-pong
+python utilityScripts/sendVideoOverTCP.py "clip.h75v" --ip 192.168.1.48
+```
+
+At the top of the script, configure `DEFAULT_VIDEO_PATH`, `DEFAULT_PICO_IP`,
+`DEFAULT_FPS`, `MAX_VIDEO_SECONDS` and `PING_PONG`. Blank IP uses `.env` PICO_IP.
+A configured path lets you run the script without a positional argument.
+The FPS range is 1–60 and accepts rational values such as 30000/1001. Duration
+limits conversion to the shorter of that setting and the source. The default
+is 30 FPS, 10 seconds and ordinary looping. `--ping-pong` / `--no-ping-pong`
+override loop mode; prepared files otherwise keep their stored mode.
+
+FFmpeg is resolved from `--ffmpeg`, PATH or `imageio-ffmpeg`. It scales to cover
+the panel and crops centrally. Audio is omitted. Preparation holds one raw
+frame at a time and writes a temporary disk-backed file. A `.h75v` prepared
+file is a 36-byte request plus raw pixels; it is not an MP4 or the Pico's SD
+container. Do not copy it onto the card as a saved-media slot.
+
+## Bounded TCP protocol
+
+The normal request is a 32-byte [media descriptor](MEDIA-METADATA.md) followed
+by little-endian payload CRC32. Magic `H75V` opts into 6144-byte chunks; `H75M`
+retains 1536-byte chunks. The descriptor otherwise uses canonical `H75M`
+fields, RGB888 format and Video type. The checksum covers only ordered pixels.
+
+1. Send the 36-byte request and wait for `READY 6144\n` or `READY\n`.
+2. Send one negotiated chunk and wait for `NEXT\n` before sending another.
+3. After the last payload chunk, expect `VERIFY\n`.
+4. Wait for `SAVED\n`; an `ERR ...\n` response is failure.
+
+The Python client can retry explicit rejection of bulk negotiation using a
+fresh legacy handshake, before sending pixels. It does not replay an uncertain
+payload transfer. A separate verification timeout allows long SD readback.
+A transport inactivity deadline cancels stalled clients; verification updates
+its progress while local work advances.
+
+TCP callbacks only copy bounded data and handle replies. Foreground updates
+append to MemoryManager and advance readback outside the lwIP lock. The receive
+buffer is 6 KiB, independent of clip length. Exclusive frame ownership pauses
+saved-media updates during reception/verification; panel scanning retains the
+last submitted driver buffer. Failure or cancellation releases ownership and
+requests restoration of the newest usable saved content.
+
+## Raw-video SD container, version 4
+
+Photos and videos share the alternating `LASTA.H75` / `LASTB.H75` generations.
+The previous valid generation is retained while replacing the other slot. A
+partial upload begins with invalid `H75P` magic and cannot boot as saved media.
+The final checked header is installed only after complete SD readback succeeds.
+The FAT32-compatible total file size must fit below 4 GiB.
+
+| Offset | Bytes | Field |
+| ---: | ---: | --- |
+| 0 | 4 | `H75L` |
+| 4 | 1 | Container version 4 |
+| 5 | 1 | Reserved zero |
+| 6 | 2 | Header size 64 |
+| 8 | 4 | Generation |
+| 12 | 32 | Media descriptor |
+| 44 | 4 | Frame pixel byte count |
+| 48 | 4 | Stored record stride: frame bytes + 4 |
+| 52 | 4 | First record offset: 64 |
+| 56 | 4 | Whole incoming pixel-payload CRC32 |
+| 60 | 4 | CRC32 of header bytes 0–59 |
+
+Each record contains one complete raw frame followed by its little-endian
+CRC32. CRC rules match the existing photo format. Incoming payload CRC,
+stored frame CRCs and whole-payload readback must all agree before publication.
+The frame CRC records are added by the Pico and are absent from TCP payloads.
+
+## Playback and compatibility
+
+Startup opens the newest valid photo/video header and verifies its first frame;
+it does not scan the entire clip at boot. Every later frame is verified before
+publication. A failed frame rejects that slot for the next open, allowing the
+previous saved generation to be tried. No valid saved content means the static
+flashed image is used. The old large demo animation is disabled by default so
+firmware features fit the Pico flash; no generated image assets are changed.
+
+The player selects frames from elapsed time. Slow reads may skip stale frames
+rather than stretching the timeline; requested FPS is not a guarantee of SD
+throughput. Ping-pong runs 0,1,…,N−1,N−2,…,1,0 without repeating turning frames.
+Photo upload replaces video playback and still saves through PhotoPersistence.
+Legacy photo containers remain readable without card conversion.
+
+Host checks cover fragmented TCP reception, both chunk modes, cancellation,
+CRC rejection, boot restoration, photo/video replacement, ping-pong timing and
+Python FFmpeg conversion/upload. Actual Wi-Fi and SD playback speed require
+the Pico; no physical speed claim follows from host tests alone.

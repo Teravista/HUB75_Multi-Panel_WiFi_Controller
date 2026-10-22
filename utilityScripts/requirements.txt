@@ -2,3 +2,4 @@ imageio
 numpy
 Pillow
 python-dotenv
+imageio-ffmpeg

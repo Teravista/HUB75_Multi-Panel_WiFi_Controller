@@ -62,14 +62,14 @@ no second framebuffer is needed. A failed save keeps the live photo visible and
 is not retried continuously for the same frame revision.
 
 `SaveLastImage(source, context)` streams logical RGB888 pixels into alternating
-reserved `LASTA.H75` and `LASTB.H75` files. `ReadLastImage(sink, context)` selects
-the newest valid generation; a corrupt or incomplete replacement falls back to
-the previous valid copy. Each retained file has a 52-byte version-3 header, with
+reserved `LASTA.H75` and `LASTB.H75` files. `ReadLastImage(sink, context)` reads
+the newest generation when it is a photo; a corrupt or incomplete replacement falls back to
+the previous valid copy. Each retained photo has a 52-byte version-3 header, with
 separate CRCs covering the descriptor/generation header and 98,304-byte payload. These files
 are controller-owned and must not be used as arbitrary named-image destinations.
 
 Startup queues the flashed image, then attempts to restore a verified saved
-photo before Wi-Fi connection begins. Missing or unusable storage leaves the
+photo or first video frame before Wi-Fi connection begins. Missing or unusable storage leaves the
 flashed image available. SD hardware is released for the first radio resource
 claim and initialized once afterward, even if association is still pending.
 This stage uses explicit initialization; automatic SD remount recovery is separate.
@@ -92,3 +92,16 @@ descriptor. See [media metadata](MEDIA-METADATA.md) for layouts and API details.
 Storage uses one 24 KiB scratch buffer, larger bulk photo reads and compatible table-based CRC32. The driver negotiates its
 requested clock before exceeding Default Speed. See [SD throughput](SD-OPTIMIZATION.md)
 for card fallback, DMA behavior, RAM cost and diagnostic settings.
+
+## Raw video transactions
+
+`BeginMediaSave`, `AppendMediaBytes`, `StartMediaVerification` and repeated
+`VerifyMediaSaveStep` calls save long raw clips with bounded RAM. Photo I/O is
+rejected while that transaction owns the shared buffer. `AbortMediaSave`
+discards unpublished content and retains the prior valid slot.
+
+`OpenLastMedia` selects a valid photo/video generation; `ReadMediaFrame` streams
+one checked frame and `CloseMediaPlayback` releases its file. A corrupt later
+frame excludes its generation on the next open. MediaPlayer connects that
+storage boundary to the shared framebuffer under render ownership. See
+[video upload and playback](VIDEO-UPLOAD.md) for layouts and failure behavior.
