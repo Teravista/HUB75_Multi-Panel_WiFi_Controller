@@ -54,12 +54,12 @@ append to MemoryManager and advance readback outside the lwIP lock. The receive
 buffer is 6 KiB, independent of clip length. Exclusive frame ownership pauses
 saved-media updates during reception/verification; panel scanning retains the
 last submitted driver buffer. Failure or cancellation releases ownership and
-requests restoration of the newest usable saved content.
+requests restoration of the selected usable library content.
 
 ## Raw-video SD container, version 4 (RGB888 / RGB565)
 
-Photos and videos share the alternating `LASTA.H75` / `LASTB.H75` generations.
-The previous valid generation is retained while replacing the other slot. A
+The legacy `BeginMediaSave` API uses alternating `LASTA.H75` / `LASTB.H75`
+generations and retains the previous valid generation during replacement. A
 partial upload begins with invalid `H75P` magic and cannot boot as saved media.
 The final checked header is installed only after complete SD readback succeeds.
 The FAT32-compatible total file size must fit below 4 GiB.
@@ -85,15 +85,23 @@ The frame CRC records are added by the Pico and are absent from TCP payloads.
 
 ## Playback and compatibility
 
-Startup opens the newest valid photo/video header and verifies its first frame;
+Startup opens the selected library item, or retained legacy content when no
+library selection exists, and verifies its first frame;
 it does not scan the entire clip at boot. Every later frame is verified before
-publication. A failed frame rejects that slot for the next open, allowing the
-previous saved generation to be tried. No valid saved content means the static
-flashed image is used. The old large demo animation is disabled by default so
-firmware features fit the Pico flash; no generated image assets are changed.
+publication. The library excludes a failed item from automatic selection and
+tries another usable item. Legacy playback can try its preceding retained generation. No valid saved content means the static
+flashed image is used. The large demo animation is disabled by default to keep
+firmware within the Pico flash capacity.
 
 The player selects frames from elapsed time. Slow reads may skip stale frames
 rather than stretching the timeline; requested FPS is not a guarantee of SD
 throughput. Ping-pong runs 0,1,…,N−1,N−2,…,1,0 without repeating turning frames.
-Photo upload replaces video playback and still saves through PhotoPersistence.
+Photo upload creates and selects a saved library photo, replacing active video playback.
 Legacy photo containers remain readable without card conversion.
+
+## Saved video collection
+
+Firmware TCP uploads publish an independent video library item and select it after
+verification. Existing clips remain available. The TCP handshake and payload
+encoding are unchanged. See [saved media library](PHOTO-LIBRARY.md) for item
+metadata, publication and selection.

@@ -4,23 +4,24 @@
 #include "media/include/mediaTransfer.hpp"
 
 /**
-    Receives long raw videos without retaining the clip in RAM.
+    Receives raw or indexed-JPEG videos without retaining the clip in RAM.
 
     TCP callbacks collect at most one acknowledged chunk and handle replies;
     Update performs every filesystem write and verification step in foreground
     code, outside the lwIP lock. Exclusive framebuffer ownership pauses playback
     while a transaction is active. Completion or cancellation releases that
-    ownership and requests restoration of the newest usable saved generation.
+    ownership and requests saved playback restoration. Library mode publishes an
+    independent item ID; retained mode preserves the alternating legacy generations.
 */
 class TcpVideoUpload {
 public:
     // Connects raw TCP video uploads to storage and display ownership.
-    TcpVideoUpload(MemoryManager& memory, FrameBufferController& upload);
+    TcpVideoUpload(MemoryManager& memory, FrameBufferController& upload, bool libraryUploads = false);
 
-    // Starts the TCP video listener.
+    // Starts the TCP video upload listener.
     bool Start(void);
 
-    // Stops the listener and schedules active-transaction cleanup.
+    // Stops the video listener and cancels its active client.
     void Stop(void);
 
     // Reports whether the TCP video listener is active.
@@ -29,47 +30,50 @@ public:
     // Advances foreground storage and pending TCP replies.
     void Update(void);
 
-    // Reports whether the upload holds exclusive framebuffer ownership.
+    // Reports whether the video upload holds exclusive framebuffer access.
     bool OwnsDisplay(void) const;
 
-    // Consumes a playback-reload request after a transaction ends.
+    // Consumes a request to restore playback after a video upload.
     bool TakeReloadRequest(void);
 
+    // Returns and clears the ID of the last verified library video.
+    uint32_t TakeSavedLibraryId(void);
+
 private:
-    // Returns monotonic time for transport inactivity checks.
+    // Returns elapsed boot time in milliseconds for transport deadlines.
     static uint32_t GetVideoUploadTimeMs(void);
 
-    // Detaches TCP callbacks before closing or aborting a client.
+    // Removes TCP callbacks before closing or replacing a connection.
     static void DetachVideoClientCallbacks(tcp_pcb* pcb);
 
-    // Installs callbacks for the active upload client.
+    // Installs callbacks for the active video upload client.
     void Attach(void);
 
-    // Aborts transport and defers storage cleanup to Update.
+    // Cancels the video client and requests foreground storage cleanup.
     err_t Cancel(void);
 
-    // Queues or advances a pending protocol acknowledgement.
+    // Queues pending video acknowledgements while TCP has send capacity.
     err_t Pump(void);
 
-    // Resets response state for the next acknowledgement.
+    // Prepares a video protocol acknowledgement for transmission.
     void Reply(const char* message);
 
     // Releases media ownership and returns a terminal upload response.
     void FinishJob(const char* message);
 
-    // Accepts one client while this video transport is idle.
+    // Accepts a video upload client when no competing upload owns the display.
     static err_t Accept(void* context, tcp_pcb* pcb, err_t error);
 
-    // Copies bounded incoming bytes without accessing the filesystem.
+    // Buffers incoming video protocol bytes for foreground processing.
     static err_t Receive(void* context, tcp_pcb* pcb, pbuf* packet, err_t error);
 
-    // Advances a reply after TCP acknowledges its bytes.
+    // Advances the video reply after TCP acknowledges transmitted bytes.
     static err_t Sent(void* context, tcp_pcb* pcb, u16_t bytes);
 
-    // Services replies and cancels stalled clients.
+    // Services video transport progress and inactivity deadlines.
     static err_t Poll(void* context, tcp_pcb* pcb);
 
-    // Marks a failed client for deferred foreground cleanup.
+    // Releases the video client after a TCP error.
     static void Error(void* context, err_t error);
 
     enum class Phase { Idle, Header, Opening, Body, Writing, Verifying, Closing, Canceled };
@@ -95,4 +99,7 @@ private:
     bool external_ = false;
     bool reload_ = false;
     bool enabled_ = false;
+    bool libraryUploads_ = false;
+    uint32_t transactionId_ = 0;
+    uint32_t savedLibraryId_ = 0;
 };

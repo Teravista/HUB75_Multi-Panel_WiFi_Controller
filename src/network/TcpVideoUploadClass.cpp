@@ -10,11 +10,13 @@
 
     @param memory SD storage manager used for saved media operations.
     @param upload Shared framebuffer owner and photo upload controller.
+    @param libraryUploads True saves new named library videos; false uses retained generations.
 */
 TcpVideoUpload::TcpVideoUpload (
     MemoryManager& memory,
-    FrameBufferController& upload
-    ) : memory_(memory), upload_(upload)
+    FrameBufferController& upload,
+    bool libraryUploads
+    ) : memory_(memory), upload_(upload), libraryUploads_(libraryUploads)
 {
     return;
 } // TcpVideoUpload
@@ -504,6 +506,7 @@ TcpVideoUpload::Update (
     bool pending;
     bool bulk;
     bool complete;
+    bool opened;
     uint32_t checksum;
 
     if (!enabled_) {
@@ -568,7 +571,13 @@ TcpVideoUpload::Update (
         }
         external_ = true;
         checksum = MediaMetadataCodec::ReadUnsigned32LittleEndian(receive_ + MediaMetadataCodec::HeaderBytes);
-        if (!memory_.BeginMediaSave(metadata_, checksum)) {
+        transactionId_ = 0;
+        if (libraryUploads_) {
+            opened = memory_.BeginLibraryVideo(metadata_, checksum, "Uploaded video", 0, transactionId_);
+        } else {
+            opened = memory_.BeginMediaSave(metadata_, checksum);
+        }
+        if (!opened) {
             FinishJob("ERR STORAGE\n");
             return;
         }
@@ -620,6 +629,7 @@ TcpVideoUpload::Update (
         progress_ = GetVideoUploadTimeMs();
         cyw43_arch_lwip_end();
         if (complete) {
+            savedLibraryId_ = transactionId_;
             FinishJob("SAVED\n");
         }
     }
@@ -627,3 +637,23 @@ TcpVideoUpload::Update (
     Pump();
     cyw43_arch_lwip_end();
 } // Update
+
+/**
+    Returns and clears the ID of the last verified library video.
+
+    Only complete SD publication sets this ID. Canceled or rejected transactions
+    never request adoption of an unfinished library item.
+
+    @return id - Verified saved-video ID, consumed by this call.
+    @return 0 - No new library video is awaiting selection.
+*/
+uint32_t
+TcpVideoUpload::TakeSavedLibraryId (
+    void
+    )
+{
+    uint32_t id;
+    id = savedLibraryId_;
+    savedLibraryId_ = 0;
+    return id;
+} // TakeSavedLibraryId

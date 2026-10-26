@@ -59,6 +59,10 @@ The microcontroller is a Raspberry Pi Pico 2 W. Earlier iterations used a Pico 1
 ## What It Does
 On boot, the panel displays whatever image or animation was baked into flash at build time. Once connected to WiFi (indicated by white wifi icon in top right corner of the panel), it can receive a new image over TCP at any time - the Python upload script sends a frame, and the panel updates it live, no reflash or reboot needed.
 
+Saved photos and videos live in independent SD libraries with persistent
+selection, slideshows, brightness and an optional video FPS cap. See the
+[saved media library](docs/PHOTO-LIBRARY.md) for storage and controller APIs.
+
 ## Ways to Get Content Onto the Panel
 Three Python scripts handle content:
 - `imageToRGB888ArrayConverter.py` / `mp4ToRGB888ArrayConverter.py` - convert an image or video into a C header with a byte array, included via `defines.h` under the `USE_ANIMATION` flag. This becomes the default image/animation flashed into firmware.

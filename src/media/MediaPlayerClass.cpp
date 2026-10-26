@@ -68,6 +68,7 @@ MediaPlayer::Stop (
     memory_.CloseMediaPlayback();
     active_ = false;
     reload_ = false;
+    libraryVideoId_ = 0;
 } // Stop
 
 /**
@@ -92,13 +93,18 @@ MediaPlayer::Restore (
 
     reload_ = false;
     for (attempt = 0; attempt < PLAYBACK_RESTORE_ATTEMPTS && memory_.IsReady(); ++attempt) {
-        if (!memory_.OpenLastMedia(metadata_)) {
+        if (libraryVideoId_) {
+            if (!memory_.OpenLibraryVideo(libraryVideoId_, metadata_)) {
+                break;
+            }
+        } else if (!memory_.OpenLastMedia(metadata_)) {
             break;
         }
         if (memory_.ReadMediaFrame(0, Consume, this)) {
             upload_.PublishStoredFrame(metadata_);
             active_ = metadata_.type == MediaType::Video;
             epochMs_ = nowMs;
+            stepOffset_ = 0;
             lastFrame_ = 0;
             std::printf("[playback] restored frames=%lu fps=%lu/%lu\n",
                         static_cast<unsigned long>(metadata_.frameCount),
@@ -129,7 +135,6 @@ MediaPlayer::Update (
     uint32_t nowMs
     )
 {
-    uint64_t elapsed;
     uint64_t step;
     uint64_t period;
     uint64_t phase;
@@ -141,8 +146,7 @@ MediaPlayer::Update (
     if (!active_) {
         return false;
     }
-    elapsed = uint32_t(nowMs - epochMs_);
-    step = elapsed * metadata_.fpsNumerator / (uint64_t(MILLISECONDS_PER_SECOND_U) * metadata_.fpsDenominator);
+    step = PlaybackStep(nowMs);
     if (metadata_.pingPong && metadata_.frameCount > 1) {
         period = PING_PONG_DIRECTION_COUNT_ULL * (metadata_.frameCount - 1);
         phase = step % period;
@@ -197,3 +201,165 @@ MediaPlayer::Consume (
     }
     return player->upload_.WriteStoredFramePixels(bytes, count, offset, format);
 } // Consume
+
+/**
+    Returns the ID of the currently selected library video.
+
+    @return id - Nonzero identifier of the selected or next usable library item.
+    @return 0 - No matching library item is available or selected.
+*/
+uint32_t
+MediaPlayer::GetLibraryVideoId (
+    void
+    ) const
+{
+    if (active_) {
+        return libraryVideoId_;
+    } else {
+        return 0;
+    }
+} // GetLibraryVideoId
+
+/**
+    Returns the configured playback FPS cap.
+
+    @return value - Configured video FPS cap.
+    @return 0 - No override is applied; use the frame rate stored with the video.
+*/
+uint32_t
+MediaPlayer::GetFpsLimit (
+    void
+    ) const
+{
+    return maxFps_;
+} // GetFpsLimit
+
+/**
+    Returns the playback FPS numerator after applying the cap.
+
+    @return value - Numerator of the effective frames-per-second fraction after applying the FPS
+                    cap.
+*/
+uint32_t
+MediaPlayer::GetEffectiveFpsNumerator (
+    void
+    ) const
+{
+    if (maxFps_ && uint64_t(maxFps_) * metadata_.fpsDenominator < metadata_.fpsNumerator) {
+        return maxFps_;
+    } else {
+        return metadata_.fpsNumerator;
+    }
+} // GetEffectiveFpsNumerator
+
+/**
+    Returns the playback FPS denominator after applying the cap.
+
+    @return value - Nonzero denominator of the effective frames-per-second fraction.
+*/
+uint32_t
+MediaPlayer::GetEffectiveFpsDenominator (
+    void
+    ) const
+{
+    if (maxFps_ && uint64_t(maxFps_) * metadata_.fpsDenominator < metadata_.fpsNumerator) {
+        return 1;
+    } else {
+        return metadata_.fpsDenominator;
+    }
+} // GetEffectiveFpsDenominator
+
+/**
+    Changes the playback FPS cap and reschedules the next frame.
+
+    @param fps Maximum requested video frame rate; zero preserves the uploaded rate.
+    @param nowMs Current monotonic time since boot, in milliseconds.
+
+    @return true - The FPS limit was accepted and playback timing updated.
+    @return false - The requested FPS limit is outside the supported range.
+*/
+bool
+MediaPlayer::SetFpsLimit (
+    uint32_t fps,
+    uint32_t nowMs
+    )
+{
+    if (fps > MAX_VIDEO_FPS) {
+        return false;
+    }
+    if (fps == maxFps_) {
+        return true;
+    }
+    // Keep the current timeline position when changing speed; no clip reload.
+    if (active_) {
+        stepOffset_ = PlaybackStep(nowMs);
+        epochMs_ = nowMs;
+    }
+    maxFps_ = fps;
+    return true;
+} // SetFpsLimit
+
+/**
+    Advances the playback index using loop or ping-pong direction.
+
+    @param nowMs Current monotonic time since boot, in milliseconds.
+
+    @return value - Monotonic logical frame step computed from elapsed playback time and
+                    effective FPS.
+*/
+uint64_t
+MediaPlayer::PlaybackStep (
+    uint32_t nowMs
+    ) const
+{
+    return stepOffset_ + uint64_t(uint32_t(nowMs - epochMs_)) * GetEffectiveFpsNumerator() /
+                             (MILLISECONDS_PER_SECOND_ULL * GetEffectiveFpsDenominator());
+} // PlaybackStep
+
+/**
+    Selects a library video and restores its first checked frame.
+
+    Selection closes the previous file before opening the chosen ID. The library
+    controller owns fallback selection when this video fails validation.
+
+    @param id Nonzero saved-video library ID.
+    @param nowMs Current playback clock in milliseconds.
+
+    @return true - The selected video opened and its first frame was verified.
+    @return false - The ID, storage or first-frame validation failed.
+*/
+bool
+MediaPlayer::ShowLibraryVideo (
+    uint32_t id,
+    uint32_t nowMs
+    )
+{
+    Stop();
+    libraryVideoId_ = id;
+    return id && Restore(nowMs);
+} // ShowLibraryVideo
+
+
+/**
+    Opens and displays one checked library photo.
+
+    The caller holds render ownership. Pixel fragments remain provisional until
+    the complete stored frame and its checksum succeed; only then is it published.
+
+    @param id Nonzero saved-photo library ID.
+
+    @return true - The requested photo was verified and published.
+    @return false - Opening, decoding, mapping or verification failed.
+*/
+bool
+MediaPlayer::ShowLibraryPhoto (
+    uint32_t id
+    )
+{
+    Stop();
+    if (!memory_.OpenLibraryPhoto(id, metadata_) || !memory_.ReadMediaFrame(0, Consume, this)) {
+        return false;
+    }
+    upload_.PublishStoredFrame(metadata_);
+    return true;
+} // ShowLibraryPhoto

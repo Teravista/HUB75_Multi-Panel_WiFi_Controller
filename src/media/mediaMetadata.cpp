@@ -136,7 +136,7 @@ MediaMetadata::PayloadBytes (
 
     // JPEG payloads contain an index and variable records rather than raw frames.
     if (pixelFormat == PixelFormat::JPEG) {
-        if (type != MediaType::Video || encodedBytes < uint64_t(frameCount) * JPEG_MINIMUM_RECORD_BYTES ||
+        if (encodedBytes < uint64_t(frameCount) * JPEG_MINIMUM_RECORD_BYTES ||
             encodedBytes > UINT32_MAX) {
             return false;
         }
@@ -380,3 +380,25 @@ MediaMetadataCodec::DecodeMediaDescriptor (
     metadata = decoded;
     return true;
 } // DecodeMediaDescriptor
+
+/**
+    Checks whether a library photo has supported dimensions and single-frame timing.
+
+    Library records retain raw RGB888, raw RGB565 or indexed JPEG metadata. The
+    legacy raw-photo endpoint continues to use IsPhotoFor and admits RGB888 only.
+
+    @param panelWidth Required full logical panel width.
+    @param panelHeight Required full logical panel height.
+
+    @return true - The descriptor is a valid single full-panel library photo.
+    @return false - Type, dimensions, frame count, encoding or timing is invalid.
+*/
+bool
+MediaMetadata::IsPhotoWithin (
+    uint16_t panelWidth,
+    uint16_t panelHeight
+    ) const
+{
+    uint64_t bytes;
+    return PayloadBytes(bytes) && type == MediaType::Photo && width == panelWidth && height == panelHeight;
+} // IsPhotoWithin

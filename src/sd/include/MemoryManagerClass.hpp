@@ -11,8 +11,9 @@
     Provides the foreground SD storage boundary for saved photos and raw/indexed-JPEG videos.
 
     It owns SPI, the filesystem, file handles and one shared 24 KiB I/O buffer.
-    Named photos and alternating retained generations use checked metadata and
-    CRCs; video transactions write and verify bounded segments without keeping
+    Independent library items and alternating retained generations use checked
+    metadata and CRCs. Bounded directory pages, thumbnails and persistent selection
+    settings share this storage boundary. Video transactions verify segments without keeping
     the clip in RAM. Playback streams one verified frame at a time. A non-waiting
     guard protects files and scratch storage from reentrant access, while the
     previous valid generation remains available during replacement. Consumers
@@ -82,6 +83,96 @@ public:
 
     // Closes the active playback file and clears its runtime state.
     void CloseMediaPlayback(void);
+
+    static constexpr size_t LibraryPageSize = 10;
+    // 8.3 filenames provide a 28-bit ID namespace; card space/directory capacity
+    // is reached long before this representation bound, not an item-slot limit.
+    static constexpr uint32_t MaximumLibraryId = 0x0fffffff;
+
+    struct LibraryPage {
+        uint32_t total = 0;
+        uint32_t nextAfter = 0;
+        bool hasMore = false;
+    };
+
+    static constexpr size_t PhotoNameBytes = 64;
+    static constexpr size_t ThumbnailBytes = 16 * 32 * 2;
+
+    struct LibraryPhoto {
+        uint32_t id = 0;
+        uint32_t checksum = 0;
+        bool valid = false;
+        MediaMetadata metadata;
+        uint64_t bytes = 0;
+        char name[PhotoNameBytes]{};
+    };
+
+    struct LibraryVideo {
+        uint32_t id = 0;
+        uint32_t checksum = 0;
+        uint32_t maxSecondsMillis = 0;
+        bool valid = false;
+        MediaMetadata metadata;
+        uint64_t bytes = 0;
+        char name[PhotoNameBytes]{};
+    };
+
+    static constexpr uint32_t DefaultBrightness = 80;
+
+    struct GallerySettings {
+        uint32_t selectedPhoto = 0;
+        uint32_t intervalSeconds = DEFAULT_SLIDESHOW_INTERVAL_SECONDS;
+        bool slideshow = false;
+        uint32_t selectedVideo = 0;
+        uint32_t maxFps = 0;
+        uint32_t brightness = DefaultBrightness;
+    };
+
+
+    // Starts a named photo save with its own metadata and thumbnail.
+    bool BeginLibraryPhoto(const MediaMetadata& metadata, uint32_t checksum, const char* name, const uint8_t* thumbnail, uint32_t& id);
+
+    // Lists one bounded page of saved photos and their metadata.
+    bool ListLibraryPhotos(LibraryPhoto* photos, size_t capacity, size_t& count, uint32_t after = 0, LibraryPage* page = nullptr);
+
+    // Reads and validates metadata for one saved photo ID.
+    bool GetLibraryPhoto(uint32_t id, LibraryPhoto& photo);
+
+    // Reads the stored thumbnail belonging to one photo ID.
+    bool ReadLibraryThumbnail(uint32_t id, uint8_t* thumbnail);
+
+    // Opens a named saved photo for framebuffer restoration.
+    bool OpenLibraryPhoto(uint32_t id, MediaMetadata& metadata);
+
+    // Deletes the files belonging to one saved photo ID.
+    bool DeleteLibraryPhoto(uint32_t id);
+
+    // Reads the newest valid library selection and display settings.
+    bool ReadGallerySettings(GallerySettings& settings);
+
+    // Saves library selection and display settings transactionally.
+    bool SaveGallerySettings(const GallerySettings& settings);
+
+    // Saves the current framebuffer as a new named library photo.
+    bool SaveLibraryImage(ImageSource source, void* context, uint32_t& id);
+
+    // Starts a named video save using a newly allocated library ID.
+    bool BeginLibraryVideo(const MediaMetadata& metadata, uint32_t checksum, const char* name, uint32_t maxSecondsMillis, uint32_t& id);
+
+    // Lists one bounded page of saved videos and their metadata.
+    bool ListLibraryVideos(LibraryVideo* videos, size_t capacity, size_t& count, uint32_t after = 0, LibraryPage* page = nullptr);
+
+    // Reads and validates metadata for one saved video ID.
+    bool GetLibraryVideo(uint32_t id, LibraryVideo& video);
+
+    // Opens a named saved video for frame playback.
+    bool OpenLibraryVideo(uint32_t id, MediaMetadata& metadata);
+
+    // Deletes the files belonging to one saved video ID.
+    bool DeleteLibraryVideo(uint32_t id);
+
+    // Adopts the previous firmware's saved video without copying its payload.
+    bool ImportLastVideo(uint32_t& id);
 
 private:
     static constexpr size_t HeaderBytes = PHOTO_HEADER_BYTES;
@@ -187,11 +278,18 @@ private:
         uint32_t verifyFrameCrc = STORAGE_CRC32_INITIAL_U;
         size_t bufferedBytes = 0;
         bool open = false;
+        uint32_t libraryId = 0;
+        uint32_t videoId = 0;
+        uint32_t maxSecondsMillis = 0;
+        size_t headerBytes = MediaTransfer::FileHeaderBytes;
+        char name[PhotoNameBytes]{};
+        uint8_t thumbnail[ThumbnailBytes]{};
     };
 
     struct PlaybackSession {
         SavedPhotoSlot description;
         int slot = SAVED_PHOTO_NO_SLOT;
+        uint32_t libraryVideoId = 0;
         bool open = false;
     };
 
@@ -220,7 +318,7 @@ private:
     static void BuildVideoStorageHeader(uint8_t* header);
 
     // Inspects a photo, raw video or indexed JPEG video in a retained slot.
-    static SavedPhotoSlot InspectSavedMediaSlot(unsigned index);
+    static SavedPhotoSlot InspectSavedMediaSlot(unsigned index, const char* path = nullptr, bool checkFirstFrame = true);
 
     // Streams and checks a raw frame from the inspection or playback handle.
     static FrameResult ReadAndVerifyRawVideoFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting);
@@ -252,6 +350,67 @@ private:
 
     // Checks one bounded JPEG payload block or one complete encoded frame.
     bool VerifyJpegSaveStep(bool& finished);
+
+    static constexpr size_t LibraryHeaderBytes = 1536;
+    static constexpr size_t VideoLibraryHeaderBytes = 512;
+    static constexpr const char* GalleryPaths[] = {"0:/GSET_A.H75", "0:/GSET_B.H75"};
+
+    struct GalleryRecord {
+        bool valid = false;
+        uint32_t generation = 0;
+        int result = 0;
+        GallerySettings settings;
+    };
+
+    // Builds a managed video filename from its library ID and extension.
+    static void BuildVideoLibraryPath(uint32_t id, char* path, bool temporary = false);
+
+    // Builds a managed photo filename from its library ID and extension.
+    static void BuildPhotoLibraryPath(uint32_t id, char* path, bool temporary = false);
+
+    // Parses a managed library filename into its media ID and file type.
+    static bool ParseLibraryName(const char* name, uint32_t& id, bool& video, bool& temporary);
+
+    // Visits managed library entries without retaining the full directory.
+    template <class Visitor>
+    static int ScanLibraryDirectory(Visitor visit);
+
+    // Chooses the next unused ID for a named library item.
+    static uint32_t AllocateLibraryId(bool video, int& result);
+
+    // Selects a bounded ordered page of library IDs after the requested cursor.
+    template <class Item>
+    static int FindLibraryPage(bool video, Item* items, size_t capacity, size_t& count, uint32_t after, MemoryManager::LibraryPage& page);
+
+    // Selects a bounded ordered page of photo IDs after the requested cursor.
+    static int FindPhotoLibraryPage(MemoryManager::LibraryPhoto* items, size_t capacity, size_t& count, uint32_t after, MemoryManager::LibraryPage& page);
+
+    // Selects a bounded ordered page of video IDs after the requested cursor.
+    static int FindVideoLibraryPage(MemoryManager::LibraryVideo* items, size_t capacity, size_t& count, uint32_t after, MemoryManager::LibraryPage& page);
+
+    // Checks whether a published video is already present in the library.
+    static int FindExistingLibraryVideo(bool& existingVideo);
+
+    // Validates a named photo's header and reads its library metadata.
+    static SavedPhotoSlot InspectPhotoLibraryFile(uint32_t id, MemoryManager::LibraryPhoto* photo = nullptr, uint8_t* thumbnail = nullptr);
+
+    // Reads and validates one saved gallery settings record.
+    static GalleryRecord ReadAndValidateGalleryRecord(unsigned index);
+
+    // Selects the newest valid saved gallery settings record.
+    static int FindNewestValidGalleryRecord(const GalleryRecord* records);
+
+    // Validates a named video's header and reads its library metadata.
+    static SavedPhotoSlot InspectLibraryVideo(uint32_t id, MemoryManager::LibraryVideo* video = nullptr);
+
+    // Selects the path owned by the current save transaction.
+    static const char* BuildActiveSaveFilePath(char* path);
+
+    // Reports whether a filesystem result indicates lost storage communication.
+    static bool IsStorageIoError(int result);
+
+    // Builds the checked retained or named-library header after complete verification.
+    static void BuildLibraryPublicationHeader(uint8_t* header);
 
     bool ready_ = false;
     const char* error_ = "storage not initialized";
