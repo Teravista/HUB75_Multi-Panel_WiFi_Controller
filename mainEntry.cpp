@@ -7,11 +7,11 @@
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "network/wifiNetwork.hpp"
 #include "sd/include/MemoryManagerClass.hpp"
-#include "media/include/PhotoPersistenceClass.hpp"
+#include "media/include/MediaLibraryClass.hpp"
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "jpeg-video-storage"
+#define WIFI_STATE_MACHINE_REV "saved-media-library"
 
 /**
     Prepares and submits display frames while advancing photo and network services.
@@ -25,7 +25,7 @@
     @param upload Shared framebuffer and raw photo receiver.
     @param wifiNetwork Existing local-network state controller.
     @param memory SD image-storage boundary.
-    @param photos Automatic photo-save and startup-restore bridge.
+    @param library Saved-photo/video selection, slideshow and persistent settings.
     @param player Verified saved-media playback scheduler.
     @param video Bounded raw-video upload and verification service.
     @param graphics Shared CPU graphics source buffer.
@@ -36,7 +36,7 @@ RenderLoop (
     FrameBufferController& upload,
     WifiNetwork& wifiNetwork,
     MemoryManager& memory,
-    PhotoPersistence& photos,
+    MediaLibrary& library,
     MediaPlayer& player,
     TcpVideoUpload& video,
     CpuGraphics& graphics
@@ -54,12 +54,13 @@ RenderLoop (
     uint32_t currentFrameCount;
     uint32_t elapsedMs;
     const unsigned char* uploadedFrame = nullptr;
-    PhotoPersistence::SaveResult saved;
-    MediaMetadata metadata;
+    uint32_t attemptedPhotoRevision;
+    uint32_t savedVideoId;
 
     frameIndex = FIRST_FRAME_INDEX;
     animationMovingForward = true;
     storageStarted = false;
+    attemptedPhotoRevision = 0;
     lastFrameCount = 0;
     lastFpsTime = get_absolute_time();
     framesPerSecond = 0;
@@ -72,7 +73,10 @@ RenderLoop (
         if (!storageStarted && wifiNetwork.IsRadioInitialized()) {
             storageStarted = true;
             if (memory.Initialize()) {
-                player.RequestReload();
+                library.Initialize();
+                if (!library.WantsMedia()) {
+                    player.RequestReload();
+                }
             } else {
                 printf("[memory] saves unavailable: %s\n", memory.GetLastError());
             }
@@ -81,26 +85,35 @@ RenderLoop (
         // Finish deferred upload or verification work and schedule any saved-media reload.
         video.Update();
         reloadVideo = video.TakeReloadRequest();
-        if (reloadVideo) {
-            player.RequestReload();
-        }
+
         if (!upload.TryBeginRender()) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
             continue;
         }
 
-        // Completed photo uploads replace playback; video transactions request a reload.
-        if (!reloadVideo && upload.GetUploadedFrameData() && !upload.IsStoredFrame()) {
+        // Adopt a completed library upload only after the display transaction releases ownership.
+        if (reloadVideo) {
+            savedVideoId = video.TakeSavedLibraryId();
+            if (savedVideoId) {
+                library.NotifyVideoSaved(savedVideoId);
+            } else if (library.WantsMedia()) {
+                library.RequestReload();
+            } else {
+                player.RequestReload();
+            }
+        }
+
+        // Save each raw photo revision once, before connection overlays modify the source pixels.
+        if (!reloadVideo && upload.GetUploadedFrameData() && !upload.IsStoredFrame() &&
+            upload.GetFrameRevision() != attemptedPhotoRevision) {
+            attemptedPhotoRevision = upload.GetFrameRevision();
             player.Stop();
-            saved = photos.SaveUploadedImage();
-            if (saved == PhotoPersistence::SaveResult::Saved) {
-                metadata = upload.GetFrameMetadata();
-                printf("[memory] photo saved format=%s frames=%u fps=%u/%u\n",
-                       metadata.FormatName(), unsigned(metadata.frameCount),
-                       unsigned(metadata.fpsNumerator), unsigned(metadata.fpsDenominator));
-            } else if (saved == PhotoPersistence::SaveResult::Failed) {
+            if (!library.ImportLivePhoto()) {
                 printf("[memory] photo save failed: %s; keeping live photo\n", memory.GetLastError());
             }
+        }
+        if (library.WantsMedia()) {
+            library.Update(to_ms_since_boot(get_absolute_time()));
         } else {
             player.Update(to_ms_since_boot(get_absolute_time()));
         }
@@ -157,10 +170,10 @@ main (
     DisplayHelpers displayHelpers;
     FrameBufferController upload(&displayHelpers, frameBuffer, true);
     MemoryManager memory;
-    static TcpVideoUpload video(memory, upload);
+    static TcpVideoUpload video(memory, upload, true);
     WifiNetwork wifiNetwork(&upload, &video);
     MediaPlayer player(memory, upload);
-    PhotoPersistence photos(memory, upload);
+    static MediaLibrary library(memory, upload, player);
     CpuGraphics graphics(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, frameBuffer);
     bool restored;
 
@@ -188,7 +201,12 @@ main (
     restored = false;
     if (memory.Initialize()) {
         if (upload.TryBeginRender()) {
-            restored = player.Restore(to_ms_since_boot(get_absolute_time()));
+            library.Initialize();
+            if (library.WantsMedia()) {
+                restored = library.Update(to_ms_since_boot(get_absolute_time()));
+            } else {
+                restored = player.Restore(to_ms_since_boot(get_absolute_time()));
+            }
             upload.EndRender();
         }
         if (restored) {
@@ -216,5 +234,5 @@ main (
         }
         upload.EndRender();
     }
-    RenderLoop(displayHelpers, upload, wifiNetwork, memory, photos, player, video, graphics);
+    RenderLoop(displayHelpers, upload, wifiNetwork, memory, library, player, video, graphics);
 } // main

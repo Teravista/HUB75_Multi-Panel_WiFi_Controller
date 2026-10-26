@@ -1257,6 +1257,8 @@ MemoryManager::DiscardIncompleteMediaSave (
     bool safe
     )
 {
+    char path[LIBRARY_PATH_BYTES];
+
     if (storage_.save.phase == SavePhase::Idle) {
         return;
     }
@@ -1264,7 +1266,7 @@ MemoryManager::DiscardIncompleteMediaSave (
         if (storage_.save.open) {
             f_close(&storage_.mediaFile);
         }
-        f_unlink(GetSavedMediaPath(storage_.save.target));
+        f_unlink(BuildActiveSaveFilePath(path));
     }
     storage_.mediaFile = {};
     storage_.save = {};
@@ -1409,12 +1411,16 @@ MemoryManager::ReadAndVerifyRawVideoFrame (
     whole-video scan at boot. A previously failed playback slot is excluded.
 
     @param index Alternating slot to inspect.
+    @param path Optional managed path overriding the retained-slot filename.
+    @param checkFirstFrame Whether to validate the first frame before accepting the header.
 
     @return slot - Validity, metadata, generation and any I/O/verification failure.
 */
 MemoryManager::SavedPhotoSlot
 MemoryManager::InspectSavedMediaSlot (
-    unsigned index
+    unsigned index,
+    const char* path,
+    bool checkFirstFrame
     )
 {
     SavedPhotoSlot slot;
@@ -1428,7 +1434,13 @@ MemoryManager::InspectSavedMediaSlot (
     uint32_t expectedStride;
 
     // Classify missing and inaccessible slots before attempting to parse their headers.
-    slot.result = f_open(&storage_.imageFile, GetSavedMediaPath(index), FA_READ);
+    bool reserved;
+
+    reserved = path == nullptr;
+    if (!path) {
+        path = GetSavedMediaPath(index);
+    }
+    slot.result = f_open(&storage_.imageFile, path, FA_READ);
     if (slot.result == FR_NO_FILE) {
         return slot;
     }
@@ -1451,7 +1463,7 @@ MemoryManager::InspectSavedMediaSlot (
             slot.result = closed;
             return slot;
         }
-        return ReadSavedPhotoSlot(index);
+        return ReadAndValidatePhotoFile(path, nullptr, nullptr);
     }
 
     // Validate the video header checksum and descriptor before trusting any offsets or lengths.
@@ -1497,14 +1509,16 @@ MemoryManager::InspectSavedMediaSlot (
         slot.dataOffset = sizeof(header);
         slot.frameChecksums = true;
         slot.indexedJpeg = jpeg;
-        if (jpeg) {
-            first = ReadAndVerifyJpegFrame(slot, 0, nullptr, nullptr, true);
-        } else {
-            first = ReadAndVerifyRawVideoFrame(slot, 0, nullptr, nullptr, true);
+        if (checkFirstFrame) {
+            if (jpeg) {
+                first = ReadAndVerifyJpegFrame(slot, 0, nullptr, nullptr, true);
+            } else {
+                first = ReadAndVerifyRawVideoFrame(slot, 0, nullptr, nullptr, true);
+            }
+            valid = first.complete;
+            slot.result = first.result;
+            slot.error = first.error;
         }
-        valid = first.complete;
-        slot.result = first.result;
-        slot.error = first.error;
     }
 
     // Publish a usable candidate only after closing succeeds and no playback rejection excludes it.
@@ -1514,7 +1528,7 @@ MemoryManager::InspectSavedMediaSlot (
         if (slot.result == FR_OK) {
             slot.result = closed;
         }
-    } else if (valid && int(index) != storage_.rejectedSlot) {
+    } else if (valid && (!reserved || int(index) != storage_.rejectedSlot)) {
         slot.state = SlotState::Valid;
     }
     return slot;
@@ -1697,6 +1711,7 @@ MemoryManager::StartMediaVerification (
     )
 {
     int result;
+    char path[LIBRARY_PATH_BYTES];
 
     StorageGuard guard;
 
@@ -1719,12 +1734,12 @@ MemoryManager::StartMediaVerification (
     if (result != FR_OK) {
         return ReportStorageFailure("video close failed", result);
     }
-    result = f_open(&storage_.mediaFile, GetSavedMediaPath(storage_.save.target), FA_READ | FA_WRITE);
+    result = f_open(&storage_.mediaFile, BuildActiveSaveFilePath(path), FA_READ | FA_WRITE);
     if (result != FR_OK) {
         return ReportStorageFailure("video verification open failed", result);
     }
     storage_.save.open = true;
-    result = f_lseek(&storage_.mediaFile, MediaTransfer::FileHeaderBytes);
+    result = f_lseek(&storage_.mediaFile, storage_.save.headerBytes);
     if (result != FR_OK) {
         return ReportStorageFailure("video verification seek failed", result);
     }
@@ -1755,7 +1770,9 @@ MemoryManager::VerifyMediaSaveStep (
     UINT count;
     int result;
     uint8_t checksum[FRAME_CHECKSUM_BYTES];
-    uint8_t header[MediaTransfer::FileHeaderBytes];
+    uint8_t* header = nullptr;
+    char stagingPath[LIBRARY_PATH_BYTES];
+    char finalPath[LIBRARY_PATH_BYTES];
     bool jpegFinished;
 
     complete = false;
@@ -1804,18 +1821,31 @@ MemoryManager::VerifyMediaSaveStep (
         if (~storage_.save.verifyCrc != storage_.save.expectedCrc) {
             return ReportStorageFailure("stored video checksum mismatch");
         }
-        BuildVideoStorageHeader(header);
+        header = storage_.readBuffer;
+        BuildLibraryPublicationHeader(header);
         result = f_lseek(&storage_.mediaFile, 0);
         if (result == FR_OK) {
-            result = f_write(&storage_.mediaFile, header, sizeof(header), &count);
+            result = f_write(&storage_.mediaFile, header, storage_.save.headerBytes, &count);
         }
-        if (result != FR_OK || count != sizeof(header)) {
+        if (result != FR_OK || count != storage_.save.headerBytes) {
             return ReportStorageFailure("video publication failed", result);
         }
         result = f_close(&storage_.mediaFile);
         storage_.save.open = false;
         if (result != FR_OK) {
             return ReportStorageFailure("video publication close failed", result);
+        }
+        if (storage_.save.libraryId || storage_.save.videoId) {
+            BuildActiveSaveFilePath(stagingPath);
+            if (storage_.save.libraryId) {
+                BuildPhotoLibraryPath(storage_.save.libraryId, finalPath);
+            } else {
+                BuildVideoLibraryPath(storage_.save.videoId, finalPath);
+            }
+            result = f_rename(stagingPath, finalPath);
+            if (result != FR_OK) {
+                return ReportStorageFailure("library publication rename failed", result);
+            }
         }
         storage_.save = {};
         storage_.rejectedSlot = SAVED_PHOTO_NO_SLOT;
@@ -2199,7 +2229,7 @@ MemoryManager::VerifyJpegSaveStep (
 
     // After payload CRC succeeds, check one indexed frame per call before allowing publication.
     slot.metadata = storage_.save.metadata;
-    slot.dataOffset = MediaTransfer::FileHeaderBytes;
+    slot.dataOffset = storage_.save.headerBytes;
     slot.indexedJpeg = true;
     frame = ReadAndVerifyJpegFrame(slot, storage_.save.jpegVerifiedFrames, nullptr, nullptr, false, true);
     if (!frame.complete) {
@@ -2308,3 +2338,1978 @@ MemoryManager::LoadJpegIndexWindow (
     storage_.jpegIndexCount = entries;
     return true;
 } // LoadJpegIndexWindow
+
+/**
+    Selects the path owned by the current save transaction.
+
+    Library saves use an unpublished TMP file until all readback succeeds. Legacy
+    retained slots keep their existing reserved filenames.
+
+    @param path Caller-owned buffer containing LIBRARY_PATH_BYTES bytes.
+
+    @return path - The borrowed path for this transaction; callers never free it.
+*/
+const char*
+MemoryManager::BuildActiveSaveFilePath (
+    char* path
+    )
+{
+    if (storage_.save.libraryId) {
+        BuildPhotoLibraryPath(storage_.save.libraryId, path, true);
+        return path;
+    }
+    if (storage_.save.videoId) {
+        BuildVideoLibraryPath(storage_.save.videoId, path, true);
+        return path;
+    }
+    return GetSavedMediaPath(storage_.save.target);
+} // BuildActiveSaveFilePath
+
+/**
+    Reports whether a filesystem result indicates lost storage communication.
+
+    @param result FatFs status from the failed operation.
+
+    @return true - The card or transfer is unavailable or failed.
+    @return false - The result describes another condition or success.
+*/
+bool
+MemoryManager::IsStorageIoError (
+    int result
+    )
+{
+    return result == FR_DISK_ERR || result == FR_NOT_READY;
+} // IsStorageIoError
+
+/**
+    Builds a managed video filename from its library ID and extension.
+
+    Keeps the original two-digit VIDEO names for legacy IDs and uses the compact hexadecimal 8.3
+    namespace for later IDs. The temporary flag selects the unpublished staging extension without
+    changing the item's ID. Callers validate ID bounds and provide the fixed path capacity before
+    using the generated filename.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param path Storage path used by this operation.
+    @param temporary Whether to select the unpublished staging file instead of the saved item.
+*/
+void
+MemoryManager::BuildVideoLibraryPath (
+    uint32_t id,
+    char* path,
+    bool temporary
+    )
+{
+    const char* shortNameExtension = nullptr;
+    const char* extendedNameExtension = nullptr;
+
+    if (id <= LIBRARY_LEGACY_ID_MAX) {
+        shortNameExtension = {};
+        if (temporary) {
+            shortNameExtension = "TMP";
+        } else {
+            shortNameExtension = "H75";
+        }
+        std::snprintf(path, LIBRARY_PATH_BYTES, "0:/VIDEO%02lu.%s", static_cast<unsigned long>(id),
+                      shortNameExtension);
+    } else {
+        extendedNameExtension = {};
+        if (temporary) {
+            extendedNameExtension = "TMP";
+        } else {
+            extendedNameExtension = "H75";
+        }
+        std::snprintf(path, LIBRARY_PATH_BYTES, "0:/V%07lX.%s", static_cast<unsigned long>(id),
+                      extendedNameExtension);
+    }
+} // BuildVideoLibraryPath
+
+/**
+    Builds a managed photo filename from its library ID and extension.
+
+    Keeps the original two-digit PHOTO names for legacy IDs and uses the compact hexadecimal 8.3
+    namespace for later IDs. Temporary and published files share the same ID with different
+    extensions, allowing rename-based publication. This helper does not touch the directory or
+    allocate a library slot.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param path Storage path used by this operation.
+    @param temporary Whether to select the unpublished staging file instead of the saved item.
+*/
+void
+MemoryManager::BuildPhotoLibraryPath (
+    uint32_t id,
+    char* path,
+    bool temporary
+    )
+{
+    const char* shortNameExtension = nullptr;
+    const char* extendedNameExtension = nullptr;
+
+    if (id <= LIBRARY_LEGACY_ID_MAX) {
+        shortNameExtension = {};
+        if (temporary) {
+            shortNameExtension = "TMP";
+        } else {
+            shortNameExtension = "H75";
+        }
+        std::snprintf(path, LIBRARY_PATH_BYTES, "0:/PHOTO%02lu.%s", static_cast<unsigned long>(id),
+                      shortNameExtension);
+    } else {
+        extendedNameExtension = {};
+        if (temporary) {
+            extendedNameExtension = "TMP";
+        } else {
+            extendedNameExtension = "H75";
+        }
+        std::snprintf(path, LIBRARY_PATH_BYTES, "0:/P%07lX.%s", static_cast<unsigned long>(id),
+                      extendedNameExtension);
+    }
+} // BuildPhotoLibraryPath
+
+/**
+    Parses a managed library filename into its media ID and file type.
+
+    Private bounded directory traversal. Only canonical controller filenames are managed;
+    unrelated files/directories are left alone. Existing names stay.
+
+    @param name Name associated with the file or saved library item.
+    @param id Output identifier assigned to the saved or discovered library item.
+    @param video True selects videos; false selects photos.
+    @param temporary Whether to select the unpublished staging file instead of the saved item.
+
+    @return true - The filename identifies a valid controller-owned media item.
+    @return false - The filename or its numeric ID is not valid for the library.
+*/
+bool
+MemoryManager::ParseLibraryName (
+    const char* name,
+    uint32_t& id,
+    bool& video,
+    bool& temporary
+    )
+{
+    size_t length;
+    const char* extension = nullptr;
+    size_t i;
+    char c;
+
+    length = std::strlen(name);
+    if (length != LIBRARY_LEGACY_FILENAME_BYTES && length != LIBRARY_HEX_FILENAME_BYTES) {
+        return false;
+    }
+    extension = name + length - LIBRARY_EXTENSION_BYTES;
+    temporary = !std::strcmp(extension, ".TMP");
+    if (!temporary && std::strcmp(extension, ".H75")) {
+        return false;
+    }
+    id = 0;
+    if (!std::strncmp(name, "PHOTO", LIBRARY_LEGACY_PREFIX_BYTES) ||
+        !std::strncmp(name, "VIDEO", LIBRARY_LEGACY_PREFIX_BYTES)) {
+        if (length != LIBRARY_LEGACY_FILENAME_BYTES || name[LIBRARY_LEGACY_PREFIX_BYTES] < '0' ||
+            name[LIBRARY_LEGACY_PREFIX_BYTES] > '9' || name[LIBRARY_LEGACY_ID_ONES_OFFSET] < '0' ||
+            name[LIBRARY_LEGACY_ID_ONES_OFFSET] > '9') {
+            return false;
+        }
+        video = name[0] == 'V';
+        id = uint32_t(name[LIBRARY_LEGACY_PREFIX_BYTES] - '0') * DECIMAL_RADIX +
+             uint32_t(name[LIBRARY_LEGACY_ID_ONES_OFFSET] - '0');
+    } else {
+        if (length != LIBRARY_HEX_FILENAME_BYTES || (name[0] != 'P' && name[0] != 'V')) {
+            return false;
+        }
+        video = name[0] == 'V';
+        for (i = 1; i < LIBRARY_HEX_ID_END_OFFSET; ++i) {
+            c = name[i];
+            if (c >= '0' && c <= '9') {
+                id = id * HEXADECIMAL_RADIX + uint32_t(c - '0');
+            } else if (c >= 'A' && c <= 'F') {
+                id = id * HEXADECIMAL_RADIX + uint32_t(c - 'A' + DECIMAL_RADIX);
+            } else {
+                return false;
+            }
+        }
+        if (id <= LIBRARY_LEGACY_ID_MAX) {
+            return false; // No aliases for the original names.
+        }
+    }
+    return id && id <= MemoryManager::MaximumLibraryId;
+} // ParseLibraryName
+
+/**
+    Visits managed library entries without retaining the full directory.
+
+    Visits only recognized controller-owned root files, decoding each filename into its media ID,
+    type and staging status before invoking the borrowed visitor. The directory is closed after
+    normal completion, early visitor stop or read failure. Traversal is synchronous and bounded in
+    memory, so it can take longer as the card's directory grows without retaining a full list of
+    entries.
+
+    @param visit Callback invoked for each controller-owned library directory entry.
+
+    @return FR_OK - The filesystem operation completed successfully.
+    @return other - FatFs error code describing the failed filesystem operation.
+*/
+template <class Visitor>
+int
+MemoryManager::ScanLibraryDirectory (
+    Visitor visit
+    )
+{
+    DIR directory;
+    int result;
+    FILINFO info;
+    uint32_t id;
+    bool video;
+    bool temporary;
+    int closed;
+
+    directory = {};
+    result = f_opendir(&directory, "0:/");
+
+    if (result != FR_OK) {
+        return result;
+    }
+    info = {};
+    while ((result = f_readdir(&directory, &info)) == FR_OK && info.fname[0]) {
+        id = 0;
+        video = false;
+        temporary = false;
+        if (!(info.fattrib & AM_DIR) && ParseLibraryName(info.fname, id, video, temporary) &&
+            !visit(id, video, temporary, info)) {
+            break;
+        }
+    }
+
+    closed = f_closedir(&directory);
+    if (result == FR_OK) {
+        return closed;
+    } else {
+        return result;
+    }
+} // ScanLibraryDirectory
+
+/**
+    Chooses the next unused ID for a named library item.
+
+    Scans published entries of the selected media type to build a small occupancy bitmap for
+    reusable low IDs and track the highest existing ID. It reuses a free low ID when possible,
+    otherwise advances beyond the high-water mark within the filename namespace. Directory failure
+    or exhaustion returns no ID rather than overwriting an existing published item.
+
+    @param video True selects videos; false selects photos.
+    @param result Output FatFs or frame-validation result, including any failure details.
+
+    @return id - A nonzero unused media identifier.
+    @return 0 - The directory could not be read or the ID namespace is exhausted; result gives
+                the FatFs status.
+*/
+uint32_t
+MemoryManager::AllocateLibraryId (
+    bool video,
+    int& result
+    )
+{
+    uint8_t occupied[LIBRARY_ID_BITMAP_BYTES];
+    uint32_t largest;
+    uint32_t id;
+
+    // Reuse low deleted IDs with only 64 bytes. If that range is occupied,
+    // append beyond the high-water ID rather than scanning every possible ID.
+    std::memset(occupied, 0, sizeof(occupied));
+    largest = 0;
+    result = ScanLibraryDirectory([&](uint32_t id, bool isVideo, bool temporary, [[maybe_unused]] const FILINFO& info) {
+        if (isVideo != video || temporary) {
+            return true;
+        }
+        largest = std::max(largest, id);
+        if (id <= LIBRARY_REUSABLE_ID_LIMIT) {
+            occupied[(id - 1) / BITS_PER_BYTE] |= uint8_t(1u << ((id - 1) % BITS_PER_BYTE));
+        }
+        return true;
+    });
+
+    if (result != FR_OK) {
+        return 0;
+    }
+    for (id = 1; id <= LIBRARY_REUSABLE_ID_LIMIT; ++id) {
+        if (!(occupied[(id - 1) / BITS_PER_BYTE] & (1u << ((id - 1) % BITS_PER_BYTE)))) {
+            return id;
+        }
+    }
+
+    if (largest < MemoryManager::MaximumLibraryId) {
+        return largest + 1;
+    } else {
+        return 0;
+    }
+} // AllocateLibraryId
+
+/**
+    Selects a bounded ordered page of library IDs after the requested cursor.
+
+    Scans the directory while retaining only the lowest IDs beyond the exclusive cursor that fit
+    in the caller's page. Sorted insertion keeps memory proportional to page size, while separate
+    totals determine whether another page exists. Only IDs are selected here; later inspection
+    fills each item's metadata and validity without decoding the entire collection.
+
+    @param video True selects videos; false selects photos.
+    @param items Output array of library entries for this page.
+    @param capacity Maximum number of entries available in the output array.
+    @param count Output number of entries or bytes produced by this operation.
+    @param after Exclusive library ID cursor; zero starts at the first page.
+    @param page Optional output pagination totals and continuation cursor.
+
+    @return FR_OK - The filesystem operation completed successfully.
+    @return other - FatFs error code describing the failed filesystem operation.
+*/
+template <class Item>
+int
+MemoryManager::FindLibraryPage (
+    bool video,
+    Item* items,
+    size_t capacity,
+    size_t& count,
+    uint32_t after,
+    MemoryManager::LibraryPage& page
+    )
+{
+    uint32_t remaining;
+    int result;
+
+    count = 0;
+    page = {};
+    remaining = 0;
+    result = ScanLibraryDirectory([&](uint32_t id, bool isVideo, bool temporary, [[maybe_unused]] const FILINFO& info) {
+        size_t at;
+        size_t i;
+
+        if (isVideo != video || temporary) {
+            return true;
+        }
+        ++page.total;
+        if (id <= after) {
+            return true;
+        }
+        ++remaining;
+        at = 0;
+        while (at < count && items[at].id < id) {
+            ++at;
+        }
+        if (at >= capacity) {
+            return true;
+        }
+        if (count < capacity) {
+            ++count;
+        }
+        for (i = count - 1; i > at; --i) {
+            items[i].id = items[i - 1].id;
+        }
+        items[at].id = id;
+        return true;
+    });
+    page.hasMore = remaining > count;
+    if (count) {
+        page.nextAfter = items[count - 1].id;
+    } else {
+        page.nextAfter = after;
+    }
+    return result;
+} // FindLibraryPage
+
+/**
+    Selects a bounded ordered page of photo IDs after the requested cursor.
+
+    @param items Output array of library entries for this page.
+    @param capacity Maximum number of entries available in the output array.
+    @param count Output number of entries selected.
+    @param after Exclusive library ID cursor; zero starts at the first page.
+    @param page Output pagination totals and continuation cursor.
+
+    @return FR_OK - The page was selected successfully.
+    @return other - FatFs error describing the failed directory operation.
+*/
+int
+MemoryManager::FindPhotoLibraryPage (
+    MemoryManager::LibraryPhoto* items,
+    size_t capacity,
+    size_t& count,
+    uint32_t after,
+    MemoryManager::LibraryPage& page
+    )
+{
+    return FindLibraryPage(false, items, capacity, count, after, page);
+} // FindPhotoLibraryPage
+
+/**
+    Selects a bounded ordered page of video IDs after the requested cursor.
+
+    @param items Output array of library entries for this page.
+    @param capacity Maximum number of entries available in the output array.
+    @param count Output number of entries selected.
+    @param after Exclusive library ID cursor; zero starts at the first page.
+    @param page Output pagination totals and continuation cursor.
+
+    @return FR_OK - The page was selected successfully.
+    @return other - FatFs error describing the failed directory operation.
+*/
+int
+MemoryManager::FindVideoLibraryPage (
+    MemoryManager::LibraryVideo* items,
+    size_t capacity,
+    size_t& count,
+    uint32_t after,
+    MemoryManager::LibraryPage& page
+    )
+{
+    return FindLibraryPage(true, items, capacity, count, after, page);
+} // FindVideoLibraryPage
+
+/**
+    Checks whether a published video is already present in the library.
+
+    @param existingVideo Output flag set when a published video is found.
+
+    @return FR_OK - The directory was checked successfully.
+    @return other - FatFs error describing the failed directory operation.
+*/
+int
+MemoryManager::FindExistingLibraryVideo (
+    bool& existingVideo
+    )
+{
+    existingVideo = false;
+    return ScanLibraryDirectory([&]([[maybe_unused]] uint32_t id, bool video, bool temporary, [[maybe_unused]] const FILINFO& info) {
+        if (video && !temporary) {
+            existingVideo = true;
+        }
+        return !existingVideo;
+    });
+} // FindExistingLibraryVideo
+
+/**
+    Validates a named photo's header and reads its library metadata.
+
+    Reads the bounded library header and verifies both its base and extended checksums, photo
+    descriptor, stored name terminator and payload/file-size relationships. Valid metadata and the
+    optional persisted thumbnail are copied from that header; this listing path does not decode or
+    checksum the full photo payload. Damaged entries can still receive an ID/name placeholder,
+    while filesystem errors retain an I/O-failed result for storage recovery.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param photo Output description of the requested saved media item.
+    @param thumbnail RGB565 preview pixel buffer for the saved media item.
+
+    @return result - Inspection/read result including validity, metadata and any I/O or
+                     validation error.
+*/
+MemoryManager::SavedPhotoSlot
+MemoryManager::InspectPhotoLibraryFile (
+    uint32_t id,
+    MemoryManager::LibraryPhoto* photo,
+    uint8_t* thumbnail
+    )
+{
+    SavedPhotoSlot slot;
+    char path[LIBRARY_PATH_BYTES];
+    UINT count;
+    const uint8_t* header = nullptr;
+    bool valid;
+    uint64_t payload;
+    bool fileSizeMatches;
+    bool frameStrideMatches;
+    uint64_t expectedFrameStride;
+    uint32_t frameChecksumBytes;
+    int closed;
+
+    slot = {};
+
+    // Validate the root filename and image inputs before opening a file.
+    BuildPhotoLibraryPath(id, path);
+
+    // Open the saved file before validating its header and reading pixels.
+    slot.result = f_open(&storage_.imageFile, path, FA_READ);
+    if (slot.result == FR_NO_FILE) {
+        return slot;
+    }
+    if (slot.result != FR_OK) {
+        slot.state = SlotState::IoError;
+        return slot;
+    }
+    slot.state = SlotState::Invalid;
+    if (photo) {
+        *photo = {};
+        photo->id = id;
+        photo->bytes = f_size(&storage_.imageFile);
+        std::snprintf(photo->name, sizeof(photo->name), "Photo %lu (damaged)",
+                      static_cast<unsigned long>(id));
+    }
+    count = 0;
+    slot.result = f_read(&storage_.imageFile, storage_.readBuffer, LibraryHeaderBytes, &count);
+    header = storage_.readBuffer;
+    valid = slot.result == FR_OK && count == LibraryHeaderBytes &&
+        !std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
+        (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LIBRARY_RAW_PHOTO ||
+         header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LIBRARY_JPEG_PHOTO) &&
+        header[STORAGE_HEADER_RESERVED_OFFSET] == 0 &&
+        MediaMetadataCodec::ReadUnsigned16LittleEndian(header + STORAGE_HEADER_LENGTH_OFFSET) ==
+            LibraryHeaderBytes &&
+        ReadUnsigned32LittleEndian(header + STORAGE_HEADER_DATA_OFFSET_FIELD) == LibraryHeaderBytes &&
+        ReadUnsigned32LittleEndian(header + STORAGE_HEADER_CRC_OFFSET) ==
+            ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, STORAGE_HEADER_CRC_OFFSET) &&
+        ReadUnsigned32LittleEndian(header + LibraryHeaderBytes - FRAME_CHECKSUM_BYTES) ==
+            ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, LibraryHeaderBytes - FRAME_CHECKSUM_BYTES) &&
+        MediaMetadataCodec::DecodeMediaDescriptor(header + STORAGE_HEADER_METADATA_OFFSET,
+                                                  MEDIA_DESCRIPTOR_BYTES, slot.metadata) &&
+        slot.metadata.IsPhotoWithin(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT) &&
+        header[LIBRARY_NAME_TERMINATOR_OFFSET] == 0;
+    slot.indexedJpeg = slot.metadata.pixelFormat == PixelFormat::JPEG;
+    payload = 0;
+    if (valid) {
+        fileSizeMatches = {};
+        frameStrideMatches = {};
+        if (slot.metadata.PayloadBytes(payload) &&
+            slot.indexedJpeg == (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LIBRARY_JPEG_PHOTO) &&
+            ReadUnsigned32LittleEndian(header + STORAGE_HEADER_FRAME_BYTES_OFFSET) ==
+                slot.metadata.FrameBytes()) {
+            expectedFrameStride = {};
+            if (slot.indexedJpeg) {
+                expectedFrameStride = MediaTransfer::JpegIndexBytes;
+            } else {
+                expectedFrameStride = slot.metadata.FrameBytes() + FRAME_CHECKSUM_BYTES;
+            }
+            frameStrideMatches = bool(
+                ReadUnsigned32LittleEndian(header + STORAGE_HEADER_FRAME_STRIDE_OFFSET) == expectedFrameStride);
+        } else {
+            frameStrideMatches = false;
+        }
+        if (frameStrideMatches) {
+            frameChecksumBytes = {};
+            if (slot.indexedJpeg) {
+                frameChecksumBytes = 0;
+            } else {
+                frameChecksumBytes = FRAME_CHECKSUM_BYTES;
+            }
+            fileSizeMatches =
+                bool(uint64_t(f_size(&storage_.imageFile)) == LibraryHeaderBytes + payload + frameChecksumBytes);
+        } else {
+            fileSizeMatches = false;
+        }
+        valid = fileSizeMatches;
+    }
+    if (valid) {
+        slot.dataOffset = LibraryHeaderBytes;
+        slot.frameChecksums = true;
+        slot.checksum = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_PAYLOAD_CRC_OFFSET);
+        slot.generation = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_GENERATION_OFFSET);
+        if (photo) {
+            photo->valid = true;
+            photo->checksum = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_PAYLOAD_CRC_OFFSET);
+            photo->metadata = slot.metadata;
+            photo->bytes = payload;
+            std::memcpy(photo->name, header + LIBRARY_NAME_OFFSET, sizeof(photo->name));
+        }
+        if (thumbnail) {
+            std::memcpy(thumbnail, header + LIBRARY_EXTRA_DATA_OFFSET, MemoryManager::ThumbnailBytes);
+        }
+    }
+    closed = f_close(&storage_.imageFile);
+    if (slot.result != FR_OK || closed != FR_OK) {
+        slot.state = SlotState::IoError;
+        if (slot.result == FR_OK) {
+            slot.result = closed;
+        }
+    } else if (valid) {
+        slot.state = SlotState::Valid;
+    }
+    return slot;
+} // InspectPhotoLibraryFile
+
+/**
+    Reads and validates one saved gallery settings record.
+
+    Reads one retained settings record, accepts supported legacy/current lengths and checks its
+    magic, reserved bytes and checksum. Stored selection and display values are validated together
+    and older records receive compatible defaults for fields they did not contain. Invalid content
+    is distinct from an actual read/close error, allowing the caller to choose the other retained
+    generation safely.
+
+    @param index Zero-based index of the requested entry, slot or frame.
+
+    @return result - Inspection/read result including validity, metadata and any I/O or
+                     validation error.
+*/
+MemoryManager::GalleryRecord
+MemoryManager::ReadAndValidateGalleryRecord (
+    unsigned index
+    )
+{
+    GalleryRecord result;
+    uint8_t header[GALLERY_CONTROLS_RECORD_BYTES];
+    UINT count;
+    bool legacy;
+    bool current;
+    bool controls;
+    uint32_t video;
+    int closed;
+
+    result = {};
+
+    // Open the saved file before validating its header and reading pixels.
+    result.result = f_open(&storage_.imageFile, GalleryPaths[index], FA_READ);
+    if (result.result == FR_NO_FILE) {
+        result.result = FR_OK;
+        return result;
+    }
+    if (result.result != FR_OK) {
+        return result;
+    }
+
+    // Validate the file header and declared size before accepting pixel data.
+    std::memset(header, 0, sizeof(header));
+    count = 0;
+    result.result = f_read(&storage_.imageFile, header, sizeof(header), &count);
+    legacy = count == GALLERY_LEGACY_RECORD_BYTES && !std::memcmp(header, "H75S", MEDIA_MAGIC_BYTES);
+    current = count == GALLERY_VIDEO_RECORD_BYTES && !std::memcmp(header, "H75G", MEDIA_MAGIC_BYTES);
+    controls = count == GALLERY_CONTROLS_RECORD_BYTES && !std::memcmp(header, "H75C", MEDIA_MAGIC_BYTES);
+    if (current || controls) {
+        video = ReadUnsigned32LittleEndian(header + GALLERY_VIDEO_ID_OFFSET);
+    } else {
+        video = 0;
+    }
+    result.valid =
+        result.result == FR_OK && (legacy || current || controls) && f_size(&storage_.imageFile) == count &&
+        ReadUnsigned32LittleEndian(header + count - FRAME_CHECKSUM_BYTES) ==
+            ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, count - FRAME_CHECKSUM_BYTES) &&
+        ReadUnsigned32LittleEndian(header + GALLERY_PHOTO_ID_OFFSET) <= MemoryManager::MaximumLibraryId &&
+        ReadUnsigned32LittleEndian(header + GALLERY_INTERVAL_OFFSET) >= 1 &&
+        ReadUnsigned32LittleEndian(header + GALLERY_INTERVAL_OFFSET) <= MAX_SLIDESHOW_INTERVAL_SECONDS &&
+        header[GALLERY_SLIDESHOW_OFFSET] <= 1 && !header[GALLERY_RESERVED_OFFSET_ONE] &&
+        !header[GALLERY_RESERVED_OFFSET_TWO] && !header[GALLERY_RESERVED_OFFSET_THREE] &&
+        video <= MemoryManager::MaximumLibraryId &&
+        (!video || (!ReadUnsigned32LittleEndian(header + GALLERY_PHOTO_ID_OFFSET) &&
+                    !header[GALLERY_SLIDESHOW_OFFSET])) &&
+        (!current || (!ReadUnsigned32LittleEndian(header + GALLERY_FPS_OFFSET))) &&
+        (!controls ||
+         (ReadUnsigned32LittleEndian(header + GALLERY_FPS_OFFSET) <= MAX_VIDEO_FPS &&
+          ReadUnsigned32LittleEndian(header + GALLERY_BRIGHTNESS_OFFSET) <= MAX_BRIGHTNESS_PERCENT &&
+          !ReadUnsigned32LittleEndian(header + GALLERY_CONTROLS_RESERVED_OFFSET)));
+    if (result.valid) {
+        result.generation = ReadUnsigned32LittleEndian(header + GALLERY_GENERATION_OFFSET);
+        result.settings.selectedPhoto = ReadUnsigned32LittleEndian(header + GALLERY_PHOTO_ID_OFFSET);
+        result.settings.intervalSeconds = ReadUnsigned32LittleEndian(header + GALLERY_INTERVAL_OFFSET);
+        result.settings.slideshow = header[GALLERY_SLIDESHOW_OFFSET];
+        result.settings.selectedVideo = video;
+        if (controls) {
+            result.settings.maxFps = ReadUnsigned32LittleEndian(header + GALLERY_FPS_OFFSET);
+            result.settings.brightness = ReadUnsigned32LittleEndian(header + GALLERY_BRIGHTNESS_OFFSET);
+        }
+    }
+    closed = f_close(&storage_.imageFile);
+    if (result.result == FR_OK) {
+        result.result = closed;
+    }
+    return result;
+} // ReadAndValidateGalleryRecord
+
+/**
+    Selects the newest valid saved gallery settings record.
+
+    Ignores invalid retained records and compares generation numbers with wrap-aware ordering when
+    both copies are usable. This identifies the latest fully validated settings without modifying
+    either file. With no valid copy, the caller can use default settings or create the first
+    generation.
+
+    @param records Inspected gallery settings records to compare.
+
+    @return 0 - The first settings record is the newest valid copy.
+    @return 1 - The second settings record is the newest valid copy.
+    @return STORAGE_NO_SLOT - Neither settings record is valid.
+*/
+int
+MemoryManager::FindNewestValidGalleryRecord (
+    const GalleryRecord* records
+    )
+{
+    uint32_t difference;
+
+    if (!records[0].valid) {
+        if (records[1].valid) {
+            return 1;
+        } else {
+            return STORAGE_NO_SLOT;
+        }
+    }
+    if (!records[1].valid) {
+        return 0;
+    }
+    difference = records[1].generation - records[0].generation;
+    if (difference && difference < STORAGE_GENERATION_HALF_RANGE_U) {
+        return 1;
+    } else {
+        return 0;
+    }
+} // FindNewestValidGalleryRecord
+
+/**
+    Validates a named video's header and reads its library metadata.
+
+    Validates the named video's base/extended header checksums, media descriptor, name, upload
+    metadata and expected file layout before returning a library record. Listing inspects metadata
+    only, leaving encoded-frame integrity checks to playback and upload verification. A damaged
+    file can remain represented as an invalid library item, while actual open/read/close errors
+    remain I/O failures.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param video Video upload service or output video description; null is allowed where
+                 optional.
+
+    @return result - Inspection/read result including validity, metadata and any I/O or
+                     validation error.
+*/
+MemoryManager::SavedPhotoSlot
+MemoryManager::InspectLibraryVideo (
+    uint32_t id,
+    MemoryManager::LibraryVideo* video
+    )
+{
+    SavedPhotoSlot slot;
+    char path[LIBRARY_PATH_BYTES];
+    UINT count;
+    const uint8_t* header = nullptr;
+    int closed;
+    bool valid;
+    uint64_t payload;
+    bool fileSizeMatches;
+    bool frameStrideMatches;
+    uint64_t expectedFrameStride;
+    uint64_t frameChecksumBytes;
+    int closeClosed;
+
+    slot = {};
+
+    // Validate the root filename and image inputs before opening a file.
+    BuildVideoLibraryPath(id, path);
+
+    // Open the saved file before validating its header and reading pixels.
+    slot.result = f_open(&storage_.imageFile, path, FA_READ);
+    if (slot.result == FR_NO_FILE) {
+        return slot;
+    }
+    if (slot.result != FR_OK) {
+        slot.state = SlotState::IoError;
+        return slot;
+    }
+    slot.state = SlotState::Invalid;
+    if (video) {
+        *video = {};
+        video->id = id;
+        video->bytes = f_size(&storage_.imageFile);
+        std::snprintf(video->name, sizeof(video->name), "Video %lu (damaged)",
+                      static_cast<unsigned long>(id));
+    }
+    count = 0;
+    slot.result = f_read(&storage_.imageFile, storage_.readBuffer, VideoLibraryHeaderBytes, &count);
+    header = storage_.readBuffer;
+    if (slot.result == FR_OK && count >= MEDIA_FILE_HEADER_BYTES &&
+        !std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
+        (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_RAW_VIDEO ||
+         header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_JPEG_VIDEO)) {
+        // Existing r46 media can be adopted without copying or re-encoding it.
+        closed = f_close(&storage_.imageFile);
+        if (closed != FR_OK) {
+            slot.state = SlotState::IoError;
+            slot.result = closed;
+            return slot;
+        }
+        slot = InspectSavedMediaSlot(0, path, false);
+        if (video && slot.state == SlotState::Valid) {
+            video->valid = true;
+            video->metadata = slot.metadata;
+            video->checksum = slot.checksum;
+            slot.metadata.PayloadBytes(video->bytes);
+            std::snprintf(video->name, sizeof(video->name), "Restored video %lu",
+                          static_cast<unsigned long>(id));
+        }
+        return slot;
+    }
+    valid = slot.result == FR_OK && count == VideoLibraryHeaderBytes &&
+        !std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
+        (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LIBRARY_RAW_VIDEO ||
+         header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LIBRARY_JPEG_VIDEO) &&
+        header[STORAGE_HEADER_RESERVED_OFFSET] == 0 &&
+        MediaMetadataCodec::ReadUnsigned16LittleEndian(header + STORAGE_HEADER_LENGTH_OFFSET) ==
+            VideoLibraryHeaderBytes &&
+        ReadUnsigned32LittleEndian(header + STORAGE_HEADER_DATA_OFFSET_FIELD) == VideoLibraryHeaderBytes &&
+        ReadUnsigned32LittleEndian(header + STORAGE_HEADER_CRC_OFFSET) ==
+            ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, STORAGE_HEADER_CRC_OFFSET) &&
+        ReadUnsigned32LittleEndian(header + VideoLibraryHeaderBytes - STORAGE_HEADER_VERSION_OFFSET) ==
+            ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header,
+                              VideoLibraryHeaderBytes - STORAGE_HEADER_VERSION_OFFSET) &&
+        MediaMetadataCodec::DecodeMediaDescriptor(header + STORAGE_HEADER_METADATA_OFFSET,
+                                                  MEDIA_DESCRIPTOR_BYTES, slot.metadata) &&
+        MediaTransfer::IsSupportedVideo(slot.metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT) &&
+        header[LIBRARY_NAME_TERMINATOR_OFFSET] == 0;
+    slot.indexedJpeg = slot.metadata.pixelFormat == PixelFormat::JPEG;
+    payload = 0;
+    if (valid) {
+        fileSizeMatches = {};
+        frameStrideMatches = {};
+        if (slot.metadata.PayloadBytes(payload) &&
+            slot.indexedJpeg == (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LIBRARY_JPEG_VIDEO) &&
+            ReadUnsigned32LittleEndian(header + STORAGE_HEADER_FRAME_BYTES_OFFSET) ==
+                slot.metadata.FrameBytes()) {
+            expectedFrameStride = {};
+            if (slot.indexedJpeg) {
+                expectedFrameStride = MediaTransfer::JpegIndexBytes;
+            } else {
+                expectedFrameStride = slot.metadata.FrameBytes() + FRAME_CHECKSUM_BYTES;
+            }
+            frameStrideMatches = bool(
+                ReadUnsigned32LittleEndian(header + STORAGE_HEADER_FRAME_STRIDE_OFFSET) == expectedFrameStride);
+        } else {
+            frameStrideMatches = false;
+        }
+        if (frameStrideMatches) {
+            frameChecksumBytes = {};
+            if (slot.indexedJpeg) {
+                frameChecksumBytes = 0;
+            } else {
+                frameChecksumBytes = uint64_t(slot.metadata.frameCount) * FRAME_CHECKSUM_BYTES;
+            }
+            fileSizeMatches =
+                bool(uint64_t(f_size(&storage_.imageFile)) == VideoLibraryHeaderBytes + payload + frameChecksumBytes);
+        } else {
+            fileSizeMatches = false;
+        }
+        valid = fileSizeMatches;
+    }
+    if (valid) {
+        slot.dataOffset = VideoLibraryHeaderBytes;
+        slot.frameChecksums = true;
+        slot.checksum = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_PAYLOAD_CRC_OFFSET);
+        if (video) {
+            video->valid = true;
+            video->metadata = slot.metadata;
+            video->bytes = payload;
+            video->checksum = slot.checksum;
+            video->maxSecondsMillis = ReadUnsigned32LittleEndian(header + LIBRARY_EXTRA_DATA_OFFSET);
+            std::memcpy(video->name, header + LIBRARY_NAME_OFFSET, sizeof(video->name));
+        }
+    }
+    closeClosed = f_close(&storage_.imageFile);
+    if (slot.result != FR_OK || closeClosed != FR_OK) {
+        slot.state = SlotState::IoError;
+        if (slot.result == FR_OK) {
+            slot.result = closeClosed;
+        }
+    } else if (valid) {
+        slot.state = SlotState::Valid;
+    }
+    return slot;
+} // InspectLibraryVideo
+
+/**
+    Starts a named photo save with its own metadata and thumbnail.
+
+    Allocates an unused photo ID and opens its staging file through the shared media save
+    lifecycle. The caller supplies validated per-image metadata, an expected payload checksum, a
+    name and an already prepared thumbnail. These are retained for final header publication, while
+    payload bytes arrive through later append calls. The photo becomes visible under its final
+    filename only after successful SD readback verification.
+
+    @param metadata Media dimensions, pixel format, placement and playback settings.
+    @param checksum Expected CRC32 checksum of the media payload.
+    @param name Name associated with the file or saved library item.
+    @param thumbnail RGB565 preview pixel buffer for the saved media item.
+    @param id Output identifier assigned to the saved or discovered library item.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::BeginLibraryPhoto (
+    const MediaMetadata& metadata,
+    uint32_t checksum,
+    const char* name,
+    const uint8_t* thumbnail,
+    uint32_t& id
+    )
+{
+    char path[LIBRARY_PATH_BYTES];
+    int lookup;
+    uint32_t target;
+    size_t i;
+    int result;
+    UINT count;
+
+    id = 0;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    if (!metadata.IsPhotoWithin(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT) || !name || !thumbnail ||
+        (metadata.pixelFormat == PixelFormat::JPEG &&
+         metadata.encodedBytes > MediaTransfer::MaximumJpegBytes + JPEG_SINGLE_PHOTO_OVERHEAD_BYTES)) {
+        return ReportStorageFailure("invalid photo metadata");
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    lookup = FR_OK;
+    target = AllocateLibraryId(false, lookup);
+    if (lookup != FR_OK) {
+        return ReportStorageFailure("photo library lookup failed", lookup);
+    }
+    if (!target) {
+        return ReportStorageFailure("media filename namespace exhausted");
+    }
+    CloseSavedMediaPlayback();
+    storage_.save = SaveSession{};
+    storage_.save.libraryId = target;
+    storage_.save.headerBytes = LibraryHeaderBytes;
+    storage_.save.metadata = metadata;
+    storage_.save.expectedCrc = checksum;
+    metadata.PayloadBytes(storage_.save.total);
+    for (i = 0; i + 1 < sizeof(storage_.save.name) && name[i]; ++i) {
+        if (static_cast<unsigned char>(name[i]) >= ASCII_SPACE &&
+            static_cast<unsigned char>(name[i]) < ASCII_DELETE) {
+            storage_.save.name[i] = name[i];
+        } else {
+            storage_.save.name[i] = '_';
+        }
+    }
+
+    std::memcpy(storage_.save.thumbnail, thumbnail, sizeof(storage_.save.thumbnail));
+    BuildPhotoLibraryPath(target, path, true);
+
+    // Open the chosen destination before writing its header and pixel payload.
+    result = f_open(&storage_.mediaFile, path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (result != FR_OK) {
+        storage_.save = {};
+        return ReportStorageFailure("photo create failed", result);
+    }
+    storage_.save.open = true;
+    storage_.save.phase = SavePhase::Writing;
+    std::memset(storage_.readBuffer, 0, LibraryHeaderBytes);
+    std::memcpy(storage_.readBuffer, "H75P", MEDIA_MAGIC_BYTES);
+    count = 0;
+    result = f_write(&storage_.mediaFile, storage_.readBuffer, LibraryHeaderBytes, &count);
+    if (result != FR_OK || count != LibraryHeaderBytes) {
+        DiscardIncompleteMediaSave(!IsStorageIoError(result));
+        return ReportStorageFailure("photo staging failed", result);
+    }
+    id = target;
+
+    error_ = "none";
+    return true;
+} // BeginLibraryPhoto
+
+/**
+    Lists one bounded page of saved photos and their metadata.
+
+    Selects a bounded cursor-ordered set of photo IDs, then inspects each selected file's stored
+    metadata and validity. Directory totals and continuation information are returned separately
+    from the number of entries in this page. The guard is held across synchronous listing/header
+    reads, and an active save or unavailable card prevents the page from being treated as
+    complete.
+
+    @param photos Output array of saved photo descriptions.
+    @param capacity Maximum number of entries available in the output array.
+    @param count Output number of entries or bytes produced by this operation.
+    @param after Exclusive library ID cursor; zero starts at the first page.
+    @param page Optional output pagination totals and continuation cursor.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::ListLibraryPhotos (
+    LibraryPhoto* photos,
+    size_t capacity,
+    size_t& count,
+    uint32_t after,
+    LibraryPage* page
+    )
+{
+    LibraryPage measured;
+    int result;
+    size_t i;
+    uint32_t id;
+    SavedPhotoSlot slot;
+
+    count = 0;
+    if (page) {
+        *page = {};
+    }
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    if (!photos || !capacity || after > MaximumLibraryId) {
+        return ReportStorageFailure("invalid photo page request");
+    }
+    measured = {};
+    result = FindPhotoLibraryPage(photos, capacity, count, after, measured);
+
+    if (result != FR_OK) {
+        return ReportStorageFailure("photo directory read failed", result);
+    }
+    for (i = 0; i < count; ++i) {
+        id = photos[i].id;
+        slot = InspectPhotoLibraryFile(id, &photos[i]);
+        if (slot.state == SlotState::IoError) {
+            return ReportStorageFailure("photo listing failed", slot.result);
+        }
+    }
+
+    if (page) {
+        *page = measured;
+    }
+
+    error_ = "none";
+    return true;
+} // ListLibraryPhotos
+
+/**
+    Reads and validates metadata for one saved photo ID.
+
+    Checks availability and transaction exclusivity before inspecting the requested managed photo
+    file. Only a valid inspected record is copied into the caller's output; missing, corrupt and
+    I/O-failed records retain their error distinction. This reads metadata rather than streaming
+    the full image into the display.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param item Output description of the requested saved media item.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::GetLibraryPhoto (
+    uint32_t id,
+    LibraryPhoto& item
+    )
+{
+    SavedPhotoSlot slot;
+
+    item = {};
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId) {
+        return ReportStorageFailure("invalid photo id");
+    }
+    slot = InspectPhotoLibraryFile(id, &item);
+    if (slot.state == SlotState::IoError || slot.state == SlotState::Missing) {
+        return ReportStorageFailure("photo unavailable", slot.result);
+    }
+
+    error_ = "none";
+    return true;
+} // GetLibraryPhoto
+
+/**
+    Reads the stored thumbnail belonging to one photo ID.
+
+    Inspects the named photo under storage ownership and copies its persisted small RGB565
+    thumbnail through the file-validation helper. This avoids decoding the full image for the
+    older thumbnail representation. A concurrent save, bad ID or invalid file returns failure
+    without opening the active playback stream.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param thumbnail RGB565 preview pixel buffer for the saved media item.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::ReadLibraryThumbnail (
+    uint32_t id,
+    uint8_t* thumbnail
+    )
+{
+    SavedPhotoSlot slot;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId || !thumbnail) {
+        return ReportStorageFailure("invalid photo id");
+    }
+    slot = InspectPhotoLibraryFile(id, nullptr, thumbnail);
+    if (slot.state != SlotState::Valid) {
+        return ReportStorageFailure("photo thumbnail unavailable", slot.result);
+    }
+
+    error_ = "none";
+    return true;
+} // ReadLibraryThumbnail
+
+/**
+    Opens a named saved photo for framebuffer restoration.
+
+    Closes the prior playback reader, validates the named photo's stored header and opens its file
+    as the active playback source. The returned metadata describes that reader, but no pixels are
+    streamed or published here. A subsequent frame read performs payload validation and delivers
+    fragments under the caller's render ownership.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param metadata Output media descriptor populated by this operation.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::OpenLibraryPhoto (
+    uint32_t id,
+    MediaMetadata& metadata
+    )
+{
+    SavedPhotoSlot slot;
+    char path[LIBRARY_PATH_BYTES];
+    int result;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId) {
+        return ReportStorageFailure("invalid photo id");
+    }
+    CloseSavedMediaPlayback();
+    slot = InspectPhotoLibraryFile(id);
+    if (slot.state != SlotState::Valid) {
+        return ReportStorageFailure("saved photo unavailable", slot.result);
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    BuildPhotoLibraryPath(id, path);
+
+    // Open the saved file before validating its header and reading pixels.
+    result = f_open(&storage_.playbackFile, path, FA_READ);
+    if (result != FR_OK) {
+        return ReportStorageFailure("photo playback open failed", result);
+    }
+    storage_.playback.open = true;
+    storage_.playback.slot = STORAGE_LIBRARY_PHOTO_SLOT;
+    storage_.playback.description = slot;
+    metadata = slot.metadata;
+
+    error_ = "none";
+    return true;
+} // OpenLibraryPhoto
+
+/**
+    Deletes the files belonging to one saved photo ID.
+
+    Validates the managed ID and requires idle, ready storage before removing its photo files.
+    Deletion is limited to controller-generated library paths and records any filesystem failure
+    for recovery handling. Selection repair belongs to MediaLibrary and must be coordinated before
+    deleting a selected item.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::DeleteLibraryPhoto (
+    uint32_t id
+    )
+{
+    char path[LIBRARY_PATH_BYTES];
+    int result;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId) {
+        return ReportStorageFailure("invalid photo id");
+    }
+    if (storage_.playback.open && storage_.playback.slot == STORAGE_LIBRARY_PHOTO_SLOT) {
+        CloseSavedMediaPlayback();
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    BuildPhotoLibraryPath(id, path);
+    result = f_unlink(path);
+
+    if (result != FR_OK) {
+        return ReportStorageFailure("photo delete failed", result);
+    }
+
+    error_ = "none";
+    return true;
+} // DeleteLibraryPhoto
+
+/**
+    Reads the newest valid library selection and display settings.
+
+    Reads both retained settings records and selects the newest valid generation. Legacy records
+    are normalized by the decoder, while an absent/invalid saved configuration uses the supported
+    defaults. Actual filesystem errors are reported instead of being mistaken for a user who has
+    never saved settings.
+
+    @param settings Output gallery selection, slideshow and display settings.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::ReadGallerySettings (
+    GallerySettings& settings
+    )
+{
+    GalleryRecord records[GALLERY_SETTINGS_RECORD_COUNT];
+    size_t recordIndex;
+    const GalleryRecord* record = nullptr;
+    int latest;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    records[0] = ReadAndValidateGalleryRecord(0);
+    records[1] = ReadAndValidateGalleryRecord(1);
+    for (recordIndex = 0; recordIndex < sizeof(records) / sizeof(records[0]); ++recordIndex) {
+        record = &(records[recordIndex]);
+        if (record->result != FR_OK) {
+            return ReportStorageFailure("slideshow settings read failed", record->result);
+        }
+    }
+
+    latest = FindNewestValidGalleryRecord(records);
+    if (latest < 0) {
+        settings = GallerySettings{};
+    } else {
+        settings = records[latest].settings;
+    }
+
+    error_ = "none";
+    return true;
+} // ReadGallerySettings
+
+/**
+    Saves library selection and display settings transactionally.
+
+    Validates the complete combination of selection, slideshow, FPS and brightness before choosing
+    the alternate retained settings record. The new generation is written with a checksum, closed
+    and reread to verify both contents and generation. The previously valid record is retained
+    while this synchronous write/readback sequence runs, providing a fallback after interrupted
+    updates.
+
+    @param settings Saved gallery selection, slideshow and display settings.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::SaveGallerySettings (
+    const GallerySettings& settings
+    )
+{
+    GalleryRecord records[GALLERY_SETTINGS_RECORD_COUNT];
+    size_t recordIndex;
+    const GalleryRecord* record = nullptr;
+    int latest;
+    unsigned target;
+    uint8_t header[GALLERY_CONTROLS_RECORD_BYTES];
+    size_t headerBytes;
+    uint32_t nextGeneration;
+    int result;
+    UINT count;
+    int closed;
+    uint32_t writeError;
+    GalleryRecord verified;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("photo storage busy or unavailable");
+    }
+    if (settings.selectedPhoto > MaximumLibraryId || !settings.intervalSeconds ||
+        settings.intervalSeconds > MAX_SLIDESHOW_INTERVAL_SECONDS ||
+        (settings.slideshow && !settings.selectedPhoto) || settings.selectedVideo > MaximumLibraryId ||
+        (settings.selectedVideo && (settings.selectedPhoto || settings.slideshow)) ||
+        settings.maxFps > MAX_VIDEO_FPS || settings.brightness > MAX_BRIGHTNESS_PERCENT) {
+        return ReportStorageFailure("invalid gallery/display settings");
+    }
+    records[0] = ReadAndValidateGalleryRecord(0);
+    records[1] = ReadAndValidateGalleryRecord(1);
+    for (recordIndex = 0; recordIndex < sizeof(records) / sizeof(records[0]); ++recordIndex) {
+        record = &(records[recordIndex]);
+        if (record->result != FR_OK) {
+            return ReportStorageFailure("slideshow settings read failed", record->result);
+        }
+    }
+
+    latest = FindNewestValidGalleryRecord(records);
+    if (latest == 0) {
+        target = 1;
+    } else {
+        target = 0;
+    }
+
+    // Build the on-card header, including dimensions, payload size and checksum.
+    std::memset(header, 0, sizeof(header));
+    headerBytes = sizeof(header);
+    std::memcpy(header, "H75C", MEDIA_MAGIC_BYTES);
+    nextGeneration = {};
+    if (latest < 0) {
+        nextGeneration = 1;
+    } else {
+        nextGeneration = records[latest].generation + 1;
+    }
+    WriteUnsigned32LittleEndian(header + GALLERY_GENERATION_OFFSET, nextGeneration);
+    WriteUnsigned32LittleEndian(header + GALLERY_PHOTO_ID_OFFSET, settings.selectedPhoto);
+    WriteUnsigned32LittleEndian(header + GALLERY_INTERVAL_OFFSET, settings.intervalSeconds);
+    header[GALLERY_SLIDESHOW_OFFSET] = settings.slideshow;
+    WriteUnsigned32LittleEndian(header + GALLERY_VIDEO_ID_OFFSET, settings.selectedVideo);
+    WriteUnsigned32LittleEndian(header + GALLERY_FPS_OFFSET, settings.maxFps);
+    WriteUnsigned32LittleEndian(header + GALLERY_BRIGHTNESS_OFFSET, settings.brightness);
+    WriteUnsigned32LittleEndian(
+        header + headerBytes - FRAME_CHECKSUM_BYTES,
+        ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, headerBytes - FRAME_CHECKSUM_BYTES));
+
+    // Open the chosen destination before writing its header and pixel payload.
+    result = f_open(&storage_.imageFile, GalleryPaths[target], FA_WRITE | FA_CREATE_ALWAYS);
+    if (result != FR_OK) {
+        return ReportStorageFailure("slideshow settings create failed", result);
+    }
+    count = 0;
+    result = f_write(&storage_.imageFile, header, UINT(headerBytes), &count);
+    closed = f_close(&storage_.imageFile);
+    if (result != FR_OK || closed != FR_OK || count != headerBytes) {
+        writeError = {};
+        if (result == FR_OK) {
+            writeError = closed;
+        } else {
+            writeError = result;
+        }
+        return ReportStorageFailure("slideshow settings save failed", writeError);
+    }
+    verified = ReadAndValidateGalleryRecord(target);
+    if (!verified.valid || verified.result != FR_OK ||
+        verified.generation != ReadUnsigned32LittleEndian(header + GALLERY_GENERATION_OFFSET)) {
+        return ReportStorageFailure("slideshow settings verification failed", verified.result);
+    }
+
+    error_ = "none";
+    return true;
+} // SaveGallerySettings
+
+/**
+    Saves the current framebuffer as a new named library photo.
+
+    First reads the stable framebuffer source to compute its payload checksum and small RGB565
+    thumbnail. It then opens a new library-photo transaction, reads the source again to append its
+    pixels, and completes readback verification before returning success and an ID.
+
+    This convenience path performs the complete save synchronously, so it can delay foreground
+    frame preparation. The caller must keep the source image unchanged through every pass,
+    including while the manager releases and reacquires its internal guard between transaction
+    operations.
+
+    @param source Callback that fills requested source pixel chunks; false cancels the save.
+    @param context Caller-owned state passed unchanged to the callback.
+    @param id Output identifier assigned to the saved or discovered library item.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::SaveLibraryImage (
+    ImageSource source,
+    void* context,
+    uint32_t& id
+    )
+{
+    static uint8_t thumbnail[ThumbnailBytes];
+    uint32_t crc;
+    size_t offset;
+    size_t count;
+    size_t i;
+    size_t pixel;
+    size_t x;
+    size_t y;
+    uint16_t word;
+    size_t chunkOffset;
+    size_t chunkCount;
+    bool complete;
+
+    if (!source || !ready_) {
+        return ReportStorageFailure("missing image source or storage");
+    }
+    // A thumbnail samples each 8x8 cell's center, before panel wiring/status overlays.
+    crc = STORAGE_CRC32_INITIAL_U;
+    {
+        StorageGuard guard;
+        if (!guard.acquired || storage_.save.phase != SavePhase::Idle) {
+            return ReportStorageFailure("photo storage busy");
+        }
+        std::memset(thumbnail, 0, sizeof(thumbnail));
+        for (offset = 0; offset < SOURCE_FRAME_SIZE_BYTES; offset += ChunkBytes) {
+            count = std::min(ChunkBytes, SOURCE_FRAME_SIZE_BYTES - offset);
+            if (!source(context, storage_.readBuffer, count, offset)) {
+                return ReportStorageFailure("image source failed");
+            }
+            crc = UpdateImageCrc32(crc, storage_.readBuffer, count);
+            for (i = 0; i < count; i += RGB888_PIXEL_BYTES) {
+                pixel = (offset + i) / RGB888_PIXEL_BYTES;
+                x = pixel % LOGICAL_IMAGE_WIDTH;
+                y = pixel / LOGICAL_IMAGE_WIDTH;
+                if (x % LIBRARY_THUMBNAIL_SAMPLE_STEP != LIBRARY_THUMBNAIL_SAMPLE_CENTER ||
+                    y % LIBRARY_THUMBNAIL_SAMPLE_STEP != LIBRARY_THUMBNAIL_SAMPLE_CENTER) {
+                    continue;
+                }
+                word = uint16_t((storage_.readBuffer[i] >> RGB565_RED_BLUE_REDUCE_SHIFT) << RGB565_RED_SHIFT |
+                             (storage_.readBuffer[i + 1] >> RGB565_GREEN_REDUCE_SHIFT) << RGB565_GREEN_SHIFT |
+                             storage_.readBuffer[i + RGB_PIXEL_BLUE_INDEX] >> RGB565_RED_BLUE_REDUCE_SHIFT);
+                MediaMetadataCodec::WriteUnsigned16LittleEndian(
+                    thumbnail + ((y / LIBRARY_THUMBNAIL_SAMPLE_STEP) * LIBRARY_THUMBNAIL_WIDTH +
+                                 x / LIBRARY_THUMBNAIL_SAMPLE_STEP) *
+                                    RGB565_PIXEL_BYTES,
+                    word);
+            }
+        }
+    }
+    if (!BeginLibraryPhoto(MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT), ~crc,
+                           "Uploaded photo", thumbnail, id)) {
+        return false;
+    }
+    for (chunkOffset = 0; chunkOffset < SOURCE_FRAME_SIZE_BYTES; chunkOffset += ChunkBytes) {
+        chunkCount = std::min(ChunkBytes, SOURCE_FRAME_SIZE_BYTES - chunkOffset);
+        if (!source(context, storage_.readBuffer, chunkCount, chunkOffset) || !AppendMediaBytes(storage_.readBuffer, chunkCount)) {
+            AbortMediaSave();
+            return false;
+        }
+    }
+
+    if (!StartMediaVerification()) {
+        AbortMediaSave();
+        return false;
+    }
+    complete = false;
+    while (!complete) {
+        if (!VerifyMediaSaveStep(complete)) {
+            AbortMediaSave();
+            return false;
+        }
+    }
+
+    return true;
+} // SaveLibraryImage
+
+/**
+    Starts a named video save using a newly allocated library ID.
+
+    Allocates a new managed video ID and creates a staging save without loading the whole clip
+    into memory. It retains the video's name and selected upload-duration setting alongside
+    validated timing, loop and color metadata. Subsequent append and verification calls share the
+    bounded transaction buffer, and final rename publishes the item only after the saved payload
+    is accepted.
+
+    @param metadata Media dimensions, pixel format, placement and playback settings.
+    @param checksum Expected CRC32 checksum of the media payload.
+    @param name Name associated with the file or saved library item.
+    @param maxSecondsMillis Upload duration limit selected by the sender, in milliseconds.
+    @param id Output identifier assigned to the saved or discovered library item.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::BeginLibraryVideo (
+    const MediaMetadata& metadata,
+    uint32_t checksum,
+    const char* name,
+    uint32_t maxSecondsMillis,
+    uint32_t& id
+    )
+{
+    char path[LIBRARY_PATH_BYTES];
+    int lookup;
+    uint32_t target;
+    size_t i;
+    int result;
+    UINT count;
+
+    id = 0;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("video storage busy or unavailable");
+    }
+    if (!name || !MediaTransfer::IsSupportedVideo(metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) {
+        return ReportStorageFailure("invalid video metadata");
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    lookup = FR_OK;
+    target = AllocateLibraryId(true, lookup);
+    if (lookup != FR_OK) {
+        return ReportStorageFailure("video library lookup failed", lookup);
+    }
+    if (!target) {
+        return ReportStorageFailure("media filename namespace exhausted");
+    }
+    CloseSavedMediaPlayback();
+    storage_.save = SaveSession{};
+    storage_.save.videoId = target;
+    storage_.save.headerBytes = VideoLibraryHeaderBytes;
+    storage_.save.metadata = metadata;
+    storage_.save.expectedCrc = checksum;
+    storage_.save.maxSecondsMillis = maxSecondsMillis;
+    metadata.PayloadBytes(storage_.save.total);
+    for (i = 0; i + 1 < sizeof(storage_.save.name) && name[i]; ++i) {
+        if (static_cast<unsigned char>(name[i]) >= ASCII_SPACE &&
+            static_cast<unsigned char>(name[i]) < ASCII_DELETE) {
+            storage_.save.name[i] = name[i];
+        } else {
+            storage_.save.name[i] = '_';
+        }
+    }
+
+    if (!storage_.save.name[0]) {
+        std::snprintf(storage_.save.name, sizeof(storage_.save.name), "Video %lu", static_cast<unsigned long>(target));
+    }
+    BuildVideoLibraryPath(target, path, true);
+
+    // Open the chosen destination before writing its header and pixel payload.
+    result = f_open(&storage_.mediaFile, path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (result != FR_OK) {
+        storage_.save = {};
+        return ReportStorageFailure("video library create failed", result);
+    }
+    storage_.save.open = true;
+    storage_.save.phase = SavePhase::Writing;
+    std::memset(storage_.readBuffer, 0, VideoLibraryHeaderBytes);
+    std::memcpy(storage_.readBuffer, "H75P", MEDIA_MAGIC_BYTES);
+    count = 0;
+    result = f_write(&storage_.mediaFile, storage_.readBuffer, VideoLibraryHeaderBytes, &count);
+    if (result != FR_OK || count != VideoLibraryHeaderBytes) {
+        DiscardIncompleteMediaSave(!IsStorageIoError(result));
+        return ReportStorageFailure("video library staging failed", result);
+    }
+    id = target;
+
+    error_ = "none";
+    return true;
+} // BeginLibraryVideo
+
+/**
+    Lists one bounded page of saved videos and their metadata.
+
+    Selects a bounded ordered page of video IDs and inspects their headers for format, timing,
+    saved name and validity. The page reports directory totals and a continuation cursor without
+    retaining the whole collection. Reads are synchronous under the storage guard; busy or
+    unavailable storage fails the request rather than returning a partial successful page.
+
+    @param videos Output array of saved video descriptions.
+    @param capacity Maximum number of entries available in the output array.
+    @param count Output number of entries or bytes produced by this operation.
+    @param after Exclusive library ID cursor; zero starts at the first page.
+    @param page Optional output pagination totals and continuation cursor.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::ListLibraryVideos (
+    LibraryVideo* videos,
+    size_t capacity,
+    size_t& count,
+    uint32_t after,
+    LibraryPage* page
+    )
+{
+    LibraryPage measured;
+    int result;
+    size_t i;
+    uint32_t id;
+    SavedPhotoSlot slot;
+
+    count = 0;
+    if (page) {
+        *page = {};
+    }
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("video storage busy or unavailable");
+    }
+    if (!videos || !capacity || after > MaximumLibraryId) {
+        return ReportStorageFailure("invalid video page request");
+    }
+    measured = {};
+    result = FindVideoLibraryPage(videos, capacity, count, after, measured);
+
+    if (result != FR_OK) {
+        return ReportStorageFailure("video directory read failed", result);
+    }
+    for (i = 0; i < count; ++i) {
+        id = videos[i].id;
+        slot = InspectLibraryVideo(id, &videos[i]);
+        if (slot.state == SlotState::IoError) {
+            return ReportStorageFailure("video listing failed", slot.result);
+        }
+    }
+
+    if (page) {
+        *page = measured;
+    }
+
+    error_ = "none";
+    return true;
+} // ListLibraryVideos
+
+/**
+    Reads and validates metadata for one saved video ID.
+
+    Inspects one managed video under the storage guard and returns its metadata, checksum, name
+    and recorded upload limit only when the stored header is valid. It does not open the clip for
+    playback or validate every frame. Missing or corrupt entries remain distinguishable from
+    filesystem failures for library handling.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param item Output description of the requested saved media item.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::GetLibraryVideo (
+    uint32_t id,
+    LibraryVideo& item
+    )
+{
+    SavedPhotoSlot slot;
+
+    item = {};
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("video storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId) {
+        return ReportStorageFailure("invalid video id");
+    }
+    slot = InspectLibraryVideo(id, &item);
+    if (slot.state == SlotState::IoError || slot.state == SlotState::Missing) {
+        return ReportStorageFailure("video unavailable", slot.result);
+    }
+
+    error_ = "none";
+    return true;
+} // GetLibraryVideo
+
+/**
+    Opens a named saved video for frame playback.
+
+    Validates the selected video's stored description before replacing the active playback reader.
+    It opens the managed file, resets its prefetch/index state and returns the metadata used by
+    MediaPlayer's timeline. Frame pixels and checksums are validated later by individual frame
+    reads, so opening alone does not publish an image or guarantee that every frame is intact.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param metadata Output media descriptor populated by this operation.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::OpenLibraryVideo (
+    uint32_t id,
+    MediaMetadata& metadata
+    )
+{
+    SavedPhotoSlot slot;
+    char path[LIBRARY_PATH_BYTES];
+    int result;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("video storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId) {
+        return ReportStorageFailure("invalid video id");
+    }
+    CloseSavedMediaPlayback();
+    slot = InspectLibraryVideo(id);
+    if (slot.state != SlotState::Valid) {
+        return ReportStorageFailure("saved video unavailable", slot.result);
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    BuildVideoLibraryPath(id, path);
+
+    // Open the saved file before validating its header and reading pixels.
+    result = f_open(&storage_.playbackFile, path, FA_READ);
+    if (result != FR_OK) {
+        return ReportStorageFailure("video library playback open failed", result);
+    }
+    storage_.playback.open = true;
+    storage_.playback.slot = STORAGE_LIBRARY_VIDEO_SLOT;
+    storage_.playback.libraryVideoId = id;
+    storage_.playback.description = slot;
+    metadata = slot.metadata;
+
+    error_ = "none";
+    return true;
+} // OpenLibraryVideo
+
+/**
+    Deletes the files belonging to one saved video ID.
+
+    Checks the managed ID and closes its active playback reader when necessary before unlinking
+    the video's files. The operation is serialized with saves and other storage access; filesystem
+    errors enter the usual failure path. MediaLibrary is responsible for persisting a replacement
+    selection before calling deletion.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::DeleteLibraryVideo (
+    uint32_t id
+    )
+{
+    char path[LIBRARY_PATH_BYTES];
+    int result;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("video storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId) {
+        return ReportStorageFailure("invalid video id");
+    }
+    if (storage_.playback.open && storage_.playback.libraryVideoId == id) {
+        CloseSavedMediaPlayback();
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    BuildVideoLibraryPath(id, path);
+    result = f_unlink(path);
+
+    if (result != FR_OK) {
+        return ReportStorageFailure("video delete failed", result);
+    }
+
+    error_ = "none";
+    return true;
+} // DeleteLibraryVideo
+
+/**
+    Adopts the previous firmware's saved video without copying its payload.
+
+    Checks a persistent migration marker and existing video entries before examining legacy
+    retained media. A newest usable legacy video can be adopted by renaming its payload into the
+    library rather than copying the clip. The marker prevents a deliberately deleted imported
+    video from reappearing on every boot. A successful lookup with no video to adopt returns id
+    zero; filesystem errors remain failures.
+
+    @param id Output identifier assigned to the saved or discovered library item.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::ImportLastVideo (
+    uint32_t& id
+    )
+{
+    FILINFO markerInfo;
+    int exists;
+    bool existingVideo;
+    int scanned;
+    SavedPhotoSlot slots[SAVED_MEDIA_SLOT_COUNT];
+    size_t slotIndex;
+    const SavedPhotoSlot* slot = nullptr;
+    int latest;
+    char path[LIBRARY_PATH_BYTES];
+    int lookup;
+    uint32_t candidate;
+    int renamed;
+    /**
+        Writes a marker so legacy saved-video import is not repeated.
+
+        Writes and closes the persistent migration marker only after legacy-video adoption or
+        confirmation that an existing library already takes precedence. Later boots can then leave
+        a deliberately deleted imported clip deleted. Short writes and close failures are reported
+        so a failed marker is not treated as a completed migration.
+
+        @return true - The legacy video migration marker was written and closed.
+        @return false - Creating, writing or closing the marker file failed.
+    */
+    auto markImported = [&]() {
+        uint8_t marker[STORAGE_HEADER_METADATA_OFFSET];
+        int result;
+        UINT written;
+        int closed;
+        uint32_t writeError;
+
+        std::memset(marker, 0, sizeof(marker));
+        std::memcpy(marker, "H75V", MEDIA_MAGIC_BYTES);
+        WriteUnsigned32LittleEndian(marker + MEDIA_MAGIC_BYTES, 1);
+        WriteUnsigned32LittleEndian(
+            marker + STORAGE_HEADER_GENERATION_OFFSET,
+            ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, marker, STORAGE_HEADER_GENERATION_OFFSET));
+        result = f_open(&storage_.imageFile, "0:/VLIB.H75", FA_WRITE | FA_CREATE_ALWAYS);
+        written = 0;
+        if (result != FR_OK) {
+            return ReportStorageFailure("video migration state create failed", result);
+        }
+        result = f_write(&storage_.imageFile, marker, sizeof(marker), &written);
+        closed = f_close(&storage_.imageFile);
+        if (result != FR_OK || written != sizeof(marker) || closed != FR_OK) {
+            writeError = {};
+            if (result == FR_OK) {
+                writeError = closed;
+            } else {
+                writeError = result;
+            }
+            return ReportStorageFailure("video migration state write failed", writeError);
+        }
+        return true;
+    };
+
+    id = 0;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("video storage busy or unavailable");
+    }
+    // A persistent marker prevents deleted videos from reappearing from an older
+    // legacy backup on the next boot. Interrupted migration never deletes payload.
+    markerInfo = {};
+    exists = f_stat("0:/VLIB.H75", &markerInfo);
+    if (exists == FR_OK) {
+        return true;
+    }
+    if (exists != FR_NO_FILE) {
+        return ReportStorageFailure("video migration state lookup failed", exists);
+    }
+
+    existingVideo = false;
+    scanned = FindExistingLibraryVideo(existingVideo);
+    if (scanned != FR_OK) {
+        return ReportStorageFailure("video import lookup failed", scanned);
+    }
+    if (existingVideo) {
+        return markImported();
+    }
+    slots[0] = InspectSavedMediaSlot(0);
+    slots[1] = InspectSavedMediaSlot(1);
+    for (slotIndex = 0; slotIndex < sizeof(slots) / sizeof(slots[0]); ++slotIndex) {
+        slot = &(slots[slotIndex]);
+        if (slot->state == SlotState::IoError) {
+            return ReportStorageFailure("legacy video lookup failed", slot->result);
+        }
+    }
+
+    latest = FindNewestSavedPhoto(slots);
+    if (latest < 0 || slots[latest].metadata.type != MediaType::Video) {
+        return markImported();
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    lookup = FR_OK;
+    candidate = AllocateLibraryId(true, lookup);
+    if (lookup != FR_OK || !candidate) {
+        return ReportStorageFailure("video import allocation failed", lookup);
+    }
+    BuildVideoLibraryPath(candidate, path);
+    CloseSavedMediaPlayback();
+    renamed = f_rename(GetSavedMediaPath(unsigned(latest)), path);
+    if (renamed != FR_OK) {
+        return ReportStorageFailure("legacy video import failed", renamed);
+    }
+    id = candidate;
+    storage_.rejectedSlot = STORAGE_NO_SLOT;
+
+    error_ = "none";
+    return markImported();
+} // ImportLastVideo
+
+
+/**
+    Builds the checked retained or named-library header after complete verification.
+
+    The common 64-byte media header is extended with an item name, photo thumbnail
+    or video duration setting. The full extension has its own CRC and remains
+    unpublished until the closed staging file is renamed to its final name.
+
+    @param header Writable shared scratch for the full selected header length.
+*/
+void
+MemoryManager::BuildLibraryPublicationHeader (
+    uint8_t* header
+    )
+{
+    std::memset(header, 0, storage_.save.headerBytes);
+    BuildVideoStorageHeader(header);
+    if (!storage_.save.libraryId && !storage_.save.videoId) {
+        return;
+    }
+    if (storage_.save.libraryId) {
+        header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_LIBRARY_RAW_PHOTO;
+        if (storage_.save.metadata.pixelFormat == PixelFormat::JPEG) {
+            header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_LIBRARY_JPEG_PHOTO;
+        }
+    } else {
+        header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_LIBRARY_RAW_VIDEO;
+        if (storage_.save.metadata.pixelFormat == PixelFormat::JPEG) {
+            header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_LIBRARY_JPEG_VIDEO;
+        }
+    }
+    MediaMetadataCodec::WriteUnsigned16LittleEndian(header + STORAGE_HEADER_LENGTH_OFFSET, storage_.save.headerBytes);
+    WriteUnsigned32LittleEndian(header + VIDEO_DATA_OFFSET_FIELD, storage_.save.headerBytes);
+    WriteUnsigned32LittleEndian(header + VIDEO_HEADER_CRC_OFFSET,
+                               ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, VIDEO_HEADER_CRC_OFFSET));
+    std::memcpy(header + LIBRARY_NAME_OFFSET, storage_.save.name, sizeof(storage_.save.name));
+    if (storage_.save.libraryId) {
+        std::memcpy(header + LIBRARY_EXTRA_DATA_OFFSET, storage_.save.thumbnail, sizeof(storage_.save.thumbnail));
+    } else {
+        WriteUnsigned32LittleEndian(header + LIBRARY_EXTRA_DATA_OFFSET, storage_.save.maxSecondsMillis);
+    }
+    WriteUnsigned32LittleEndian(header + storage_.save.headerBytes - FRAME_CHECKSUM_BYTES,
+                               ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header,
+                                                storage_.save.headerBytes - FRAME_CHECKSUM_BYTES));
+} // BuildLibraryPublicationHeader

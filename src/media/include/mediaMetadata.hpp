@@ -41,6 +41,9 @@ struct MediaMetadata {
     // Validates the descriptor and calculates its complete pixel payload size.
     bool PayloadBytes(uint64_t& bytes) const;
 
+    // Checks whether a library photo has supported dimensions and single-frame timing.
+    bool IsPhotoWithin(uint16_t panelWidth, uint16_t panelHeight) const;
+
     // Checks whether a single photo exactly matches the supplied dimensions.
     bool IsPhotoFor(uint16_t panelWidth, uint16_t panelHeight) const;
 

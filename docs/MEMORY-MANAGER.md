@@ -1,8 +1,8 @@
 # SD image storage
 
 `MemoryManager` owns the SPI hardware, FAT/exFAT filesystem, file operations and
-a shared 24 KiB read buffer. Its API saves and reads one logical 128 x 256 RGB888
-image without allocating another full framebuffer.
+a shared 24 KiB read buffer. Its APIs store named photos, retained legacy media
+and independent photo/video library items without allocating another framebuffer.
 
 The class overview is in `src/sd/include/MemoryManagerClass.hpp`; its implementation
 and private class-owned storage state are in `src/sd/MemoryManagerClass.cpp`.
@@ -53,29 +53,19 @@ if (memory.Initialize()) {
 }
 ```
 
-## Automatic photo persistence
+## Saved library and automatic persistence
 
-Each completed raw TCP photo is saved once, before drawing the connection icon.
-Frame ownership excludes new uploads while the foreground reads the source, so
-no second framebuffer is needed. A failed save keeps the live photo visible and
-is not retried continuously for the same frame revision.
+Completed raw TCP photos become independent library items before the connection
+overlay is drawn. TCP videos are published to the video collection after SD
+verification. Startup restores the saved photo/video selection or slideshow;
+unavailable content falls back to retained legacy content or the flashed image.
+The first radio setup releases SD resources and explicitly mounts storage again.
 
-`SaveLastImage(source, context)` streams logical RGB888 pixels into alternating
-reserved `LASTA.H75` and `LASTB.H75` files. `ReadLastImage(sink, context)` reads
-the newest generation when it is a photo; a corrupt or incomplete replacement falls back to
-the previous valid copy. Each retained photo has a 52-byte version-3 header, with
-separate CRCs covering the descriptor/generation header and 98,304-byte payload. These files
-are controller-owned and must not be used as arbitrary named-image destinations.
-
-Startup queues the flashed image, then attempts to restore a verified saved
-photo or first video frame before Wi-Fi connection begins. Missing or unusable storage leaves the
-flashed image available. SD hardware is released for the first radio resource
-claim and initialized once afterward, even if association is still pending.
-Storage is mounted through explicit initialization.
-
-The `PhotoPersistence` bridge connects MemoryManager to FrameBufferController.
-FrameReceiver supplies ownership tokens and completed-frame revisions; TCP
-callbacks only receive/map pixels. Filesystem work remains in foreground code.
+`MediaLibrary` coordinates selection and display settings. `MemoryManager`
+provides checked file operations and bounded directory pages. See the
+[saved media library](PHOTO-LIBRARY.md) for publication, settings, filenames and
+migration behavior. `SaveLastImage`, `ReadLastImage` and `PhotoPersistence` remain
+available for retained RGB888 compatibility.
 
 ## Per-photo metadata
 
