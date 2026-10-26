@@ -20,6 +20,8 @@ hooks and DMA completion before CRC-error retry.
 https://elm-chan.org/fsw/tjpgd/
 
 Copyright and redistribution notices are retained in `tjpgd.c` and `tjpgd.h`.
+Local decoder changes add entropy/chroma optimizations and optional validation
+and timing hooks.
 
 ## JuPFu hub75
 

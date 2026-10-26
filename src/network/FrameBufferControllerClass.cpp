@@ -4,6 +4,10 @@
 #include "pico/time.h"
 #include <cstdio>
 
+#define RGB888_RED_CHANNEL_INDEX 0
+#define RGB888_GREEN_CHANNEL_INDEX 1
+#define RGB888_BLUE_CHANNEL_INDEX 2
+
 /**
     Returns elapsed boot time in milliseconds for transport deadlines.
 
@@ -221,6 +225,8 @@ FrameBufferController::PumpReply (
     if (!m_complete) {
         return ERR_OK;
     }
+
+    // Queue the acknowledgement once; temporary send pressure retries on a later callback.
     if (!m_ackQueued) {
         result = tcp_write(m_clientPcb, UPLOAD_ACK_MESSAGE, kAckBytes, TCP_WRITE_FLAG_COPY);
         if (result == ERR_MEM) {
@@ -231,6 +237,8 @@ FrameBufferController::PumpReply (
         }
         m_ackQueued = true;
     }
+
+    // Close only after the peer has acknowledged the complete reply.
     if (m_acknowledged == kAckBytes) {
         DetachPhotoClientCallbacks(m_clientPcb);
         nextResult = tcp_close(m_clientPcb);
@@ -284,6 +292,8 @@ FrameBufferController::OnTcpRecv (
     pbuf* part = nullptr;
 
     self = static_cast<FrameBufferController*>(arg);
+
+    // Handle transport failure and peer closure before consuming any packet data.
     if (error != ERR_OK) {
         if (packet) {
             pbuf_free(packet);
@@ -297,6 +307,8 @@ FrameBufferController::OnTcpRecv (
             return self->AbortClient();
         }
     }
+
+    // Keep every segment within the current photo transaction and its declared frame size.
     valid = !self->m_complete && packet->tot_len <= SOURCE_FRAME_SIZE_BYTES - self->m_rawBytes;
     if (valid) {
         for (part = packet; part && valid; part = part->next) {
@@ -311,6 +323,8 @@ FrameBufferController::OnTcpRecv (
     if (!valid) {
         return self->AbortClient();
     }
+
+    // Publish a complete photo before sending its acknowledgement; SD saving happens later.
     self->m_progress = GetPhotoUploadTimeMs();
     if (self->m_rawBytes == SOURCE_FRAME_SIZE_BYTES) {
         if (!self->FinishFrame(self->m_rawOwner)) {
@@ -787,15 +801,16 @@ FrameBufferController::ClearStoredFrame (
 } // ClearStoredFrame
 
 /**
-    Maps a stored RGB888 frame fragment into the CPU framebuffer.
+    Maps a stored raw frame fragment into the CPU framebuffer.
 
     The caller already holds render ownership. Mapping is calculated once for
     each logical panel-row run; a signed stride then advances through physical
     pixels. CpuFrame stores the configured CPU format without another full buffer.
 
-    @param bytes Read-only logical RGB888 pixels.
+    @param bytes Read-only logical RGB888 or little-endian RGB565 pixels.
     @param count Number of bytes in this complete-pixel fragment.
     @param offset Byte offset in the logical full-panel frame.
+    @param format Source fragment encoding: RGB888 or little-endian RGB565.
 
     @return true - Every pixel in the bounded fragment was mapped.
     @return false - The pointer, range or RGB alignment is invalid.
@@ -804,10 +819,17 @@ bool
 FrameBufferController::WriteStoredFramePixels (
     const uint8_t* bytes,
     size_t count,
-    size_t offset
+    size_t offset,
+    PixelFormat format
     )
 {
     size_t pixel;
+    size_t pixelBytes;
+    size_t frameBytes;
+    uint16_t packed;
+    uint32_t color;
+    uint8_t unpacked[IMAGE_BYTES_PER_PIXEL];
+    const uint8_t* channels = nullptr;
     size_t remaining;
     size_t run;
     size_t index;
@@ -820,12 +842,22 @@ FrameBufferController::WriteStoredFramePixels (
     ptrdiff_t destination;
     ptrdiff_t stride;
 
-    if (!bytes || offset > SOURCE_FRAME_SIZE_BYTES || count > SOURCE_FRAME_SIZE_BYTES - offset ||
-        offset % IMAGE_BYTES_PER_PIXEL || count % IMAGE_BYTES_PER_PIXEL) {
+    // Resolve the source pixel width before checking offsets and whole-pixel alignment.
+    pixelBytes = IMAGE_BYTES_PER_PIXEL;
+    if (format == PixelFormat::RGB565) {
+        pixelBytes = RGB565_PIXEL_BYTES;
+    } else if (format != PixelFormat::RGB888) {
         return false;
     }
-    pixel = offset / IMAGE_BYTES_PER_PIXEL;
-    remaining = count / IMAGE_BYTES_PER_PIXEL;
+    frameBytes = size_t(LOGICAL_IMAGE_WIDTH) * LOGICAL_IMAGE_HEIGHT * pixelBytes;
+    if (!bytes || offset > frameBytes || count > frameBytes - offset ||
+        offset % pixelBytes || count % pixelBytes) {
+        return false;
+    }
+
+    // Map one logical panel-row run at a time and advance by its physical byte stride.
+    pixel = offset / pixelBytes;
+    remaining = count / pixelBytes;
     while (remaining) {
         logicalX = int(pixel % LOGICAL_IMAGE_WIDTH);
         logicalY = int(pixel / LOGICAL_IMAGE_WIDTH);
@@ -841,11 +873,23 @@ FrameBufferController::WriteStoredFramePixels (
             m_displayHelpers->ConvertLogicalToPhysicalCoordinates(logicalX + 1, logicalY, nextX, nextY);
             stride = (ptrdiff_t(nextY - y) * MATRIX_PANEL_WIDTH + nextX - x) * ptrdiff_t(CpuFrame::PixelBytes);
         }
+
+        // Expand packed source colors only when needed; the CPU frame keeps its configured format.
         for (index = 0; index < run; ++index) {
-            CpuFrame::Store(m_frameBuffer + destination, bytes[IMAGE_RED_BYTE_OFFSET],
-                            bytes[IMAGE_GREEN_BYTE_OFFSET], bytes[IMAGE_BLUE_BYTE_OFFSET]);
+            channels = bytes;
+            if (format == PixelFormat::RGB565) {
+                packed = MediaMetadataCodec::ReadUnsigned16LittleEndian(bytes);
+                color = CpuFrame::Expand565(packed);
+                unpacked[RGB888_RED_CHANNEL_INDEX] = uint8_t(color >> RGB888_RED_SHIFT);
+                unpacked[RGB888_GREEN_CHANNEL_INDEX] = uint8_t(color >> RGB888_GREEN_SHIFT);
+                unpacked[RGB888_BLUE_CHANNEL_INDEX] = uint8_t(color);
+                channels = unpacked;
+            }
+            // Keep the same physical channel correction for every stored encoding.
+            CpuFrame::Store(m_frameBuffer + destination, channels[IMAGE_RED_BYTE_OFFSET],
+                            channels[IMAGE_GREEN_BYTE_OFFSET], channels[IMAGE_BLUE_BYTE_OFFSET]);
             destination += stride;
-            bytes += IMAGE_BYTES_PER_PIXEL;
+            bytes += pixelBytes;
         }
         pixel += run;
         remaining -= run;

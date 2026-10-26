@@ -131,6 +131,8 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameReceiverClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/PhotoPersistenceClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaMetadata.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/jpegFrameDecoder.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/third_party/tjpgd/tjpgd.c
         ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaTransfer.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaPlayerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/TcpVideoUploadClass.cpp
@@ -167,3 +169,7 @@ target_include_directories(hub75 PRIVATE
 )
 
 pico_add_extra_outputs(hub75)
+
+# Optimize the CPU-intensive JPEG decoder while retaining size optimization elsewhere.
+set_source_files_properties(third_party/tjpgd/tjpgd.c src/media/jpeg/jpegFrameDecoder.cpp
+    PROPERTIES COMPILE_OPTIONS "-O3")

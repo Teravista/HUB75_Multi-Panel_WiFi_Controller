@@ -18,10 +18,8 @@ Speed is capped at 50 MHz and never exceeds the requested clock. Card
 initialization clears the previous negotiation result. The mount log reports
 the actual SPI clock selected by the hardware.
 
-These limits do not guarantee electrical reliability at the requested rate.
 If a card/reader/wiring setup becomes unreliable, lower `StorageConfig::BaudRate`.
-The requested clock and the card's advertised transfer speeds are different
-quantities; a measured on-device result is needed to establish throughput.
+The SPI bus rate is separate from the card's advertised transfer speed.
 
 ## Bulk reads and RAM
 
@@ -43,20 +41,14 @@ sector CRC checks remain enabled.
 
 The SD read path completes active DMA before returning a previous-sector CRC
 error, preventing retry from reusing a destination still owned by DMA. It also
-provides an optional foreground work hook and timing counters for later read
+provides an optional foreground work hook and timing counters for read
 pipelines. They are inactive unless a caller installs them. A hook must be
 bounded, must not re-enter storage and must not access the current DMA target.
 Timing counters overlap; they must not be added to infer elapsed read time.
-This step does not move work to another CPU core.
+Storage work runs in foreground code.
 
-## Diagnostics and device checks
+## Diagnostics
 
 `HUB75_VERBOSE_LOGS` defaults to OFF. It controls optional SD-library diagnostics
 and the five-second startup pause used to attach a serial console. Enable it
 through CMake when detailed card-mode negotiation logs are needed.
-
-On the Pico, check the reported actual SPI clock, restore an existing photo,
-upload a replacement and power-cycle to verify it. Missing/corrupt-card and
-readback checks remain part of storage validation. Host tests cover negotiation
-fallback, deferred-DMA ordering/error paths, CRC equivalence and real FatFs
-photo save/read compatibility; they do not measure physical SD throughput.

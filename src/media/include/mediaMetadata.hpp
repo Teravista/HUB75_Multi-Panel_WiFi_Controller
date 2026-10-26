@@ -3,9 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 
-// Logical row-major RGB888 pixels; panel mapping is separate from this descriptor.
+// Logical RGB888/RGB565 pixels or indexed JPEG; panel mapping is separate.
 enum class MediaType : uint8_t { Photo = 1, Video = 2 };
-enum class PixelFormat : uint8_t { RGB888 = 1 };
+enum class PixelFormat : uint8_t { RGB888 = 1, RGB565 = 2, JPEG = 3 };
 
 /**
     Describes logical media without owning its pixels or controlling playback.
@@ -13,12 +13,13 @@ enum class PixelFormat : uint8_t { RGB888 = 1 };
     Upload reception and SD storage share dimensions, pixel format, frame count
     and a rational frame rate through this value. Validation protects payload-size
     calculations before a descriptor is accepted. Photos use one frame and FPS
-    zero; video metadata prepares the boundary for the later video implementation.
+    zero; raw and compressed videos carry their own timing and payload size.
 */
 struct MediaMetadata {
     MediaType type = MediaType::Photo;
     PixelFormat pixelFormat = PixelFormat::RGB888;
     bool pingPong = false;
+    uint64_t encodedBytes = 0; // Indexed JPEG payload; zero for raw pixels.
     uint16_t width = 0;
     uint16_t height = 0;
     uint32_t frameCount = 1;
@@ -40,7 +41,7 @@ struct MediaMetadata {
     // Validates the descriptor and calculates its complete pixel payload size.
     bool PayloadBytes(uint64_t& bytes) const;
 
-    // Checks whether a valid photo exactly matches the supplied dimensions.
+    // Checks whether a single photo exactly matches the supplied dimensions.
     bool IsPhotoFor(uint16_t panelWidth, uint16_t panelHeight) const;
 
 };
@@ -49,6 +50,7 @@ struct MediaMetadata {
 namespace MediaMetadataCodec {
 constexpr size_t HeaderBytes = 32;
 constexpr uint8_t Version = 1;
+constexpr uint8_t JpegVersion = 2;
 constexpr uint8_t PingPongFlag = 1;
 
 // Writes a 16-bit unsigned value in little-endian byte order.
