@@ -123,16 +123,17 @@ filesystem work in the foreground, outside the lwIP lock.
 | 3: status | Session / zero | Empty |
 | 4: cancel | Session / zero | Empty |
 
-Responses contain `id`, `state`, `offset`, `total`, `videoId`, `photoId`, `error` and
+Responses contain `id`, `state`, `offset`, `total`, `resumeToken`, `videoId`, `photoId`, `error` and
 `warning`. A protocol rejection is reported through `error`; successful HTTP transport
 alone does not confirm a saved clip. After `receiving`, the upload enters `verifying`.
 Only a fully checked SD publication produces `saved` and a nonzero library ID. A
 selection-settings failure is a separate warning when the video itself is already saved.
 Frames and earlier clips remain managed by the existing library storage rules.
 
-The browser sends one request at a time and follows acknowledged offsets. Cancellation,
-connection loss or receive inactivity releases the unfinished transaction and schedules
-saved playback restoration. Verification advances in bounded foreground steps between
+The browser sends one request at a time and follows acknowledged offsets. Explicit
+cancellation, receive inactivity or network-service shutdown releases the unfinished
+transaction and restores playback. A lost HTTP connection abandons only its request,
+preserving confirmed payload progress and independent verification. Verification advances in bounded foreground steps between
 status requests.
 
 ### Photo and library messages
@@ -161,3 +162,46 @@ Photo begin is followed by the same chunk/status/cancel sequence as video; a ver
 save returns a nonzero `photoId`. Cached playback queries remain available during
 upload, while filesystem queries and control changes reject competing saves. The page's
 shared request queue prevents concurrent commands from claiming the single HTTP mailbox.
+
+## Retry and resume
+
+Photo and named-video starts accept an optional nonzero uint32 resume token
+appended to their legacy body: photo headers are 1124 or 1128 bytes; named-video
+headers are 104 or 108 bytes. All token fields are little-endian. A matching
+repeated token and header checksum returns the same session, progress and saved
+ID instead of creating another item. Changed metadata, name or thumbnail under
+the same token is rejected. Responses include `resumeToken`; legacy starts
+remain supported with token zero.
+
+Operation 20 resolves the current job by token. Its envelope ID and offset are
+zero and its body contains only the four-byte token. A mismatched, absent or
+replaced token is rejected. Only the current session is retained, including its
+terminal status until another upload replaces it. Tokens are job identifiers,
+not persistent media metadata.
+
+The browser retries transient network failures, incomplete JSON and HTTP 409/5xx
+responses up to 100 times for video or eight times for photos. Upload requests
+have a five-second response deadline, with cancelable backoff from one to five
+seconds. SD, checksum and metadata errors are terminal. After a lost chunk reply,
+the browser queries confirmed progress before resending: a committed chunk is
+not written twice, while an uncommitted chunk can be sent again. A verification
+check continues the same readback without uploading or checking the file afresh.
+
+When automatic video retries are exhausted, **Resume upload/check** retains its
+prepared payload and outstanding chunk boundary in the open page. Resume checks
+the session token and confirmed position before continuing, without decoding the
+source again. **Cancel** resolves ownership by token, including after a lost
+start reply, and releases an unfinished transaction. Verified items are retained.
+Browser storage is disposed after success, cancellation or terminal failure.
+
+Receiving jobs expire after 15 seconds without confirmed upload activity. Matching
+status/resume requests renew the grace; unrelated Summary or library requests
+do not. Progressing TCP uploads use the same inactivity interval, renewed by data,
+acknowledgements and verification work. After the final HTTP chunk, verification
+continues independently of the browser and can exceed 15 seconds.
+
+Resume requires the same Pico session and open page. A long outage that expires
+a receiving job, a Pico restart, replacement by another upload, or page/browser
+shutdown requires sending the source again. A retained verifying or saved job can
+still be checked without resending its bytes. Python TCP payload transfers use
+their existing stop-and-wait protocol and restart an interrupted payload.

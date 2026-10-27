@@ -168,6 +168,8 @@ AttachHttpClientCallbacks (
 
     Detaches callbacks before aborting the PCB so lwIP cannot call into reset client state. An
     owned raw-photo receive token is canceled before the single-client record is reused.
+    A media-session request is abandoned without canceling confirmed SD progress;
+    service shutdown requests that cancellation separately.
 
     @return ERR_ABRT - The TCP connection was aborted; lwIP must not access it again.
 */
@@ -186,7 +188,7 @@ AbortHttpClient (
         if (client.responding) {
             httpUpload->Release();
         } else {
-            httpUpload->Disconnect();
+            httpUpload->AbandonRequest();
         }
     }
     pcb = client.pcb;
@@ -369,7 +371,7 @@ RejectHttpRequest (
     client.receiving = false;
 
     if (client.video && httpUpload) {
-        httpUpload->Disconnect();
+        httpUpload->AbandonRequest();
     }
     text = HttpRequest::GetHttpStatusText(status);
     return BuildHttpResponse(text, "text/plain; charset=utf-8", text, std::strlen(text));
@@ -621,7 +623,7 @@ HandleHttpClientError (
         if (client.responding) {
             httpUpload->Release();
         } else {
-            httpUpload->Disconnect();
+            httpUpload->AbandonRequest();
         }
     }
 

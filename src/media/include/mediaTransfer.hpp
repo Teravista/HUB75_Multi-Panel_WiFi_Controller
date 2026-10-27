@@ -12,7 +12,7 @@ constexpr size_t JpegRecordBytes = 8;
 constexpr size_t MaximumJpegBytes = 128 * 1024;
 constexpr uint64_t MaximumFileBytes = 0xffffffffu;
 constexpr uint32_t MaximumFps = 60;
-constexpr uint32_t ReceiveIdleMs = 30000;
+constexpr uint32_t ReceiveIdleMs = 15000;
 constexpr char BulkRequestMagic[] = "H75V";
 
 // Validates a placed raw or indexed JPEG video against frame-rate and FAT32 limits.

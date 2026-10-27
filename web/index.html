@@ -51,6 +51,7 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 <video id="video-source" muted playsinline preload="metadata" hidden></video><div id="video-editor" class="preview-editor"><canvas id="video-preview" tabindex="0" width="128" height="256" aria-label="Video preview"></canvas><div id="video-outline" class="content-outline" hidden></div></div><p id="video-drag-hint" class="drag-hint"></p>
 <progress id="video-progress" max="100" value="0" aria-label="Video preparation and upload progress"></progress>
 <button id="video-send" type="button" disabled>Upload video</button><button id="video-cancel" class="secondary" type="button" disabled>Cancel</button>
+<button id="video-resume" type="button" disabled hidden>Resume upload/check</button>
 <p id="video-status" role="status" aria-live="polite">Choose a video.</p>
 </section>
 <section><h2>Saved videos</h2><p id="video-library-count"></p><div id="video-library" class="photo-grid"></div><div class="library-actions"><button id="video-previous" class="secondary" type="button" disabled>Previous</button><span id="video-page">1</span><button id="video-next" class="secondary" type="button" disabled>Next</button></div><button id="video-refresh" class="secondary" type="button">Refresh library</button><p id="video-library-status" role="status" aria-live="polite"></p></section></div>
@@ -454,21 +455,19 @@ async function preparePhotoPreview() {
 }
 
 /**
-    Uploads a named photo using its selected encoding and saved placement.
+    Saves a named photo with bounded retry and nonce-owned cancellation.
 
-    Preparation stores only the visible data rectangle and a small legacy thumbnail.
-    The shared media protocol transfers bounded chunks and confirms SD verification
-    before reporting success. Failed or canceled transfers retain earlier photos.
+    Preparation keeps the selected encoding and placement. Transient transport
+    failures recover confirmed offsets; only Pico-side verification confirms saving.
 
-    @return Promise<void> - Completes after a saved confirmation or an upload error.
+    @return Promise<void> - Completes after verified publication or an upload error.
 */
 async function uploadPhoto() {
     if (!prepared || preparing || uploading || videoBusy || !photoArea) {
         return;
     }
     const controller = new AbortController();
-    const timeout = setTimeout(controller.abort.bind(controller), UPLOAD_TIMEOUT_MS);
-    let session = 0;
+    let job = null;
     uploading = true;
     updateVideoControls();
     try {
@@ -476,42 +475,18 @@ async function uploadPhoto() {
         const name = photoName.value.trim() || file.name.replace(/\.[^.]+$/, '');
         const clip = await preparePhotoPayload(preview, photoArea, photoFormat.value,
             Number(photoQuality.value), name);
-        let acknowledgement = await videoRequest(5, 0, 0, clip.header, controller.signal);
-        session = acknowledgement.id;
-        if (!Number.isInteger(session) || session <= 0 || acknowledgement.state !== 'receiving' ||
-            acknowledgement.offset !== 0 || acknowledgement.total !== clip.payload.length) {
-            throw new Error('Unexpected photo start response.');
-        }
-        for (let offset = 0; offset < clip.payload.length;) {
-            const end = Math.min(offset + 6144, clip.payload.length);
-            acknowledgement = await videoRequest(2, session, offset, clip.payload.subarray(offset, end), controller.signal);
-            if (acknowledgement.id !== session || acknowledgement.offset !== end) {
-                throw new Error('Unexpected photo progress response.');
-            }
-            offset = end;
-            statusText.textContent = `Uploading ${Math.floor(offset / clip.payload.length * 100)}%`;
-        }
-        while (acknowledgement.state === 'verifying') {
-            statusText.textContent = 'Verifying SD copy…';
-            await new Promise(resolve => setTimeout(resolve, 250));
-            acknowledgement = await videoRequest(3, session, 0, new Uint8Array(), controller.signal);
-        }
-        if (acknowledgement.state !== 'saved' || !acknowledgement.photoId || acknowledgement.id !== session) {
-            throw new Error('The Pico did not confirm a saved photo.');
-        }
-        session = 0;
+        const token = createUploadToken();
+        job = {prepared: clip, token, id: 0, confirmed: 0, pendingEnd: 0, photo: true,
+            header: resumableUploadHeader(clip.header, token)};
+        const acknowledgement = await transferPreparedUpload(job, controller.signal, false);
+        job = null;
         statusText.textContent = 'Photo saved and verified. ' + acknowledgement.warning;
     } catch (error) {
+        if (job && !error.sessionLost) {
+            await cancelOwnedUpload(job);
+        }
         statusText.textContent = 'Photo upload failed: ' + error.message;
     } finally {
-        clearTimeout(timeout);
-        if (session) {
-            try {
-                await videoRequest(4, session, 0, new Uint8Array(), new AbortController().signal);
-            } catch (error) {
-                // An unreachable receiving session is also released by the Pico's inactivity deadline.
-            }
-        }
         uploading = false;
         updateVideoControls();
     }
@@ -534,9 +509,11 @@ const videoPingpong = document.getElementById('video-pingpong');
 const videoName = document.getElementById('video-name');
 const videoSend = document.getElementById('video-send');
 const videoCancel = document.getElementById('video-cancel');
+const videoResume = document.getElementById('video-resume');
 const videoProgress = document.getElementById('video-progress');
 const videoStatus = document.getElementById('video-status');
 let videoBusy = false;
+let videoJob = null;
 let videoAbort = null;
 let previewUrl = '';
 let videoArea = null;
@@ -1366,40 +1343,56 @@ function videoLibraryHeader(header, name, seconds) {
 }
 
 /**
-    Sends one bounded video protocol message and checks the Pico's JSON response.
+    Sends one bounded media request and classifies recoverable transport failures.
 
-    A per-request timeout releases the browser when a socket stops responding.
-    The caller retains the acknowledged session and byte offset for the next chunk;
-    cancellation remains shared with video preparation.
+    @param operation Binary upload or library operation.
+    @param id Upload session or library/control identifier.
+    @param offset Confirmed payload offset or control value.
+    @param body Optional binary body.
+    @param signal Caller cancellation signal.
+    @param timeout Per-request response deadline in milliseconds.
 
-    @param operation Upload start, chunk, status or cancellation operation.
-    @param id Active upload session ID, or zero for a new upload.
-    @param offset Confirmed payload byte position.
-    @param body Optional protocol body bytes.
-    @param signal Cancellation signal for the pending HTTP request.
-
-    @return Promise<object> - Parsed acknowledgement containing session, progress and state.
+    @return Promise<object> - Parsed acknowledgement; rejects with a retryable flag for transient failures.
 */
-async function sendVideoRequest(operation, id, offset, body, signal) {
+async function sendVideoRequest(operation, id, offset, body, signal, timeout = 15000) {
     const request = new AbortController();
     const abort = request.abort.bind(request);
-    const timer = setTimeout(abort, 30000);
+    const timer = setTimeout(abort, timeout);
     signal.addEventListener('abort', abort, {once: true});
     try {
         throwIfUploadCanceled(signal);
-        const response = await fetch('/api/video', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/octet-stream'},
-            body: VideoCodec.buildUploadDescriptor(operation, id, offset, body),
-            signal: request.signal,
-            cache: 'no-store'
-        });
-        if (!response.ok) {
-            throw new Error(`Video request failed (HTTP ${response.status}).`);
+        let response;
+        try {
+            response = await fetch('/api/video', {
+                method: 'POST', headers: {'Content-Type': 'application/octet-stream'},
+                body: VideoCodec.buildUploadDescriptor(operation, id, offset, body),
+                signal: request.signal, cache: 'no-store'
+            });
+        } catch (error) {
+            error.retryable = !signal.aborted;
+            throw error;
         }
-        const acknowledgement = await response.json();
+        if (!response.ok) {
+            const error = new Error(`Media request failed (HTTP ${response.status}).`);
+            error.retryable = response.status === 409 || response.status >= 500;
+            throw error;
+        }
+        let acknowledgement;
+        try {
+            acknowledgement = await response.json();
+        } catch (error) {
+            error.retryable = true;
+            throw error;
+        }
+        if (!acknowledgement || typeof acknowledgement !== 'object') {
+            const error = new Error('Incomplete media response.');
+            error.retryable = true;
+            throw error;
+        }
         if (acknowledgement.error) {
-            throw new Error(acknowledgement.error);
+            const error = new Error(acknowledgement.error);
+            error.ack = acknowledgement;
+            throw error;
         }
         return acknowledgement;
     } finally {
@@ -1420,89 +1413,64 @@ function updateVideoControls() {
     videoZoom.disabled = busy || videoSizing.value !== 'manual';
     videoSend.disabled = busy || !videoFile.files.length;
     videoCancel.disabled = !videoBusy;
+    videoResume.hidden = !videoJob || !!videoAbort;
+    videoResume.disabled = !videoJob || !!videoAbort;
     updatePhotoControls();
     redrawVideoPreview();
 }
 
 /**
-    Prepares, transfers and waits for verified publication of the selected video.
+    Prepares the selected video once and starts its resumable transfer.
 
-    Each HTTP message carries at most 6144 payload bytes. The confirmed byte offset
-    advances only after a matching acknowledgement, and verification is polled as a
-    separate state. Cancellation or failure attempts to release the Pico's session
-    before disposing temporary browser records and unlocking the page.
-
-    @return Promise<void> - Completes after reporting a saved clip or an upload error.
+    @return Promise<void> - Completes after preparation and the current upload attempt.
 */
 async function uploadVideo() {
     if (videoBusy || uploading || !videoFile.files.length) {
         return;
     }
-    let clip = null;
-    let session = 0;
     videoBusy = true;
     videoAbort = new AbortController();
     updateVideoControls();
+    let prepared = null;
     try {
         const options = readVideoUploadOptions();
         const file = videoFile.files[0];
         const name = videoName.value.trim() || file.name.replace(/\.[^.]+$/, '');
-        clip = await prepareBrowserVideo(file, options, videoAbort.signal);
-        let acknowledgement = await videoRequest(6, 0, 0,
-            videoLibraryHeader(clip.header, name, options.seconds), videoAbort.signal);
-        session = acknowledgement.id;
-        if (!Number.isInteger(session) || session <= 0 || acknowledgement.state !== 'receiving' ||
-            acknowledgement.offset !== 0 || acknowledgement.total !== clip.payload.size) {
-            throw new Error('Unexpected upload start response.');
-        }
-        for (let offset = 0; offset < clip.payload.size;) {
-            throwIfUploadCanceled(videoAbort.signal);
-            const end = Math.min(offset + 6144, clip.payload.size);
-            const bytes = new Uint8Array(await clip.payload.slice(offset, end).arrayBuffer());
-            acknowledgement = await videoRequest(2, session, offset, bytes, videoAbort.signal);
-            if (acknowledgement.id !== session || acknowledgement.offset !== end) {
-                throw new Error('Unexpected upload progress response.');
-            }
-            offset = end;
-            videoProgress.value = offset / clip.payload.size * 100;
-            videoStatus.textContent = `Uploading ${Math.floor(videoProgress.value)}%`;
-        }
-        while (acknowledgement.state === 'verifying') {
-            throwIfUploadCanceled(videoAbort.signal);
-            videoStatus.textContent = 'Verifying SD copy…';
-            await new Promise(resolve => setTimeout(resolve, 250));
-            acknowledgement = await videoRequest(3, session, 0, new Uint8Array(), videoAbort.signal);
-        }
-        if (acknowledgement.id !== session || acknowledgement.state !== 'saved' || !acknowledgement.videoId) {
-            throw new Error('The Pico did not confirm a saved video.');
-        }
-        session = 0;
-        videoStatus.textContent = `Saved and verified: ${clip.frames} frames. ` + acknowledgement.warning;
+        prepared = await prepareBrowserVideo(file, options, videoAbort.signal);
+        const token = createUploadToken();
+        videoJob = {prepared, token, id: 0, confirmed: 0, pendingEnd: 0, photo: false,
+            header: resumableUploadHeader(videoLibraryHeader(prepared.header, name, options.seconds), token)};
+        await runPreparedVideo(videoJob, videoAbort, false);
     } catch (error) {
-        videoStatus.textContent = 'Video upload failed: ' + error.message;
-    } finally {
-        if (session) {
-            try {
-                await videoRequest(4, session, 0, new Uint8Array(), new AbortController().signal);
-            } catch (error) {
-                // The Pico also releases an inactive receive session when the client cannot reach it.
-            }
+        if (prepared && !videoJob) {
+            await prepared.dispose();
         }
-        if (clip) {
-            await clip.dispose();
-        }
-        videoBusy = false;
+        videoJob = null;
         videoAbort = null;
+        videoBusy = false;
+        videoStatus.textContent = 'Video preparation failed: ' + error.message;
         updateVideoControls();
     }
 }
 
 /**
-    Cancels the active browser video preparation or upload request.
+    Cancels active preparation or disposes a retained paused video job.
+
+    @return Promise<void> - Completes after requesting cancellation or releasing a paused job.
 */
-function cancelVideoUpload() {
+async function cancelVideoUpload() {
     if (videoAbort) {
         videoAbort.abort();
+        return;
+    }
+    if (videoJob) {
+        const job = videoJob;
+        videoJob = null;
+        await cancelOwnedUpload(job);
+        await job.prepared.dispose();
+        videoBusy = false;
+        videoStatus.textContent = 'Canceled. Saved and verified media is retained.';
+        updateVideoControls();
     }
 }
 
@@ -1542,6 +1510,7 @@ function prepareVideoPreview() {
 videoFile.addEventListener('change', prepareVideoPreview);
 videoSend.addEventListener('click', uploadVideo);
 videoCancel.addEventListener('click', cancelVideoUpload);
+videoResume.addEventListener('click', resumeVideoUpload);
 videoFormat.addEventListener('change', updateVideoControls);
 window.addEventListener('pagehide', disposeVideoPreview);
 
@@ -1557,16 +1526,17 @@ let mediaRequestTail = Promise.resolve();
     @param offset Payload offset, page cursor or second control value.
     @param body Optional binary request body.
     @param signal Cancellation signal for this operation.
+    @param timeout Response deadline in milliseconds.
 
     @return Promise<object> - Parsed protocol or library response.
 */
-async function videoRequest(operation, id, offset, body, signal) {
+async function videoRequest(operation, id, offset, body, signal, timeout = 15000) {
     const previous = mediaRequestTail;
     let release;
     mediaRequestTail = new Promise(resolve => { release = resolve; });
     await previous;
     try {
-        return await sendVideoRequest(operation, id, offset, body, signal);
+        return await sendVideoRequest(operation, id, offset, body, signal, timeout);
     } finally {
         release();
     }
@@ -2127,6 +2097,322 @@ document.getElementById('slideshow-save').addEventListener('click', applySlidesh
 updateVideoControls();
 selectMediaTab('summary');
 
+
+
+/**
+    Creates a nonzero upload token for matching repeated starts and lost replies.
+
+    @return number - Nonzero unsigned 32-bit job token, distinct from the Pico's session ID.
+*/
+function createUploadToken() {
+    const values = new Uint32Array(1);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+        crypto.getRandomValues(values);
+    } else {
+        values[0] = Math.floor(Math.random() * 0xffffffff);
+    }
+    if (!values[0]) {
+        values[0] = 1;
+    }
+    return values[0];
+}
+
+/**
+    Appends a resume token without changing the legacy start fields.
+
+    @param header Original photo or named-video start bytes.
+    @param token Nonzero unsigned job token.
+
+    @return Uint8Array - Start fields followed by the little-endian token.
+*/
+function resumableUploadHeader(header, token) {
+    const result = new Uint8Array(header.length + 4);
+    result.set(header);
+    new DataView(result.buffer).setUint32(header.length, token, true);
+    return result;
+}
+
+/**
+    Returns the byte length of either a prepared photo array or staged video payload.
+
+    @param job Prepared upload and retained recovery state.
+
+    @return number - Complete encoded payload length.
+*/
+function uploadPayloadSize(job) {
+    return job.prepared.payload.size ?? job.prepared.payload.length;
+}
+
+/**
+    Verifies that an upload reply belongs to the retained job and has bounded progress.
+
+    @param job Prepared upload and retained recovery state.
+    @param acknowledgement Pico upload status response.
+
+    @return object - Validated response; rejects replaced sessions or invalid progress.
+*/
+function validateUploadAcknowledgement(job, acknowledgement) {
+    if (acknowledgement.resumeToken !== job.token ||
+        !Number.isInteger(acknowledgement.id) || acknowledgement.id <= 0 ||
+        (job.id && acknowledgement.id !== job.id)) {
+        const error = new Error('The upload session was replaced or the Pico restarted. Send the source again.');
+        error.sessionLost = true;
+        throw error;
+    }
+    if (acknowledgement.total !== uploadPayloadSize(job) ||
+        !Number.isInteger(acknowledgement.offset) || acknowledgement.offset < 0 ||
+        acknowledgement.offset > acknowledgement.total) {
+        throw new Error('Invalid upload progress from the display.');
+    }
+    return acknowledgement;
+}
+
+/**
+    Waits between recovery attempts while allowing immediate user cancellation.
+
+    @param signal Cancellation signal for the current upload attempt.
+    @param attempt Zero-based retry number controlling the bounded backoff.
+
+    @return Promise<void> - Completes after the delay or rejects when canceled.
+*/
+function uploadRetryPause(signal, attempt) {
+    return new Promise((resolve, reject) => {
+        let done = false;
+        let timer;
+        const finish = error => {
+            if (done) {
+                return;
+            }
+            done = true;
+            clearTimeout(timer);
+            signal.removeEventListener('abort', abort);
+            if (error) {
+                reject(error);
+            } else {
+                resolve();
+            }
+        };
+        const abort = () => finish(new Error('canceled'));
+        signal.addEventListener('abort', abort, {once: true});
+        timer = setTimeout(() => finish(), Math.min(5000, 1000 + attempt * 500));
+        if (signal.aborted) {
+            abort();
+        }
+    });
+}
+
+/**
+    Recovers a lost request using confirmed progress before resending any uncertain chunk.
+
+    Start requests are safe to repeat with their nonce. A lost chunk reply instead
+    requires status reconciliation; SD and metadata errors remain terminal.
+
+    @param operation Start, chunk or status operation.
+    @param job Prepared upload and retained recovery state.
+    @param offset Expected first payload byte for this request.
+    @param body Binary start or chunk bytes.
+    @param signal Cancellation signal for the active attempt.
+
+    @return Promise<object> - Matching acknowledged progress after bounded automatic retries.
+*/
+async function recoverUploadRequest(operation, job, offset, body, signal) {
+    let reconcile = false;
+    let retries = 100;
+    let message = videoStatus;
+    if (job.photo) {
+        retries = 8;
+        message = statusText;
+    }
+    for (let attempt = 0;; attempt++) {
+        throwIfUploadCanceled(signal);
+        try {
+            if (reconcile) {
+                const acknowledgement = validateUploadAcknowledgement(job,
+                    await videoRequest(3, job.id, 0, new Uint8Array(), signal, 5000));
+                if (acknowledgement.offset === offset + body.length &&
+                    ['receiving', 'verifying', 'saved'].includes(acknowledgement.state)) {
+                    return acknowledgement;
+                }
+                if (acknowledgement.offset !== offset || acknowledgement.state !== 'receiving') {
+                    throw new Error('Unexpected upload position during recovery.');
+                }
+                reconcile = false;
+            }
+            let id = job.id;
+            if (operation === 5 || operation === 6) {
+                id = 0;
+            }
+            return validateUploadAcknowledgement(job,
+                await videoRequest(operation, id, offset, body, signal, 5000));
+        } catch (error) {
+            if (error.ack && (error.ack.resumeToken !== job.token ||
+                (job.id && error.ack.id !== job.id))) {
+                error.sessionLost = true;
+            }
+            if (signal.aborted || !error.retryable || attempt >= retries) {
+                throw error;
+            }
+            reconcile = operation === 2;
+            message.textContent = `Connection interrupted. Retrying ${attempt + 1}/${retries}…`;
+            await uploadRetryPause(signal, attempt);
+        }
+    }
+}
+
+/**
+    Transfers remaining prepared bytes and continues the same Pico-side verification.
+
+    A retained job records both confirmed and outstanding chunk boundaries. Resume
+    accepts only those positions, preserving the prepared file without re-encoding.
+
+    @param job Prepared upload and retained recovery state.
+    @param signal Cancellation signal for the active attempt.
+    @param resume True checks the existing session before sending remaining bytes.
+
+    @return Promise<object> - Saved response with a verified photo or video library ID.
+*/
+async function transferPreparedUpload(job, signal, resume) {
+    const size = uploadPayloadSize(job);
+    let acknowledgement;
+    if (resume && job.id) {
+        acknowledgement = await recoverUploadRequest(3, job, 0, new Uint8Array(), signal);
+        if (acknowledgement.offset < job.confirmed || acknowledgement.offset > job.pendingEnd) {
+            throw new Error('Unexpected resume position from the display.');
+        }
+    } else {
+        let operation = 6;
+        if (job.photo) {
+            operation = 5;
+        }
+        acknowledgement = await recoverUploadRequest(operation, job, 0, job.header, signal);
+        job.id = acknowledgement.id;
+        if (acknowledgement.state !== 'receiving' || acknowledgement.offset !== 0) {
+            throw new Error('Unexpected upload start response.');
+        }
+    }
+    for (let offset = acknowledgement.offset; offset < size;) {
+        if (acknowledgement.state !== 'receiving') {
+            throw new Error('The display stopped receiving before the payload was complete.');
+        }
+        const end = Math.min(offset + 6144, size);
+        let bytes;
+        if (job.photo) {
+            bytes = job.prepared.payload.subarray(offset, end);
+        } else {
+            bytes = new Uint8Array(await job.prepared.payload.slice(offset, end).arrayBuffer());
+        }
+        job.pendingEnd = end;
+        acknowledgement = await recoverUploadRequest(2, job, offset, bytes, signal);
+        if (acknowledgement.offset !== end) {
+            throw new Error('Unexpected upload progress response.');
+        }
+        if (end < size && acknowledgement.state !== 'receiving') {
+            throw new Error('The display ended the upload before all bytes were confirmed.');
+        }
+        offset = end;
+        job.confirmed = end;
+        let message = videoStatus;
+        if (job.photo) {
+            message = statusText;
+        }
+        message.textContent = `Uploading ${Math.floor(offset / size * 100)}%`;
+        if (!job.photo) {
+            videoProgress.value = offset / size * 100;
+        }
+    }
+    while (acknowledgement.state === 'verifying') {
+        let message = videoStatus;
+        if (job.photo) {
+            message = statusText;
+        }
+        message.textContent = 'Verifying SD copy…';
+        await uploadRetryPause(signal, 0);
+        acknowledgement = await recoverUploadRequest(3, job, 0, new Uint8Array(), signal);
+        if (acknowledgement.offset !== size) {
+            throw new Error('Invalid verification progress response.');
+        }
+    }
+    let savedId = acknowledgement.videoId;
+    if (job.photo) {
+        savedId = acknowledgement.photoId;
+    }
+    if (acknowledgement.state !== 'saved' || !Number.isInteger(savedId) ||
+        savedId < 1 || savedId > 0x0fffffff || acknowledgement.offset !== size) {
+        throw new Error('The Pico did not confirm a saved upload.');
+    }
+    return acknowledgement;
+}
+
+/**
+    Cancels only the matching nonce-owned upload after resolving a lost start reply.
+
+    @param job Prepared upload and retained recovery state.
+
+    @return Promise<void> - Completes after best-effort cancellation; a saved item is retained.
+*/
+async function cancelOwnedUpload(job) {
+    try {
+        const token = new Uint8Array(4);
+        new DataView(token.buffer).setUint32(0, job.token, true);
+        const signal = new AbortController().signal;
+        const acknowledgement = validateUploadAcknowledgement(job,
+            await videoRequest(20, 0, 0, token, signal, 3000));
+        if (['receiving', 'verifying'].includes(acknowledgement.state)) {
+            await videoRequest(4, acknowledgement.id, 0, new Uint8Array(), signal, 3000);
+        }
+    } catch (error) {
+        // An unreachable receiving job also expires through the Pico's inactivity policy.
+    }
+}
+
+/**
+    Runs a prepared video job, retaining browser storage only after exhausted network retries.
+
+    @param job Prepared video and retained recovery boundaries.
+    @param controller Cancellation owner for this transfer attempt.
+    @param resume True resumes an existing session rather than preparing another clip.
+
+    @return Promise<void> - Completes after saving, retaining a resumable pause or reporting failure.
+*/
+async function runPreparedVideo(job, controller, resume) {
+    videoAbort = controller;
+    videoBusy = true;
+    updateVideoControls();
+    try {
+        const acknowledgement = await transferPreparedUpload(job, controller.signal, resume);
+        videoStatus.textContent = `Saved and verified: ${job.prepared.frames} frames. ` + acknowledgement.warning;
+        videoJob = null;
+    } catch (error) {
+        if (!controller.signal.aborted && error.retryable) {
+            videoStatus.textContent = 'Connection unavailable. Prepared video retained. Tap Resume upload/check or Cancel.';
+        } else {
+            if (!error.sessionLost) {
+                await cancelOwnedUpload(job);
+            }
+            videoJob = null;
+            videoStatus.textContent = 'Video upload failed: ' + error.message;
+        }
+    } finally {
+        if (!videoJob) {
+            await job.prepared.dispose();
+        }
+        videoAbort = null;
+        videoBusy = !!videoJob;
+        updateVideoControls();
+    }
+}
+
+/**
+    Continues a retained prepared video after a network pause without converting it again.
+
+    @return Promise<void> - Completes after the resumed upload attempt or when no job can resume.
+*/
+async function resumeVideoUpload() {
+    if (!videoJob || videoAbort) {
+        return;
+    }
+    await runPreparedVideo(videoJob, new AbortController(), true);
+}
 </script>
 </body>
 </html>

@@ -9,9 +9,10 @@
 
     The HTTP transport owns sockets and fills one bounded request buffer. Foreground
     updates perform all storage operations, retain the upload session and confirmed
-    byte offset, and report reception separately from verification. Successful library
-    saves are selected through MediaLibrary. Cancellation, socket loss or inactivity
-    releases the shared framebuffer so saved playback can resume.
+    byte offset and resume token, and report reception separately from verification.
+    Successful library saves are selected through MediaLibrary. Cancellation or
+    inactivity releases the shared framebuffer so saved playback can resume. Individual HTTP
+    disconnections preserve confirmed progress and independent verification.
 */
 class HttpMediaUpload {
 public:
@@ -49,6 +50,9 @@ public:
     // Requests cancellation of the active upload session.
     void Disconnect(void);
 
+    // Drops a lost HTTP request while retaining its storage transaction.
+    void AbandonRequest(void);
+
     // Reports whether the upload holds exclusive framebuffer access.
     bool OwnsDisplay(void) const;
 
@@ -81,6 +85,8 @@ private:
     size_t bytes_ = 0;
     uint32_t session_ = 0;
     uint32_t progress_ = 0;
+    uint32_t resumeToken_ = 0;
+    uint32_t beginChecksum_ = 0;
     uint32_t videoId_ = 0;
     uint32_t photoId_ = 0;
     bool photoUpload_ = false;
@@ -96,4 +102,5 @@ private:
     bool pending_ = false;
     bool responseReady_ = false;
     bool cancel_ = false;
+    bool abandoned_ = false;
 };
