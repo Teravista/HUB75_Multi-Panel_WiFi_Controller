@@ -1,4 +1,6 @@
 #include "sd/include/MemoryManagerClass.hpp"
+#include "sd/include/memoryStorage.hpp"
+#include "pico/time.h"
 #include "sd/include/memoryManagerPlatform.hpp"
 #include "sd/include/storageCrc32.hpp"
 #include "config/defines.h"
@@ -27,11 +29,13 @@ struct MemoryManager::StorageState {
     FIL playbackFile{};
     SaveSession save;
     PlaybackSession playback;
+    uint32_t lastPlaybackFrame = 0;
+    bool hasPlaybackFrame = false;
     JpegIndexEntry jpegIndex[JPEG_INDEX_CACHE_ENTRIES];
     uint32_t jpegIndexFirst = 0;
     uint32_t jpegIndexCount = 0;
     int rejectedSlot = SAVED_PHOTO_NO_SLOT;
-    alignas(DMA_BUFFER_ALIGNMENT) uint8_t readBuffer[ChunkBytes];
+    uint8_t* readBuffer = MemoryStorage::readBuffer;
     std::atomic_flag storageBusy = ATOMIC_FLAG_INIT;
 };
 
@@ -1247,6 +1251,9 @@ MemoryManager::CloseSavedMediaPlayback (
     storage_.playbackFile = {};
     storage_.playback = {};
     storage_.jpegIndexCount = 0;
+    storage_.hasPlaybackFrame = false;
+    MemoryStorage::playbackPrefetch.Reset();
+    MemoryStorage::playbackFile = nullptr;
 } // CloseSavedMediaPlayback
 
 /**
@@ -1316,16 +1323,16 @@ MemoryManager::BuildVideoStorageHeader (
 /**
     Streams and checks a raw frame from the inspection or playback handle.
 
-    Seeks to the selected record only when needed, then streams whole-pixel chunks.
-    A short prefix reaches a sector boundary before bulk reads. Both legacy photo
-    CRCs and raw video per-frame CRCs are checked before success; consumers must
-    not publish provisional pixels until the complete operation returns.
+    Delegates the bounded read/CRC pipeline while the caller retains storage ownership.
+    Playback uses its 64 KiB file cache and alternates the shared scratch halves; inspection
+    reads directly. The complete stored checksum must pass before pixels can be published.
 
-    @param slot Validated photo/video file description.
-    @param index Zero-based frame to read.
-    @param sink Optional synchronous consumer of provisional RGB888 fragments.
-    @param context Borrowed consumer state.
-    @param inspecting Selects the inspection file instead of the active playback file.
+    @param slot Checked frame metadata and storage layout.
+    @param index Zero-based raw frame index.
+    @param sink Optional consumer of provisional pixels.
+    @param context Borrowed pixel-consumer state.
+    @param inspecting True selects the inspection handle.
+    @param timing Optional output read and pipeline measurements.
 
     @return result - Completion flag, filesystem status and validation diagnostic.
 */
@@ -1335,77 +1342,24 @@ MemoryManager::ReadAndVerifyRawVideoFrame (
     uint32_t index,
     ImageSink sink,
     void* context,
-    bool inspecting
+    bool inspecting,
+    FrameReadTiming* timing
     )
 {
-    FrameResult read;
     FIL* file = nullptr;
-    uint64_t position;
-    uint64_t stride;
-    uint32_t crc;
-    uint32_t expected;
-    UINT count;
-    UINT bytes;
-    size_t offset;
-    size_t chunk;
-    uint8_t checksum[FRAME_CHECKSUM_BYTES];
+    MemoryStorage::Slot description;
+    MemoryStorage::FrameResult result;
 
-    // Choose the owned file handle and the checksum layout used by this saved generation.
     file = &storage_.playbackFile;
     if (inspecting) {
         file = &storage_.imageFile;
     }
-    stride = slot.metadata.FrameBytes();
-    crc = slot.crcSeed;
-    if (slot.frameChecksums) {
-        stride += FRAME_CHECKSUM_BYTES;
-        crc = STORAGE_CRC32_INITIAL_U;
-    }
-
-    // Seek only when the selected frame is not already next in the file stream.
-    position = slot.dataOffset + stride * index;
-    if (f_tell(file) != position) {
-        read.result = f_lseek(file, FSIZE_t(position));
-    }
-
-    // Read bounded whole-pixel fragments; use a short prefix to reach a sector boundary.
-    for (offset = 0; read.result == FR_OK && offset < slot.metadata.FrameBytes();) {
-        chunk = ChunkBytes;
-        if (f_tell(file) % SD_SECTOR_BYTES) {
-            chunk = SD_SECTOR_BYTES - size_t(f_tell(file) % SD_SECTOR_BYTES);
-            while (chunk % slot.metadata.PixelBytes()) {
-                chunk += SD_SECTOR_BYTES;
-            }
-        }
-        bytes = UINT(std::min(uint64_t(chunk), slot.metadata.FrameBytes() - offset));
-        read.result = f_read(file, storage_.readBuffer, bytes, &count);
-        if (read.result != FR_OK || count != bytes) {
-            return read;
-        }
-        crc = UpdateImageCrc32(crc, storage_.readBuffer, bytes);
-        if (sink && !sink(context, storage_.readBuffer, bytes, offset)) {
-            read.error = "media frame consumer rejected data";
-            return read;
-        }
-        offset += bytes;
-    }
-    if (read.result != FR_OK) {
-        return read;
-    }
-
-    // Accept provisional pixels only when the frame checksum matches its stored record.
-    expected = slot.checksum;
-    if (slot.frameChecksums) {
-        read.result = f_read(file, checksum, sizeof(checksum), &count);
-        if (read.result != FR_OK || count != sizeof(checksum)) {
-            return read;
-        }
-        expected = ReadUnsigned32LittleEndian(checksum);
-    }
-    read.error = "media frame checksum mismatch";
-    read.complete = ~crc == expected;
-    return read;
+    description = {slot.metadata, slot.dataOffset, slot.checksum, slot.crcSeed, slot.frameChecksums};
+    result = MemoryStorage::ReadAndVerifyRawVideoFrame(*file, description, index, sink, context, timing);
+    return {result.complete, int(result.result), result.error};
 } // ReadAndVerifyRawVideoFrame
+
+
 
 /**
     Inspects a photo, raw video or indexed JPEG video in a retained slot.
@@ -1924,6 +1878,8 @@ MemoryManager::OpenLastMedia (
         return ReportStorageFailure("media playback open failed", result);
     }
     storage_.playback.open = true;
+    MemoryStorage::playbackFile = &storage_.playbackFile;
+    MemoryStorage::playbackPrefetch.Reset();
     storage_.playback.slot = latest;
     storage_.playback.description = slots[latest];
     metadata = slots[latest].metadata;
@@ -1941,6 +1897,8 @@ MemoryManager::OpenLastMedia (
     @param frameIndex Zero-based frame within the selected saved clip.
     @param sink Synchronous consumer of provisional frame bytes.
     @param context Borrowed consumer state for this read.
+    @param timing Optional output counters for this frame read.
+    @param jpegOutput Requested JPEG pixel format; raw media retains its stored format.
 
     @return true - The requested frame and its CRC passed verification.
     @return false - The request, I/O, consumer or checksum failed.
@@ -1949,29 +1907,52 @@ bool
 MemoryManager::ReadMediaFrame (
     uint32_t frameIndex,
     ImageSink sink,
-    void* context
+    void* context,
+    FrameReadTiming* timing,
+    PixelFormat jpegOutput
     )
 {
     FrameResult read;
+    uint64_t started;
+    PlaybackPrefetch::Stats before;
+    PlaybackPrefetch::Stats after;
 
+    if (timing) {
+        *timing = {};
+    }
+    started = to_us_since_boot(get_absolute_time());
     StorageGuard guard;
 
     if (!guard.acquired || !ready_ || !storage_.playback.open || storage_.save.phase != SavePhase::Idle) {
         return ReportStorageFailure("media playback not open");
     }
-    if (!sink || frameIndex >= storage_.playback.description.metadata.frameCount) {
+    if (!sink || (jpegOutput != PixelFormat::RGB888 && jpegOutput != PixelFormat::RGB565) || frameIndex >= storage_.playback.description.metadata.frameCount) {
         return ReportStorageFailure("invalid media frame request");
     }
+    // Direction guides read-ahead without changing the selected frame or validation.
+    before = MemoryStorage::playbackPrefetch.GetStats();
+    MemoryStorage::playbackPrefetch.SetBackwards(storage_.hasPlaybackFrame && frameIndex < storage_.lastPlaybackFrame);
     if (storage_.playback.description.indexedJpeg) {
-        read = ReadAndVerifyJpegFrame(storage_.playback.description, frameIndex, sink, context, false);
+        read = ReadAndVerifyJpegFrame(storage_.playback.description, frameIndex, sink, context, false, false, timing, jpegOutput == PixelFormat::RGB565);
     } else {
-        read = ReadAndVerifyRawVideoFrame(storage_.playback.description, frameIndex, sink, context, false);
+        read = ReadAndVerifyRawVideoFrame(storage_.playback.description, frameIndex, sink, context, false, timing);
     }
     if (!read.complete) {
         storage_.rejectedSlot = storage_.playback.slot;
         CloseSavedMediaPlayback();
         return ReportStorageFailure(read.error, read.result);
     }
+    if (timing) {
+        after = MemoryStorage::playbackPrefetch.GetStats();
+        timing->prefetchHitBytes = after.hitBytes - before.hitBytes;
+        timing->prefetchReadBytes = after.readBytes - before.readBytes;
+        timing->prefetchLoads = after.loads - before.loads;
+        timing->prefetchAheadLoads = after.aheadLoads - before.aheadLoads;
+        timing->prefetchFailures = after.failures - before.failures;
+        timing->totalUs = to_us_since_boot(get_absolute_time()) - started;
+    }
+    storage_.lastPlaybackFrame = frameIndex;
+    storage_.hasPlaybackFrame = true;
     error_ = "none";
     return true;
 } // ReadMediaFrame
@@ -1993,70 +1974,7 @@ MemoryManager::CloseMediaPlayback (
     CloseSavedMediaPlayback();
 } // CloseMediaPlayback
 
-/**
-    Supplies bounded compressed bytes and checksums their exact record data.
 
-    The first half of shared storage scratch is a refill buffer. Even skipped
-    bytes update the encoded CRC and final-marker history; no callback can read
-    outside the selected record. A failed or short read stops the decoder.
-
-    @param context Borrowed bounded file reader for this JPEG record.
-    @param bytes Writable destination, or null when the decoder skips input.
-    @param count Maximum bytes requested by the decoder.
-
-    @return count - Actual bytes copied or skipped, possibly fewer than requested.
-    @return 0 - The record ended or a filesystem read failed.
-*/
-size_t
-MemoryManager::ReadJpegInput (
-    void* context,
-    uint8_t* bytes,
-    size_t count
-    )
-{
-    JpegReadContext* reader = nullptr;
-    FIL* file = nullptr;
-    size_t copied;
-    size_t part;
-    UINT actual;
-
-    reader = static_cast<JpegReadContext*>(context);
-    file = static_cast<FIL*>(reader->file);
-    copied = 0;
-
-    // Refill only within this encoded record; the other half of scratch belongs to the decoder.
-    while (copied < count) {
-        if (reader->cursor == reader->buffered) {
-            if (!reader->remaining || reader->result != FR_OK) {
-                break;
-            }
-            part = std::min(reader->remaining, size_t(JPEG_INPUT_BUFFER_BYTES));
-            reader->result = f_read(file, storage_.readBuffer, UINT(part), &actual);
-            if (reader->result != FR_OK || actual != part) {
-                break;
-            }
-            reader->remaining -= part;
-            reader->buffered = part;
-            reader->cursor = 0;
-        }
-
-        // Track every consumed or skipped byte so CRC and final-marker checks cover the entire record.
-        part = std::min(count - copied, reader->buffered - reader->cursor);
-        reader->crc = UpdateImageCrc32(reader->crc, storage_.readBuffer + reader->cursor, part);
-        if (part >= JPEG_MARKER_BYTES) {
-            reader->previousByte = storage_.readBuffer[reader->cursor + part - JPEG_MARKER_BYTES];
-        } else {
-            reader->previousByte = reader->lastByte;
-        }
-        reader->lastByte = storage_.readBuffer[reader->cursor + part - 1];
-        if (bytes) {
-            std::memcpy(bytes + copied, storage_.readBuffer + reader->cursor, part);
-        }
-        reader->cursor += part;
-        copied += part;
-    }
-    return copied;
-} // ReadJpegInput
 
 /**
     Validates an indexed JPEG record before completing provisional frame output.
@@ -2068,10 +1986,12 @@ MemoryManager::ReadJpegInput (
 
     @param slot Checked JPEG slot metadata and payload offset.
     @param index Zero-based independently seekable frame.
-    @param sink Optional synchronous consumer of provisional RGB888 rows.
+    @param sink Optional consumer of provisional RGB888 or RGB565 rows.
     @param context Borrowed pixel-consumer state.
     @param inspecting Selects the startup inspection handle.
     @param verifying Selects the active unpublished save handle instead.
+    @param timing Optional output counters for the bounded frame read.
+    @param outputRGB565 True selects RGB565 JPEG pixels; false selects RGB888.
 
     @return result - Completion, filesystem status and a stable failure description.
 */
@@ -2082,7 +2002,9 @@ MemoryManager::ReadAndVerifyJpegFrame (
     ImageSink sink,
     void* context,
     bool inspecting,
-    bool verifying
+    bool verifying,
+    FrameReadTiming* timing,
+    bool outputRGB565
     )
 {
     FrameResult read;
@@ -2095,9 +2017,7 @@ MemoryManager::ReadAndVerifyJpegFrame (
     uint32_t expectedCrc;
     uint32_t nextOffset;
     uint64_t end;
-    JpegReadContext input;
-    int decoderError;
-    bool decoded;
+    MemoryStorage::FrameResult decoded;
 
     // Choose inspection, playback or verification ownership without opening another file handle.
     read.error = "invalid indexed JPEG frame";
@@ -2117,9 +2037,9 @@ MemoryManager::ReadAndVerifyJpegFrame (
         offset = storage_.jpegIndex[index - storage_.jpegIndexFirst].offset;
         length = storage_.jpegIndex[index - storage_.jpegIndexFirst].length;
     } else {
-        read.result = f_lseek(file, FSIZE_t(slot.dataOffset + uint64_t(index) * MediaTransfer::JpegIndexBytes));
+        read.result = MemoryStorage::SeekPlaybackFile(*file, slot.dataOffset + uint64_t(index) * MediaTransfer::JpegIndexBytes);
         if (read.result == FR_OK) {
-            read.result = f_read(file, entry, sizeof(entry), &count);
+            read.result = MemoryStorage::ReadPlaybackFileBytes(*file, entry, sizeof(entry), &count, timing);
         }
         if (read.result != FR_OK || count != sizeof(entry)) {
             return read;
@@ -2143,7 +2063,7 @@ MemoryManager::ReadAndVerifyJpegFrame (
 
         // Require contiguous records and an exact payload end to reject aliases, gaps and trailing data.
         if (index + 1 < slot.metadata.frameCount) {
-            read.result = f_read(file, entry, sizeof(entry), &count);
+            read.result = MemoryStorage::ReadPlaybackFileBytes(*file, entry, sizeof(entry), &count, timing);
             if (read.result != FR_OK || count != sizeof(entry)) {
                 return read;
             }
@@ -2157,36 +2077,21 @@ MemoryManager::ReadAndVerifyJpegFrame (
     }
 
     // Continue adjacent forward records without seeking, then cross-check their declared lengths.
-    if (f_tell(file) != slot.dataOffset + offset) {
-        read.result = f_lseek(file, FSIZE_t(slot.dataOffset + offset));
+    if (MemoryStorage::GetPlaybackFilePosition(*file) != slot.dataOffset + offset) {
+        read.result = MemoryStorage::SeekPlaybackFile(*file, slot.dataOffset + offset);
     }
     if (read.result == FR_OK) {
-        read.result = f_read(file, record, sizeof(record), &count);
+        read.result = MemoryStorage::ReadPlaybackFileBytes(*file, record, sizeof(record), &count, timing);
     }
     if (read.result != FR_OK || count != sizeof(record) || ReadUnsigned32LittleEndian(record) != length) {
         return read;
     }
     expectedCrc = ReadUnsigned32LittleEndian(record + FRAME_CHECKSUM_BYTES);
 
-    // Decode into provisional pixel callbacks using the shared input and workspace halves.
-    input.file = file;
-    input.remaining = length;
-    decoded = JpegFrameDecoder::Decode(ReadJpegInput, &input, sink, context,
-                                      slot.metadata.width, slot.metadata.height,
-                                      storage_.readBuffer + JPEG_INPUT_BUFFER_BYTES,
-                                      JPEG_WORK_BUFFER_BYTES, decoderError);
-    if (!decoded) {
-        read.result = input.result;
-        read.error = "invalid/unsupported JPEG frame";
-        return read;
-    }
-    // The decoder can stop before consuming trailing markers; drain within this record only.
-    while (ReadJpegInput(&input, nullptr, JPEG_INPUT_BUFFER_BYTES)) {
-    }
-    read.result = input.result;
-    read.complete = read.result == FR_OK && !input.remaining && input.cursor == input.buffered &&
-                    ~input.crc == expectedCrc && input.previousByte == JPEG_MARKER_PREFIX &&
-                    input.lastByte == JPEG_END_MARKER;
+    // Decode and checksum encoded bytes while preserving the existing strict index validation.
+    decoded = MemoryStorage::DecodeEncodedJpegFrame(*file, slot.metadata, length, expectedCrc,
+                                                   sink, context, timing, outputRGB565);
+    read = {decoded.complete, int(decoded.result), decoded.error};
     return read;
 } // ReadAndVerifyJpegFrame
 
@@ -2304,9 +2209,9 @@ MemoryManager::LoadJpegIndexWindow (
                   "JPEG index window exceeds shared input scratch");
 
     // Read the complete bounded window into shared scratch before publishing any cached entry.
-    result = f_lseek(&storage_.playbackFile, FSIZE_t(slot.dataOffset + uint64_t(readFirst) * MediaTransfer::JpegIndexBytes));
+    result = MemoryStorage::SeekPlaybackFile(storage_.playbackFile, slot.dataOffset + uint64_t(readFirst) * MediaTransfer::JpegIndexBytes);
     if (result == FR_OK) {
-        result = f_read(&storage_.playbackFile, storage_.readBuffer, bytes, &count);
+        result = MemoryStorage::ReadPlaybackFileBytes(storage_.playbackFile, storage_.readBuffer, bytes, &count, nullptr);
     }
     if (result != FR_OK || count != bytes) {
         return false;
@@ -3511,6 +3416,8 @@ MemoryManager::OpenLibraryPhoto (
         return ReportStorageFailure("photo playback open failed", result);
     }
     storage_.playback.open = true;
+    MemoryStorage::playbackFile = &storage_.playbackFile;
+    MemoryStorage::playbackPrefetch.Reset();
     storage_.playback.slot = STORAGE_LIBRARY_PHOTO_SLOT;
     storage_.playback.description = slot;
     metadata = slot.metadata;
@@ -4084,6 +3991,8 @@ MemoryManager::OpenLibraryVideo (
         return ReportStorageFailure("video library playback open failed", result);
     }
     storage_.playback.open = true;
+    MemoryStorage::playbackFile = &storage_.playbackFile;
+    MemoryStorage::playbackPrefetch.Reset();
     storage_.playback.slot = STORAGE_LIBRARY_VIDEO_SLOT;
     storage_.playback.libraryVideoId = id;
     storage_.playback.description = slot;

@@ -130,6 +130,18 @@ a bulk buffer does not make every underlying transfer one continuous SD command.
 raw-sector path bypasses the filesystem or its bounds checks. Consumers publish an image
 only after the complete read and its checksums succeed.
 
+The active playback handle has a separate 64 KiB cache (`PlaybackPrefetch::Bytes`),
+split into two 32 KiB blocks. Reads reuse cached file ranges and use a logical cursor
+for forward, reverse and random frame selection. Closing, replacing or remounting
+playback clears cached bytes. Inspection and upload verification read directly from
+FatFs. A speculative read failure cannot invalidate an already checked current frame;
+a later required read reports any remaining storage error.
+
+Raw playback alternates two 12 KiB halves of the shared scratch buffer. Bounded CRC
+and pixel mapping work can run while SD DMA fills the other half. JPEG input can use
+two additional 8 KiB slots to feed the shared decoder worker. Filesystem operations
+remain on Core 0; worker callbacks consume copied encoded bytes and never access SD.
+
 ### CRC32 and DMA
 
 CRC32 uses slicing-by-four lookup tables. The 4 KiB tables are compile-time constants
@@ -139,8 +151,8 @@ payload and SD sector CRC checks remain enabled.
 
 The SD read path completes active DMA before returning a previous-sector CRC error,
 preventing retry from reusing a destination still owned by DMA. It also provides an
-optional foreground work hook and timing counters for read pipelines. They are inactive
-unless a caller installs them. A hook must be bounded, must not re-enter storage and
+optional foreground work hook and timing counters for read pipelines. The playback pipeline installs the work hook only while a previously filled buffer
+has pending CPU work. A hook must be bounded, must not re-enter storage and
 must not access the current DMA target. Timing counters overlap; they must not be added
 to infer elapsed read time. Storage work runs in foreground code.
 

@@ -4,13 +4,26 @@
 
 | Owner | Work |
 | --- | --- |
-| Core 0 foreground | SD/FatFs operations, upload persistence and verification, saved-media selection, JPEG decoding, frame preparation and submission |
+| Core 0 foreground | SD/FatFs operations, upload persistence and verification, saved-media selection, local JPEG fallback, frame preparation and submission |
 | Core 0 scan interrupt | HUB75 row/bit-plane progression and complete-scan buffer swaps |
-| Core 1 | Wi-Fi association, DHCP, local listener lifecycle, HTTP/TCP transport callbacks, response pumping and connection health |
+| Core 1 | Wi-Fi association, DHCP, local listener lifecycle, HTTP/TCP transport callbacks, response pumping, connection health and reserved JPEG decode jobs |
 
 `StartNetworkCore` launches one long-lived `NetworkServices` worker. The HUB75 driver
 uses Core 0 (`HUB75_MULTICORE=false`). Both SDK core stacks are configured to 4 KiB.
 The scanner keeps displaying its last submitted frame while foreground work waits.
+
+## Shared JPEG worker
+
+Core 1 advertises decoder availability only after a network pass with no active photo,
+video or HTTP client. Core 0 reserves that slot before preparing compressed input.
+A reservation prevents Core 1 from starting another foreground network operation that
+could wait for a storage handoff. If the slot is busy or the worker has not started,
+the frame decodes synchronously on Core 0.
+
+Core 0 supplies encoded data through two 8 KiB slots while Core 1 decodes the previous
+bytes into provisional pixels. Networking interrupts remain enabled during decoding.
+Read failures signal end-of-input, and Core 0 waits for worker completion before
+reusing the context or workspace. Complete record checks still precede publication.
 
 ## Lifecycle handoffs
 

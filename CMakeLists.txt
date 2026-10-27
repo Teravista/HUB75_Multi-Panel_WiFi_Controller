@@ -110,6 +110,7 @@ target_compile_definitions(hub75 PRIVATE
     # SM_CLOCKDIV_FACTOR=1.0f     # to prevent flicker or ghosting it might be worth a try to reduce state machine speed
     # BIT_DEPTH=10                # numner (count) of bit-planes used for BCM (Binary Code Modulation) - valid values for BIT_DEPTH are 8 or 10
     CPU_FRAME_RGB565=1
+    JPEG_PARALLEL_READER=1
     HUB75_MULTICORE=false      # Keep HUB75 on Core 0; application networking owns Core 1.
     PICO_CORE1_STACK_SIZE=0x1000
     PICO_STACK_SIZE=0x1000
@@ -159,6 +160,11 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/network/WifiConnectionClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/NetworkServicesClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/networkCorePico.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/core/Core1SchedulerClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/JpegInputPipeClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/jpegWorkerPico.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/sd/PlaybackPrefetchClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryStorage.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/storageCrc32.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp

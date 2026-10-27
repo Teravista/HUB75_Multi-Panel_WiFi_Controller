@@ -863,3 +863,22 @@ WebServer::IsListening (
     cyw43_arch_lwip_end();
     return ready;
 } // IsListening
+
+/**
+    Reports whether an HTTP request is currently being handled.
+
+    @return true - A client currently owns the service connection.
+    @return false - No client connection is active.
+*/
+bool
+WebServer::HasActiveClient (
+    void
+    )
+{
+    bool active;
+
+    cyw43_arch_lwip_begin();
+    active = client.pcb != nullptr;
+    cyw43_arch_lwip_end();
+    return active;
+} // HasActiveClient

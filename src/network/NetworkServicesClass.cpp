@@ -196,3 +196,21 @@ NetworkServices::ProcessRequests (
     command_.store(Command::None, std::memory_order_release);
     return true;
 } // ProcessRequests
+
+/**
+    Checks whether network work permits an idle Core 1 decode job.
+
+    @return true - Network activity currently allows the shared core to decode.
+    @return false - A network client or network lifecycle operation needs the shared core.
+*/
+bool
+NetworkServices::CanDecodeOnCore1 (
+    void
+    )
+{
+    if (!wifi_.IsRadioInitialized()) {
+        return true; // Idle between failed-radio retries.
+    }
+    return !wifi_.IsPhotoUploadInProgress() && !WebServer::HasActiveClient() &&
+           (!video_ || !video_->HasActiveClient());
+} // CanDecodeOnCore1
