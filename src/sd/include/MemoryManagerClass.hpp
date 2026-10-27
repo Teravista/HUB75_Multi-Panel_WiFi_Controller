@@ -174,7 +174,45 @@ public:
     // Adopts the previous firmware's saved video without copying its payload.
     bool ImportLastVideo(uint32_t& id);
 
+    struct StorageUsage {
+        uint64_t totalBytes = 0;
+        uint64_t fileBytes = 0;
+        uint64_t allocatedBytes = 0;
+    };
+
+    // Totals logical and allocated bytes in the controller's managed SD files.
+    bool GetStorageUsage(StorageUsage& usage);
+
+    static constexpr size_t PreviewWidth = 32;
+    static constexpr size_t PreviewHeight = 64;
+    static constexpr size_t PreviewBytes = PreviewWidth * PreviewHeight * RGB565_PIXEL_BYTES;
+
+    // Builds a verified first-frame preview without replacing active playback.
+    bool ReadLibraryPreview(uint32_t id, bool video, uint8_t* pixels, size_t capacity);
+
 private:
+    /**
+        Samples a saved image into a small RGB565 preview without touching the CPU framebuffer.
+
+        The reader supplies raw or decoded pixel fragments. Placement maps their logical
+        cell centers into the caller-owned preview, whose remaining pixels stay black.
+    */
+    struct PreviewSamplingContext {
+        uint8_t* pixels;
+        size_t pixelBytes;
+        uint16_t width;
+        uint16_t height;
+        uint16_t left;
+        uint16_t top;
+
+        // Samples decoded image fragments into the small RGB565 library preview.
+        static bool SamplePreviewPixels(void* opaque, const uint8_t* bytes, size_t count, size_t offset);
+
+    };
+
+    // Adds managed library files to logical and allocated storage totals.
+    static int MeasureLibraryStorageUsage(StorageUsage& usage, uint64_t clusterBytes);
+
     static constexpr size_t HeaderBytes = PHOTO_HEADER_BYTES;
     static constexpr size_t LegacyLastHeaderBytes = SAVED_PHOTO_HEADER_BYTES;
     static constexpr size_t LastHeaderBytes = METADATA_PHOTO_HEADER_BYTES;

@@ -9,6 +9,11 @@
 #include <cstdio>
 #include <cstring>
 
+#define FAT_RESERVED_CLUSTER_COUNT 2
+#define LIBRARY_PREVIEW_SAMPLE_CENTER 2
+#define LIBRARY_PREVIEW_SAMPLE_STEP 4
+#define SD_SECTOR_BYTES_U 512u
+
 /**
     Holds the single storage session's filesystem, file and bounded read buffer.
 
@@ -4313,3 +4318,299 @@ MemoryManager::BuildLibraryPublicationHeader (
                                ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header,
                                                 storage_.save.headerBytes - FRAME_CHECKSUM_BYTES));
 } // BuildLibraryPublicationHeader
+
+/**
+    Samples decoded image fragments into the small RGB565 library preview.
+
+    Samples the centers of logical preview cells from incoming raw or decoded JPEG fragments and
+    writes RGB565 values into the small caller-owned preview. Source offsets and placement
+    determine the destination, so out-of-order MCU rows and letterboxed media are handled
+    consistently. Pixels outside sampled cells are ignored, and the enclosing operation
+    initializes the remaining preview to black.
+
+    @param opaque Caller-owned preview sampling state.
+    @param bytes Read-only input byte buffer.
+    @param count Number of bytes to process.
+    @param offset Byte offset within the source image or file.
+
+    @return true - The pixel chunk was sampled into the preview buffer.
+    @return false - The requested pixel format or range is invalid.
+*/
+bool
+MemoryManager::PreviewSamplingContext::SamplePreviewPixels (
+    void* opaque,
+    const uint8_t* bytes,
+    size_t count,
+    size_t offset
+    )
+{
+    PreviewSamplingContext* preview = nullptr;
+    size_t i;
+    size_t pixel;
+    size_t x;
+    size_t y;
+    uint16_t rgb;
+
+    preview = &(*static_cast<PreviewSamplingContext*>(opaque));
+    if (count % preview->pixelBytes || offset % preview->pixelBytes ||
+        offset + count > size_t(preview->width) * preview->height * preview->pixelBytes) {
+        return false;
+    }
+    // Double each dimension of the old preview: sample 4x4 cell centers.
+    // Logical offsets also handle JPEG's out-of-order MCU row fragments.
+    for (i = 0; i < count; i += preview->pixelBytes) {
+        pixel = (offset + i) / preview->pixelBytes;
+        x = pixel % preview->width + preview->left;
+        y = pixel / preview->width + preview->top;
+        if (x % LIBRARY_PREVIEW_SAMPLE_STEP != LIBRARY_PREVIEW_SAMPLE_CENTER ||
+            y % LIBRARY_PREVIEW_SAMPLE_STEP != LIBRARY_PREVIEW_SAMPLE_CENTER) {
+            continue;
+        }
+        if (preview->pixelBytes == RGB565_PIXEL_BYTES) {
+            rgb = MediaMetadataCodec::ReadUnsigned16LittleEndian(bytes + i);
+        } else {
+            rgb = uint16_t((bytes[i] >> RGB565_RED_BLUE_REDUCE_SHIFT) << RGB565_RED_SHIFT |
+                           (bytes[i + 1] >> RGB565_GREEN_REDUCE_SHIFT) << RGB565_GREEN_SHIFT |
+                           bytes[i + RGB_PIXEL_BLUE_INDEX] >> RGB565_RED_BLUE_REDUCE_SHIFT);
+        }
+        MediaMetadataCodec::WriteUnsigned16LittleEndian(
+            preview->pixels +
+                ((y / LIBRARY_PREVIEW_SAMPLE_STEP) * MemoryManager::PreviewWidth + x / LIBRARY_PREVIEW_SAMPLE_STEP) *
+                    RGB565_PIXEL_BYTES,
+            rgb);
+    }
+
+    return true;
+} // SamplePreviewPixels
+
+/**
+    Builds a verified first-frame preview without replacing active playback.
+
+    Inspects the selected photo/video using its own metadata, then reads and verifies its first
+    frame through a temporary handle and a small sampling sink. The preview is initialized to
+    black before content pixels are sampled in their saved placement. It keeps the current
+    playback handle, index cache and CPU framebuffer untouched, but synchronous reading or JPEG
+    decoding can still delay foreground work.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param video True selects videos; false selects photos.
+    @param pixels Writable destination buffer; the caller must provide sufficient storage.
+    @param capacity Number of elements available in the destination buffer, including any text
+                    terminator.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::ReadLibraryPreview (
+    uint32_t id,
+    bool video,
+    uint8_t* pixels,
+    size_t capacity
+    )
+{
+    PreviewSamplingContext preview;
+    SavedPhotoSlot slot;
+    char path[LIBRARY_PATH_BYTES];
+    int opened;
+    uint32_t pixelBytes;
+    FrameResult read;
+    int closed;
+    const char* failure = nullptr;
+    uint32_t failureCode;
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle) {
+        return ReportStorageFailure("preview storage busy or unavailable");
+    }
+    if (!id || id > MaximumLibraryId || !pixels || capacity < PreviewBytes) {
+        return ReportStorageFailure("invalid preview request");
+    }
+    slot = {};
+    if (video) {
+        slot = InspectLibraryVideo(id);
+    } else {
+        slot = InspectPhotoLibraryFile(id);
+    }
+    if (slot.state != SlotState::Valid) {
+        return ReportStorageFailure("saved preview unavailable", slot.result);
+    }
+
+    // Validate the root filename and image inputs before opening a file.
+    if (video) {
+        BuildVideoLibraryPath(id, path);
+    } else {
+        BuildPhotoLibraryPath(id, path);
+    }
+
+    // Open the saved file before validating its header and reading pixels.
+    opened = f_open(&storage_.imageFile, path, FA_READ);
+    if (opened != FR_OK) {
+        return ReportStorageFailure("preview open failed", opened);
+    }
+    pixelBytes = {};
+    if (slot.indexedJpeg) {
+        pixelBytes = RGB888_PIXEL_BYTES;
+    } else {
+        pixelBytes = slot.metadata.PixelBytes();
+    }
+
+    preview = {pixels,
+              pixelBytes,
+              slot.metadata.width,
+              slot.metadata.height,
+              slot.metadata.Left(LOGICAL_IMAGE_WIDTH),
+              slot.metadata.Top(LOGICAL_IMAGE_HEIGHT)};
+
+    std::memset(pixels, 0, PreviewBytes);
+    // Use a separate file handle and no playback JPEG index cache. Existing
+    // playback position, selection, profiling and displayed pixels stay intact.
+    read = {};
+    if (slot.indexedJpeg) {
+        read = ReadAndVerifyJpegFrame(slot, 0, PreviewSamplingContext::SamplePreviewPixels, &preview, true);
+    } else {
+        read = ReadAndVerifyRawVideoFrame(slot, 0, PreviewSamplingContext::SamplePreviewPixels, &preview, true);
+    }
+    closed = f_close(&storage_.imageFile);
+    if (!read.complete || closed != FR_OK) {
+        std::memset(pixels, 0, PreviewBytes);
+        failure = {};
+        if (read.complete) {
+            failure = "preview close failed";
+        } else {
+            failure = read.error;
+        }
+        failureCode = {};
+        if (read.result == FR_OK) {
+            failureCode = closed;
+        } else {
+            failureCode = read.result;
+        }
+        return ReportStorageFailure(failure, failureCode);
+    }
+
+    error_ = "none";
+    return true;
+} // ReadLibraryPreview
+
+/**
+    Adds managed library files to logical and allocated storage totals.
+
+    @param usage Running storage totals to update.
+    @param clusterBytes Number of bytes allocated for one filesystem cluster.
+
+    @return FR_OK - All managed directory entries were counted.
+    @return other - FatFs error describing the failed directory operation.
+*/
+int
+MemoryManager::MeasureLibraryStorageUsage (
+    MemoryManager::StorageUsage& usage,
+    uint64_t clusterBytes
+    )
+{
+    return ScanLibraryDirectory([&]([[maybe_unused]] uint32_t id, [[maybe_unused]] bool video, [[maybe_unused]] bool temporary, const FILINFO& info) {
+        usage.fileBytes += info.fsize;
+        usage.allocatedBytes += (uint64_t(info.fsize) + clusterBytes - 1) / clusterBytes * clusterBytes;
+        return true;
+    });
+} // MeasureLibraryStorageUsage
+
+/**
+    Totals logical and allocated bytes in the controller's managed SD files.
+
+    Totals only controller-managed media, settings and retained files, reporting logical lengths
+    separately from cluster-rounded allocation. A bounded-memory directory traversal is
+    synchronous, so this is heavier than a cached status read. The storage guard prevents
+    concurrent file operations, and unavailable/busy storage returns failure rather than a
+    misleading complete usage total.
+
+    @param usage Output totals for the controller-managed SD files.
+
+    @return true - The storage operation completed successfully.
+    @return false - Input, storage availability, file I/O or verification prevented completion;
+                    GetLastError() gives the reason.
+*/
+bool
+MemoryManager::GetStorageUsage (
+    StorageUsage& usage
+    )
+{
+    StorageUsage measured;
+    uint64_t clusterBytes;
+    size_t nextPathIndex;
+    const char* path = nullptr;
+    size_t pathIndex;
+    const char* currentPath = nullptr;
+    int result;
+    /**
+        Adds one managed file to logical and allocated storage usage totals.
+
+        Looks up one reserved controller file and adds its logical length and cluster-rounded
+        allocation to the running usage snapshot. Missing files contribute nothing, but lookup
+        errors or a directory in place of a managed file fail the overall measurement. The
+        enclosing storage guard keeps this synchronous lookup serialized.
+
+        @param path Storage path used by this operation.
+
+        @return true - The managed file was counted, or it does not exist.
+        @return false - The path names a directory or its metadata could not be read.
+    */
+    auto include = [&](const char* path) {
+        FILINFO info;
+        int result;
+
+        info = {};
+        result = f_stat(path, &info);
+        if (result == FR_NO_FILE) {
+            return true;
+        }
+        if (result != FR_OK) {
+            return ReportStorageFailure("storage usage lookup failed", result);
+        }
+        if (info.fattrib & AM_DIR) {
+            return false;
+        }
+        measured.fileBytes += info.fsize;
+        measured.allocatedBytes += (uint64_t(info.fsize) + clusterBytes - 1) / clusterBytes * clusterBytes;
+        return true;
+    };
+
+    usage = {};
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    StorageGuard guard;
+    if (!guard.acquired || !ready_ || storage_.save.phase != SavePhase::Idle || !storage_.filesystem.csize ||
+        storage_.filesystem.n_fatent < FAT_RESERVED_CLUSTER_COUNT) {
+        return false;
+    }
+    measured = {};
+    clusterBytes = uint64_t(storage_.filesystem.csize) * SD_SECTOR_BYTES_U;
+    measured.totalBytes = uint64_t(storage_.filesystem.n_fatent - FAT_RESERVED_CLUSTER_COUNT) * clusterBytes;
+
+    for (nextPathIndex = 0; nextPathIndex < SAVED_MEDIA_SLOT_COUNT; ++nextPathIndex) {
+        path = GetSavedMediaPath(unsigned(nextPathIndex));
+        if (!include(path)) {
+            return false;
+        }
+    }
+
+    for (pathIndex = 0; pathIndex < sizeof(GalleryPaths) / sizeof(GalleryPaths[0]); ++pathIndex) {
+        currentPath = GalleryPaths[pathIndex];
+        if (!include(currentPath)) {
+            return false;
+        }
+    }
+
+    if (!include("0:/VLIB.H75")) {
+        return false;
+    }
+    result = MeasureLibraryStorageUsage(measured, clusterBytes);
+
+    if (result != FR_OK) {
+        return ReportStorageFailure("storage usage directory failed", result);
+    }
+    usage = measured;
+    return true;
+} // GetStorageUsage

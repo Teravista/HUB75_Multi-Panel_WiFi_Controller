@@ -1,4 +1,5 @@
 #include "network/include/FrameBufferControllerClass.hpp"
+#include <cstring>
 #include "display/include/displayHelpers.hpp"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
@@ -801,98 +802,186 @@ FrameBufferController::ClearStoredFrame (
 } // ClearStoredFrame
 
 /**
-    Maps a stored raw frame fragment into the CPU framebuffer.
+    Converts stored pixels and places them in the CPU framebuffer.
 
-    The caller already holds render ownership. Mapping is calculated once for
-    each logical panel-row run; a signed stride then advances through physical
-    pixels. CpuFrame stores the configured CPU format without another full buffer.
+    Validates pixel alignment, source bounds and placement before mapping each logical image
+    region into the panel-chain framebuffer. Within a panel-row run, a constant signed destination
+    stride avoids recalculating coordinates per pixel. RGB565 input is expanded before conversion
+    to the compiled CPU-frame format. The caller already owns the destination frame; this helper
+    neither claims that ownership nor publishes a completed image.
 
-    @param bytes Read-only logical RGB888 or little-endian RGB565 pixels.
-    @param count Number of bytes in this complete-pixel fragment.
-    @param offset Byte offset in the logical full-panel frame.
-    @param format Source fragment encoding: RGB888 or little-endian RGB565.
+    @param helpers Logical-to-physical pixel mapping and display overlay helpers.
+    @param buffer Writable destination buffer; the caller must provide sufficient storage.
+    @param bytes Read-only input byte buffer.
+    @param count Number of bytes to process.
+    @param offset Byte offset within the source image or file.
+    @param width Image width in pixels.
+    @param height Image height in pixels.
+    @param left Horizontal image placement in pixels; AutoOffset selects centering.
+    @param top Vertical image placement in pixels; AutoOffset selects centering.
 
-    @return true - Every pixel in the bounded fragment was mapped.
-    @return false - The pointer, range or RGB alignment is invalid.
+    @return true - The requested pixel chunk was accepted or copied.
+    @return false - The pixel range, buffer, format or ownership is invalid.
+*/
+template <PixelFormat Format>
+bool
+FrameBufferController::MapStoredPixels (
+    DisplayHelpers& helpers,
+    uint8_t* buffer,
+    const uint8_t* bytes,
+    size_t count,
+    size_t offset,
+    uint16_t width,
+    uint16_t height,
+    uint16_t left,
+    uint16_t top
+    )
+{
+    size_t PixelBytes;
+    size_t FrameBytes;
+    size_t pixel;
+    size_t remaining;
+    int localX;
+    int logicalX;
+    int logicalY;
+    size_t run;
+    int x;
+    int y;
+    ptrdiff_t dest;
+    ptrdiff_t stride;
+    int nextX;
+    int nextY;
+    size_t i;
+    uint8_t decoded[IMAGE_BYTES_PER_PIXEL];
+    const uint8_t* rgb = nullptr;
+    uint16_t value;
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+
+    if (Format == PixelFormat::RGB565) {
+        PixelBytes = RGB565_PIXEL_BYTES;
+    } else {
+        PixelBytes = RGB888_PIXEL_BYTES;
+    }
+    if (!width || !height || width > LOGICAL_IMAGE_WIDTH || height > LOGICAL_IMAGE_HEIGHT) {
+        return false;
+    }
+    FrameBytes = size_t(width) * height * PixelBytes;
+    if (left == MediaMetadata::AutoOffset) {
+        left = (LOGICAL_IMAGE_WIDTH - width) / CENTER_ALIGNMENT_DIVISOR;
+    }
+    if (top == MediaMetadata::AutoOffset) {
+        top = (LOGICAL_IMAGE_HEIGHT - height) / CENTER_ALIGNMENT_DIVISOR;
+    }
+    if (left > LOGICAL_IMAGE_WIDTH - width || top > LOGICAL_IMAGE_HEIGHT - height) {
+        return false;
+    }
+    if (!bytes || offset > FrameBytes || count > FrameBytes - offset || offset % PixelBytes ||
+        count % PixelBytes) {
+        return false;
+    }
+    pixel = offset / PixelBytes;
+    remaining = count / PixelBytes;
+    while (remaining) {
+        localX = int(pixel % width);
+        logicalX = localX + left;
+        logicalY = int(pixel / width) + top;
+        // Within one logical panel row, the rotated destination advances by a
+        // constant signed stride. Calculate coordinates per run, not per pixel.
+        run = std::min({remaining, size_t(width - localX),
+                                     size_t(LOGICAL_PANEL_WIDTH - logicalX % LOGICAL_PANEL_WIDTH)});
+        x = 0;
+        y = 0;
+        helpers.ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, x, y);
+        dest = (ptrdiff_t(y) * MATRIX_PANEL_WIDTH + x) * CpuFrame::PixelBytes;
+        stride = 0;
+        if (run > 1) {
+            nextX = 0;
+            nextY = 0;
+            helpers.ConvertLogicalToPhysicalCoordinates(logicalX + 1, logicalY, nextX, nextY);
+            stride =
+                (ptrdiff_t(nextY - y) * MATRIX_PANEL_WIDTH + nextX - x) * ptrdiff_t(CpuFrame::PixelBytes);
+        }
+        for (i = 0; i < run; ++i) {
+            rgb = bytes;
+            if (Format == PixelFormat::RGB565) {
+                value = uint16_t(bytes[0]) | uint16_t(uint16_t(bytes[1]) << BITS_PER_BYTE);
+                red = uint8_t(value >> RGB565_RED_SHIFT);
+                green = uint8_t((value >> RGB565_GREEN_SHIFT) & RGB565_GREEN_MASK);
+                blue = uint8_t(value & RGB565_BLUE_MASK);
+                decoded[0] =
+                    uint8_t((red << RGB565_RED_BLUE_EXPAND_SHIFT) | (red >> RGB565_RED_BLUE_REPLICATE_SHIFT));
+                decoded[1] =
+                    uint8_t((green << RGB565_GREEN_EXPAND_SHIFT) | (green >> RGB565_GREEN_REPLICATE_SHIFT));
+                decoded[RGB_PIXEL_BLUE_INDEX] = uint8_t((blue << RGB565_RED_BLUE_EXPAND_SHIFT) |
+                                                        (blue >> RGB565_RED_BLUE_REPLICATE_SHIFT));
+                rgb = decoded;
+            }
+            CpuFrame::Store(buffer + dest, rgb[IMAGE_RED_BYTE_OFFSET], rgb[IMAGE_GREEN_BYTE_OFFSET],
+                                    rgb[IMAGE_BLUE_BYTE_OFFSET]);
+            dest += stride;
+            bytes += PixelBytes;
+        }
+
+        pixel += run;
+        remaining -= run;
+    }
+
+    return true;
+} // MapStoredPixels
+
+/**
+    Maps a stored pixel fragment into the placed CPU framebuffer region.
+
+    @param bytes Read-only input byte buffer.
+    @param count Number of bytes to process.
+    @param offset Byte offset within the source image or file.
+    @param format Pixel encoding used by the source data.
+    @param width Image width in pixels.
+    @param height Image height in pixels.
+    @param left Horizontal image placement in pixels; AutoOffset selects centering.
+    @param top Vertical image placement in pixels; AutoOffset selects centering.
+
+    @return true - The requested pixel chunk was accepted or copied.
+    @return false - The pixel range, buffer, format or ownership is invalid.
 */
 bool
 FrameBufferController::WriteStoredFramePixels (
     const uint8_t* bytes,
     size_t count,
     size_t offset,
-    PixelFormat format
+    PixelFormat format,
+    uint16_t width,
+    uint16_t height,
+    uint16_t left,
+    uint16_t top
     )
 {
-    size_t pixel;
-    size_t pixelBytes;
-    size_t frameBytes;
-    uint16_t packed;
-    uint32_t color;
-    uint8_t unpacked[IMAGE_BYTES_PER_PIXEL];
-    const uint8_t* channels = nullptr;
-    size_t remaining;
-    size_t run;
-    size_t index;
-    int logicalX;
-    int logicalY;
-    int x;
-    int y;
-    int nextX;
-    int nextY;
-    ptrdiff_t destination;
-    ptrdiff_t stride;
-
-    // Resolve the source pixel width before checking offsets and whole-pixel alignment.
-    pixelBytes = IMAGE_BYTES_PER_PIXEL;
+    if (format == PixelFormat::RGB888) {
+        return MapStoredPixels<PixelFormat::RGB888>(*m_displayHelpers, m_frameBuffer, bytes, count, offset,
+                                                    width, height, left, top);
+    }
     if (format == PixelFormat::RGB565) {
-        pixelBytes = RGB565_PIXEL_BYTES;
-    } else if (format != PixelFormat::RGB888) {
-        return false;
+        return MapStoredPixels<PixelFormat::RGB565>(*m_displayHelpers, m_frameBuffer, bytes, count, offset,
+                                                    width, height, left, top);
     }
-    frameBytes = size_t(LOGICAL_IMAGE_WIDTH) * LOGICAL_IMAGE_HEIGHT * pixelBytes;
-    if (!bytes || offset > frameBytes || count > frameBytes - offset ||
-        offset % pixelBytes || count % pixelBytes) {
-        return false;
-    }
-
-    // Map one logical panel-row run at a time and advance by its physical byte stride.
-    pixel = offset / pixelBytes;
-    remaining = count / pixelBytes;
-    while (remaining) {
-        logicalX = int(pixel % LOGICAL_IMAGE_WIDTH);
-        logicalY = int(pixel / LOGICAL_IMAGE_WIDTH);
-        run = std::min(remaining, size_t(LOGICAL_PANEL_WIDTH - logicalX % LOGICAL_PANEL_WIDTH));
-        x = 0;
-        y = 0;
-        m_displayHelpers->ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, x, y);
-        destination = (ptrdiff_t(y) * MATRIX_PANEL_WIDTH + x) * CpuFrame::PixelBytes;
-        stride = 0;
-        if (run > 1) {
-            nextX = 0;
-            nextY = 0;
-            m_displayHelpers->ConvertLogicalToPhysicalCoordinates(logicalX + 1, logicalY, nextX, nextY);
-            stride = (ptrdiff_t(nextY - y) * MATRIX_PANEL_WIDTH + nextX - x) * ptrdiff_t(CpuFrame::PixelBytes);
-        }
-
-        // Expand packed source colors only when needed; the CPU frame keeps its configured format.
-        for (index = 0; index < run; ++index) {
-            channels = bytes;
-            if (format == PixelFormat::RGB565) {
-                packed = MediaMetadataCodec::ReadUnsigned16LittleEndian(bytes);
-                color = CpuFrame::Expand565(packed);
-                unpacked[RGB888_RED_CHANNEL_INDEX] = uint8_t(color >> RGB888_RED_SHIFT);
-                unpacked[RGB888_GREEN_CHANNEL_INDEX] = uint8_t(color >> RGB888_GREEN_SHIFT);
-                unpacked[RGB888_BLUE_CHANNEL_INDEX] = uint8_t(color);
-                channels = unpacked;
-            }
-            // Keep the same physical channel correction for every stored encoding.
-            CpuFrame::Store(m_frameBuffer + destination, channels[IMAGE_RED_BYTE_OFFSET],
-                            channels[IMAGE_GREEN_BYTE_OFFSET], channels[IMAGE_BLUE_BYTE_OFFSET]);
-            destination += stride;
-            bytes += pixelBytes;
-        }
-        pixel += run;
-        remaining -= run;
-    }
-    return true;
+    return false;
 } // WriteStoredFramePixels
+
+/**
+    Clears the framebuffer before writing a saved image with placement metadata.
+
+    @param metadata Media dimensions, pixel format, placement and playback settings.
+*/
+void
+FrameBufferController::PrepareStoredFrame (
+    const MediaMetadata& metadata
+    )
+{
+    // Full-size crop frames overwrite every pixel. Fit frames must also remove
+    // previous content/overlays from the generated borders before publication.
+    if (metadata.width != LOGICAL_IMAGE_WIDTH || metadata.height != LOGICAL_IMAGE_HEIGHT) {
+        std::memset(m_frameBuffer, 0, FRAME_BUFFER_SIZE_BYTES);
+    }
+} // PrepareStoredFrame

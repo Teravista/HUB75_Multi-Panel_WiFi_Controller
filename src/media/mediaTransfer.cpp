@@ -2,7 +2,7 @@
 #include "config/include/storageConfig.hpp"
 
 /**
-    Validates a full-panel raw or indexed JPEG video against frame-rate and FAT32 limits.
+    Validates a placed raw or indexed JPEG video against frame-rate and FAT32 limits.
 
     Validates the descriptor before admitting any filesystem transaction. The file
     size includes its checked header and one CRC record per raw frame.
@@ -24,7 +24,7 @@ MediaTransfer::IsSupportedVideo (
     uint64_t payload;
 
     if (!metadata.PayloadBytes(payload) || metadata.type != MediaType::Video ||
-        metadata.width != width || metadata.height != height ||
+        !metadata.FitsPanel(width, height) ||
         metadata.fpsNumerator < metadata.fpsDenominator ||
         uint64_t(metadata.fpsNumerator) > uint64_t(MaximumFps) * metadata.fpsDenominator) {
         return false;

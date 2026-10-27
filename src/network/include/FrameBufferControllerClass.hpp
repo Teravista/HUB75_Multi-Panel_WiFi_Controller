@@ -86,10 +86,16 @@ public:
     // Clears the availability of the current saved frame.
     void ClearStoredFrame(void);
 
-    // Maps a stored raw frame fragment into the CPU framebuffer.
-    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset, PixelFormat format = PixelFormat::RGB888);
+    // Maps a stored pixel fragment into the placed CPU framebuffer region.
+    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset, PixelFormat format = PixelFormat::RGB888, uint16_t width = LOGICAL_IMAGE_WIDTH, uint16_t height = LOGICAL_IMAGE_HEIGHT, uint16_t left = MediaMetadata::AutoOffset, uint16_t top = MediaMetadata::AutoOffset);
+
+    // Clears the framebuffer before writing a saved image with placement metadata.
+    void PrepareStoredFrame(const MediaMetadata& metadata);
 
 private:
+    // Converts stored pixels and places them in the CPU framebuffer.
+    template <PixelFormat Format> static bool MapStoredPixels(DisplayHelpers& helpers, uint8_t* buffer, const uint8_t* bytes, size_t count, size_t offset, uint16_t width, uint16_t height, uint16_t left, uint16_t top);
+
     // Returns elapsed boot time in milliseconds for transport deadlines.
     static uint32_t GetPhotoUploadTimeMs(void);
 

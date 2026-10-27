@@ -1,25 +1,24 @@
 # Media metadata
 
-`MediaMetadata` describes logical pixels before panel mapping: type, dimensions,
-format, frame count and rational FPS. It owns no pixels. It describes RGB888/RGB565 and indexed JPEG photos and videos
-while preserving the original raw TCP photo upload format.
+`MediaMetadata` describes logical pixels before panel mapping: type, dimensions, format,
+frame count and rational FPS. It owns no pixels. It describes RGB888/RGB565 and indexed
+JPEG photos and videos while preserving the original raw TCP photo upload format.
 
 | Field | Photo | Video descriptor |
 | --- | --- | --- |
 | Type | `Photo` (1) | `Video` (2) |
 | Format | `RGB888` (1), `RGB565` (2), `JPEG` (3) | `RGB888` (1), `RGB565` (2), `JPEG` (3) |
-| Dimensions | 128 × 256 for current photo APIs | Positive width and height |
+| Dimensions | Within 128 × 256 for library photos | Positive width and height |
 | Frames | 1 | Positive frame count |
 | FPS | 0/1 | Positive numerator and denominator |
 | Payload bytes | Raw frame size or indexed JPEG size | Raw frame size × frames or indexed JPEG size |
 
-A one-frame video still needs a positive frame rate. Fractional rates such as
-30000/1001 do not require floating point. Unknown types/formats, empty fields,
-inconsistent photo timing and payload overflow are rejected. The descriptor
-describes all library formats. Legacy named/retained photo APIs and raw TCP photo
-uploads accept full-panel RGB888; library photo APIs also accept RGB565 and JPEG.
-Video uses a separate TCP listener and checked record container; see
-[video upload and playback](VIDEO-UPLOAD.md).
+A one-frame video still needs a positive frame rate. Fractional rates such as 30000/1001
+do not require floating point. Unknown types/formats, empty fields, inconsistent photo
+timing and payload overflow are rejected. The descriptor describes all library formats.
+Legacy named/retained photo APIs and raw TCP photo uploads accept full-panel RGB888;
+library photo APIs also accept RGB565 and JPEG. Video uses a separate TCP listener and
+checked record container; see [video upload and playback](VIDEO-UPLOAD.md).
 
 ## API
 
@@ -32,15 +31,15 @@ memory.ReadLastImage(consumePixels, &destination, &restored);
 memory.ReadImage("FRAME.RGB", consumePixels, &destination, &restored);
 ```
 
-Check boolean results. Metadata outputs change only after a successful complete
-read. Pixel fragments remain provisional until CRC and close succeed. Existing
-calls without metadata still work. `FrameBufferController::GetFrameMetadata()`
-returns the current completed descriptor under render ownership. The explicit
-`BeginFrame(bytes, metadata)` overload validates the photo before claiming it;
-metadata is published together with a completed frame.
+Check boolean results. Metadata outputs change only after a successful complete read.
+Pixel fragments remain provisional until CRC and close succeed. Existing calls without
+metadata still work. `FrameBufferController::GetFrameMetadata()` returns the current
+completed descriptor under render ownership. The explicit `BeginFrame(bytes, metadata)`
+overload validates the photo before claiming it; metadata is published together with a
+completed frame.
 
-TCP photo uploads still contain only the original 98,304 RGB bytes and receive
-their descriptor automatically. Do not prepend a descriptor to this endpoint.
+Raw TCP photo uploads contain exactly 98,304 RGB bytes and receive their descriptor
+automatically. Do not prepend a descriptor to this endpoint.
 
 ## Descriptor layout, versions 1 and 2
 
@@ -62,13 +61,13 @@ little-endian. Never transmit `sizeof(MediaMetadata)` structure bytes.
 | 24 | 8 | Calculated raw payload length or exact indexed JPEG size |
 
 `MediaMetadataCodec::EncodeMediaDescriptor` validates before writing.
-`DecodeMediaDescriptor` checks version, reserved flag bits and calculated length
-before publishing its output. Neither operation reads image pixels.
+`DecodeMediaDescriptor` checks version, reserved flag bits and calculated length before
+publishing its output. Neither operation reads image pixels.
 
 ## Photo container, version 3
 
-Named images and alternating `LASTA.H75` / `LASTB.H75` saves now use a 52-byte
-header followed by the unchanged RGB888 photo payload (98,356 bytes total).
+Named images and alternating `LASTA.H75` / `LASTB.H75` saves use a 52-byte header
+followed by the RGB888 photo payload (98,356 bytes total).
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
@@ -81,39 +80,59 @@ header followed by the unchanged RGB888 photo payload (98,356 bytes total).
 | 44 | 4 | Pixel payload CRC32 |
 | 48 | 4 | CRC32 of header bytes 0–47 |
 
-CRC-32/ISO-HDLC uses initial state 0xffffffff, reflected polynomial 0xedb88320
-and final inversion. Header validation protects metadata and generation before
-any payload reaches the consumer; payload CRC is checked during streaming.
+CRC-32/ISO-HDLC uses initial state 0xffffffff, reflected polynomial 0xedb88320 and final
+inversion. Header validation protects metadata and generation before any payload reaches
+the consumer; payload CRC is checked during streaming.
 
-Legacy `H75I` version-1 named files and `H75L` version-2 alternating saves still
-load. The reader supplies their known photo/RGB888/one-frame/FPS-0/1 metadata
-without rewriting them. Mixed old/new saved slots retain generation ordering,
-including counter rollover. Legacy named/retained saves write version 3; no card conversion is
-needed. Earlier firmware cannot read the new version-3 files after a downgrade.
+Legacy `H75I` version-1 named files and `H75L` version-2 alternating saves still load.
+The reader supplies their known photo/RGB888/one-frame/FPS-0/1 metadata without
+rewriting them. Slots with different supported container versions retain generation
+ordering, including counter rollover. Named/retained saves write version 3. Readers that
+only support versions 1/2 cannot load version-3 files.
 
 ## Raw video
 
-Video descriptors permit ping-pong looping; photos must leave the flag false.
-The video receiver accepts full-panel RGB888, RGB565 or indexed JPEG at 1–60 FPS
-and a total stored file below 4 GiB. Legacy photo APIs remain single-frame RGB888;
-independent library photos also support RGB565 and JPEG. See the
-[video guide](VIDEO-UPLOAD.md) for the separate request and version-4 SD layout.
+Video descriptors permit ping-pong looping; photos must leave the flag false. The video
+receiver accepts panel-sized or smaller RGB888, RGB565 or indexed JPEG at 1–60 FPS and a
+total stored file below 4 GiB. Legacy photo APIs remain single-frame RGB888; independent
+library photos also support RGB565 and JPEG. See the [video guide](VIDEO-UPLOAD.md) for
+the separate request and version-4 SD layout.
 
 RGB565 uses little-endian R5G6B5 words. JPEG has no fixed raw frame stride;
-`encodedBytes` describes its index plus records and `FrameBytes()` returns zero.
-See [JPEG layout and bounded decoder memory](JPEG-VIDEO.md).
+`encodedBytes` describes its index plus records and `FrameBytes()` returns zero. See
+[JPEG layout and bounded decoder memory](JPEG-VIDEO.md).
 
 ## Library containers
 
-Independent photo/video items extend the common checked media header with names,
-photo thumbnails or a video duration setting. See [saved media library](PHOTO-LIBRARY.md)
-for container versions, pagination and persistent selections.
+Independent photo/video items extend the common checked media header with names, photo
+thumbnails or a video duration setting. See [saved media library](MEDIA-LIBRARY.md) for
+container versions, pagination and persistent selections.
 
 ## JPEG encoder quality, descriptor version 3
 
-JPEG descriptors can retain their encoder quality in byte 7, bits 1–7; bit 0
-remains the ping-pong flag. Quality 1–95 is recorded with each item. Zero means
-unknown, including older JPEG saves, and encoding unknown quality retains
-version 2. Raw descriptors remain version 1 and reject nonzero JPEG quality.
-The descriptor stays 32 bytes, and existing container/header CRCs also protect
-the saved quality field. Pixel data is unaffected by this metadata extension.
+JPEG descriptors can retain their encoder quality in byte 7, bits 1–7; bit 0 remains the
+ping-pong flag. Quality 1–95 is recorded with each item. Zero means unknown, including
+older JPEG saves, and encoding unknown quality retains version 2. Raw descriptors remain
+version 1 and reject nonzero JPEG quality. The descriptor stays 32 bytes, and existing
+container/header CRCs also protect the saved quality field. Pixel data is unaffected by
+this metadata extension.
+
+## Placement, descriptor version 4
+
+`width` and `height` describe the stored rectangle. `offsetX` and `offsetY` locate its
+top-left corner within the panel; both `AutoOffset` values select centering. Mixed
+automatic/explicit offsets and rectangles extending beyond the panel are rejected.
+Payload size uses the rectangle, excluding generated black borders.
+
+Version 4 retains the 32-byte layout and packs placement into the size words:
+
+| Offset | Encoding |
+| ---: | --- |
+| 8 | `(width - 1) \| (left << 7)`; bits 14–15 reserved zero |
+| 10 | `(height - 1) \| (top << 8)` |
+
+Width is 1–128, height 1–256, and offsets must keep the rectangle inside the panel. Byte
+7 retains ping-pong and JPEG quality. Earlier descriptor versions use ordinary
+dimensions with centered placement; centered browser uploads keep those compatible
+versions. The C++ codec uses version 4 for explicit offsets. Container versions and
+their existing header/payload checksums are unchanged.

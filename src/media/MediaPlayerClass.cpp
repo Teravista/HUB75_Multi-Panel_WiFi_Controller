@@ -100,7 +100,7 @@ MediaPlayer::Restore (
         } else if (!memory_.OpenLastMedia(metadata_)) {
             break;
         }
-        if (memory_.ReadMediaFrame(0, Consume, this)) {
+        if (ReadFrame(0)) {
             upload_.PublishStoredFrame(metadata_);
             active_ = metadata_.type == MediaType::Video;
             epochMs_ = nowMs;
@@ -161,7 +161,7 @@ MediaPlayer::Update (
     if (frame == lastFrame_) {
         return false;
     }
-    if (!memory_.ReadMediaFrame(frame, Consume, this)) {
+    if (!ReadFrame(frame)) {
         return Restore(nowMs);
     }
     upload_.PublishStoredFrame(metadata_);
@@ -199,7 +199,8 @@ MediaPlayer::Consume (
     if (player->metadata_.pixelFormat == PixelFormat::RGB565) {
         format = PixelFormat::RGB565;
     }
-    return player->upload_.WriteStoredFramePixels(bytes, count, offset, format);
+    return player->upload_.WriteStoredFramePixels(bytes, count, offset, format, player->metadata_.width,
+                                                 player->metadata_.height, player->metadata_.offsetX, player->metadata_.offsetY);
 } // Consume
 
 /**
@@ -357,9 +358,30 @@ MediaPlayer::ShowLibraryPhoto (
     )
 {
     Stop();
-    if (!memory_.OpenLibraryPhoto(id, metadata_) || !memory_.ReadMediaFrame(0, Consume, this)) {
+    if (!memory_.OpenLibraryPhoto(id, metadata_) || !ReadFrame(0)) {
+        upload_.ClearStoredFrame();
         return false;
     }
     upload_.PublishStoredFrame(metadata_);
     return true;
 } // ShowLibraryPhoto
+
+/**
+    Reads one checked frame after clearing any generated black borders.
+
+    The caller holds render ownership. A reduced stored rectangle contains no border
+    pixels; those are regenerated locally before the stored data is mapped.
+
+    @param frame Zero-based stored frame to read.
+
+    @return true - The complete frame and its checksum were accepted.
+    @return false - Reading, decoding, mapping or checksum verification failed.
+*/
+bool
+MediaPlayer::ReadFrame (
+    uint32_t frame
+    )
+{
+    upload_.PrepareStoredFrame(metadata_);
+    return memory_.ReadMediaFrame(frame, Consume, this);
+} // ReadFrame
