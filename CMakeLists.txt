@@ -152,6 +152,7 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaTransfer.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaPlayerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaLibraryClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/media/JsonWriterClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/TcpVideoUploadClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/wifiNetwork.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp

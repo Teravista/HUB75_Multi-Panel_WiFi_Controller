@@ -5,8 +5,22 @@
 #include <cstdio>
 #include <cstring>
 
+#define HTTP_OP_DISPLAY_SETTINGS_SET 21
+#define HTTP_OP_MEMORY_STATUS 23
+#define HTTP_OP_PHOTOS_LIST 10
+#define HTTP_OP_PHOTO_DELETE 13
+#define HTTP_OP_PHOTO_PREVIEW 14
+#define HTTP_OP_PHOTO_SHOW 11
+#define HTTP_OP_PLAYBACK_STATUS 15
+#define HTTP_OP_SLIDESHOW_SET 12
+#define HTTP_OP_UPLOAD_PHOTO_BEGIN 5
+#define HTTP_OP_VIDEOS_LIST 16
+#define HTTP_OP_VIDEO_DELETE 18
+#define HTTP_OP_VIDEO_PREVIEW 19
+#define HTTP_OP_VIDEO_SHOW 17
+
 /**
-    Binds browser video uploads to storage and framebuffer ownership.
+    Binds browser media uploads to storage and framebuffer ownership.
 
     @param memory SD storage manager used for verified video saves.
     @param upload Shared framebuffer controller used to exclude competing uploads.
@@ -33,7 +47,7 @@ HttpMediaUpload::GetUploadTimeMs (
 } // GetUploadTimeMs
 
 /**
-    Connects completed browser videos to the saved-media library.
+    Connects completed browser uploads to the saved-media library.
 
     @param library Saved-media controller; null selects retained-generation compatibility.
 */
@@ -62,8 +76,12 @@ HttpMediaUpload::Finish (
     const char* error
     )
 {
-    if (state == State::Saved && library_ && videoId_) {
-        if (!library_->NotifyVideoSaved(videoId_)) {
+    if (state == State::Saved && library_) {
+        if (photoUpload_) {
+            if (!library_->NotifyPhotoSaved(photoId_)) {
+                warning_ = "Photo saved; selection settings could not be saved.";
+            }
+        } else if (videoId_ && !library_->NotifyVideoSaved(videoId_)) {
             warning_ = "Video saved; selection settings could not be saved.";
         }
     }
@@ -99,21 +117,15 @@ HttpMediaUpload::Respond (
         message = requestError;
     }
     std::snprintf(response_, sizeof(response_),
-                  "{\"id\":%lu,\"state\":\"%s\",\"offset\":%llu,\"total\":%llu,\"videoId\":%lu,\"error\":\"%s\",\"warning\":\"%s\"}",
+                  "{\"id\":%lu,\"state\":\"%s\",\"offset\":%llu,\"total\":%llu,\"videoId\":%lu,\"photoId\":%lu,\"error\":\"%s\",\"warning\":\"%s\"}",
                   static_cast<unsigned long>(session_), names[unsigned(state_)],
                   static_cast<unsigned long long>(offset_), static_cast<unsigned long long>(total_),
-                  static_cast<unsigned long>(videoId_), message, warning_);
-    if (networkActive_) {
-        cyw43_arch_lwip_begin();
-    }
-    responseReady_ = true;
-    if (networkActive_) {
-        cyw43_arch_lwip_end();
-    }
+                  static_cast<unsigned long>(videoId_), static_cast<unsigned long>(photoId_), message, warning_);
+    PublishResponse();
 } // Respond
 
 /**
-    Advances queued browser video requests and incremental SD verification.
+    Advances browser media commands and incremental SD verification.
 
     Callbacks fill one bounded message and retain its buffer. The foreground claims
     that message under the lwIP lock, then validates session IDs and confirmed byte
@@ -139,6 +151,7 @@ HttpMediaUpload::Update (
     size_t count;
     size_t expectedHeader;
     bool named;
+    bool photo;
     bool opened;
     MediaMetadata metadata;
     uint32_t checksum;
@@ -187,12 +200,21 @@ HttpMediaUpload::Update (
         requestedOffset = MediaMetadataCodec::ReadUnsigned32LittleEndian(input_ + HTTP_ENVELOPE_OFFSET_FIELD);
         count = bytes_ - EnvelopeBytes;
 
+        // Stateless controls share the mailbox but never become an upload session.
+        if (HandleLibraryRequest(operation, id, requestedOffset, count)) {
+            return;
+        }
+
         // Start only after both descriptor validation and exclusive display admission succeed.
-        if (operation == HTTP_OP_UPLOAD_VIDEO_BEGIN || operation == HTTP_OP_UPLOAD_NAMED_VIDEO_BEGIN) {
+        if (operation == HTTP_OP_UPLOAD_VIDEO_BEGIN || operation == HTTP_OP_UPLOAD_NAMED_VIDEO_BEGIN ||
+            operation == HTTP_OP_UPLOAD_PHOTO_BEGIN) {
             named = operation == HTTP_OP_UPLOAD_NAMED_VIDEO_BEGIN;
+            photo = operation == HTTP_OP_UPLOAD_PHOTO_BEGIN;
             expectedHeader = MediaTransfer::RequestBytes;
             if (named) {
                 expectedHeader += MemoryManager::PhotoNameBytes + sizeof(uint32_t);
+            } else if (photo) {
+                expectedHeader += MemoryManager::PhotoNameBytes + MemoryManager::ThumbnailBytes;
             }
             maxMillis = 0;
             if (named && count == expectedHeader) {
@@ -202,7 +224,8 @@ HttpMediaUpload::Update (
             if (id || requestedOffset || count != expectedHeader ||
                 (named && (!library_ || maxMillis < MIN_VIDEO_DURATION_MS || maxMillis > MAX_VIDEO_DURATION_MS)) ||
                 !MediaMetadataCodec::DecodeMediaDescriptor(input_ + EnvelopeBytes, MediaMetadataCodec::HeaderBytes, metadata) ||
-                !MediaTransfer::IsSupportedVideo(metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) {
+                (!photo && !MediaTransfer::IsSupportedVideo(metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) ||
+                (photo && (!library_ || !metadata.IsPhotoWithin(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)))) {
                 Respond("invalid metadata");
                 return;
             }
@@ -216,6 +239,8 @@ HttpMediaUpload::Update (
                 ++session_;
             }
             videoId_ = 0;
+            photoId_ = 0;
+            photoUpload_ = photo;
             offset_ = 0;
             metadata.PayloadBytes(total_);
             error_ = "";
@@ -223,10 +248,13 @@ HttpMediaUpload::Update (
             checksum = MediaMetadataCodec::ReadUnsigned32LittleEndian(
                 input_ + EnvelopeBytes + MediaMetadataCodec::HeaderBytes);
             name = "Video upload";
-            if (named) {
+            if (named || photo) {
                 name = reinterpret_cast<const char*>(input_ + EnvelopeBytes + MediaTransfer::RequestBytes);
             }
-            if (library_) {
+            if (photo) {
+                opened = memory_.BeginLibraryPhoto(metadata, checksum, name,
+                    input_ + EnvelopeBytes + MediaTransfer::RequestBytes + MemoryManager::PhotoNameBytes, photoId_);
+            } else if (library_) {
                 opened = memory_.BeginLibraryVideo(metadata, checksum, name, maxMillis, videoId_);
             } else {
                 opened = memory_.BeginMediaSave(metadata, checksum);
@@ -409,3 +437,121 @@ HttpMediaUpload::TakeReloadRequest (
     reload_ = false;
     return requested;
 } // TakeReloadRequest
+
+/**
+    Handles foreground library queries and saved display controls.
+
+    Read-only display status uses cached state. Directory queries, previews and control
+    changes run only while no upload owns storage. Successful response builders borrow
+    the retained output buffer until the transport closes; errors publish a protocol
+    response instead of leaving the request waiting indefinitely.
+
+    @param operation Binary mailbox operation code.
+    @param id Library ID or first control value.
+    @param offset Page cursor, slideshow interval or second control value.
+    @param count Number of body bytes after the envelope.
+
+    @return true - The operation is a recognized library command and a response was prepared.
+    @return false - The operation belongs to the upload protocol or is unsupported here.
+*/
+bool
+HttpMediaUpload::HandleLibraryRequest (
+    uint8_t operation,
+    uint32_t id,
+    uint32_t offset,
+    size_t count
+    )
+{
+    bool handled;
+    bool success;
+
+    handled = (operation >= HTTP_OP_PHOTOS_LIST && operation <= HTTP_OP_VIDEO_PREVIEW) ||
+              operation == HTTP_OP_DISPLAY_SETTINGS_SET || operation == HTTP_OP_MEMORY_STATUS;
+    if (!handled) {
+        return false;
+    }
+    if (!library_ || count) {
+        Respond("library request unavailable");
+        return true;
+    }
+    if (operation == HTTP_OP_PLAYBACK_STATUS && !id && !offset) {
+        if (library_->PlaybackStatus(response_, sizeof(response_))) {
+            PublishResponse();
+        } else {
+            Respond("display status unavailable");
+        }
+        return true;
+    }
+    if (external_ || memory_.IsMediaSaveActive()) {
+        Respond("library storage busy");
+        return true;
+    }
+
+    // Selection changes defer pixel publication to the normal render-owned library update.
+    success = false;
+    switch (operation) {
+    case HTTP_OP_PHOTOS_LIST:
+        success = !id && library_->Overview(response_, sizeof(response_), offset);
+        break;
+    case HTTP_OP_PHOTO_SHOW:
+        success = !offset && library_->Select(id) && library_->Overview(response_, sizeof(response_));
+        break;
+    case HTTP_OP_SLIDESHOW_SET:
+        success = id <= 1 && library_->SetSlideshow(id != 0, offset) && library_->Overview(response_, sizeof(response_));
+        break;
+    case HTTP_OP_PHOTO_DELETE:
+        success = !offset && library_->Remove(id) && library_->Overview(response_, sizeof(response_));
+        break;
+    case HTTP_OP_PHOTO_PREVIEW:
+        success = !offset && library_->Thumbnail(id, response_, sizeof(response_), false);
+        break;
+    case HTTP_OP_VIDEOS_LIST:
+        success = !id && library_->VideoOverview(response_, sizeof(response_), offset);
+        break;
+    case HTTP_OP_VIDEO_SHOW:
+        success = !offset && library_->SelectVideo(id) && library_->VideoOverview(response_, sizeof(response_));
+        break;
+    case HTTP_OP_VIDEO_DELETE:
+        success = !offset && library_->RemoveVideo(id) && library_->VideoOverview(response_, sizeof(response_));
+        break;
+    case HTTP_OP_VIDEO_PREVIEW:
+        success = !offset && library_->Thumbnail(id, response_, sizeof(response_), true);
+        break;
+    case HTTP_OP_DISPLAY_SETTINGS_SET:
+        success = library_->SetDisplaySettings(id, offset, GetUploadTimeMs()) &&
+                  library_->PlaybackStatus(response_, sizeof(response_));
+        break;
+    case HTTP_OP_MEMORY_STATUS:
+        success = !id && !offset && library_->MemoryStatus(response_, sizeof(response_));
+        break;
+    default:
+        break;
+    }
+    if (success) {
+        PublishResponse();
+    } else {
+        Respond("library operation failed or storage unavailable");
+    }
+    return true;
+} // HandleLibraryRequest
+
+
+/**
+    Publishes a completed bounded response to the HTTP transport.
+
+    The caller finishes formatting outside lwIP; only the readiness flag changes
+    under the network lock so response bytes remain stable for later transmission.
+*/
+void
+HttpMediaUpload::PublishResponse (
+    void
+    )
+{
+    if (networkActive_) {
+        cyw43_arch_lwip_begin();
+    }
+    responseReady_ = true;
+    if (networkActive_) {
+        cyw43_arch_lwip_end();
+    }
+} // PublishResponse

@@ -56,6 +56,9 @@ public:
     bool ShowLibraryPhoto(uint32_t id);
 
 private:
+    // Reads one checked frame after clearing any generated black borders.
+    bool ReadFrame(uint32_t frame);
+
     // Advances the playback index using loop or ping-pong direction.
     uint64_t PlaybackStep(uint32_t nowMs) const;
 

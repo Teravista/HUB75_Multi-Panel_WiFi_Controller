@@ -5,7 +5,7 @@
 #include "media/include/MediaLibraryClass.hpp"
 
 /**
-    Coordinates browser video transfer, verified SD publication and playback ownership.
+    Coordinates browser media transfers, saved-library controls and playback ownership.
 
     The HTTP transport owns sockets and fills one bounded request buffer. Foreground
     updates perform all storage operations, retain the upload session and confirmed
@@ -19,13 +19,13 @@ public:
     static constexpr size_t Capacity = EnvelopeBytes + MediaTransfer::BulkChunkBytes;
     static constexpr uint32_t ReceiveIdleMs = MediaTransfer::ReceiveIdleMs;
 
-    // Binds browser video uploads to storage and framebuffer ownership.
+    // Binds browser media uploads to storage and framebuffer ownership.
     HttpMediaUpload(MemoryManager& memory, FrameBufferController& upload);
 
-    // Connects completed browser videos to the saved-media library.
+    // Connects completed browser uploads to the saved-media library.
     void SetMediaLibrary(MediaLibrary* library);
 
-    // Advances queued browser video requests and incremental SD verification.
+    // Advances browser media commands and incremental SD verification.
     void Update(bool networkActive = true);
 
     // Claims the bounded HTTP request buffer when it is available.
@@ -56,6 +56,12 @@ public:
     bool TakeReloadRequest(void);
 
 private:
+    // Handles foreground library queries and saved display controls.
+    bool HandleLibraryRequest(uint8_t operation, uint32_t id, uint32_t offset, size_t count);
+
+    // Publishes a completed bounded response to the HTTP transport.
+    void PublishResponse(void);
+
     enum class State { Idle, Receiving, Verifying, Saved, Error, Canceled };
 
     // Returns elapsed boot time in milliseconds for upload deadlines.
@@ -76,6 +82,8 @@ private:
     uint32_t session_ = 0;
     uint32_t progress_ = 0;
     uint32_t videoId_ = 0;
+    uint32_t photoId_ = 0;
+    bool photoUpload_ = false;
     uint64_t offset_ = 0;
     uint64_t total_ = 0;
     State state_ = State::Idle;

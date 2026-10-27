@@ -1,4 +1,5 @@
 #pragma once
+#include "media/include/JsonWriterClass.hpp"
 #include "sd/include/MemoryManagerClass.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "media/include/MediaPlayerClass.hpp"
@@ -92,7 +93,25 @@ public:
     // Returns the active built-in, photo, slideshow, or video mode name.
     const char* ActiveMode(void) const;
 
+    // Formats one page of saved videos and their metadata as JSON.
+    bool VideoOverview(char* json, size_t capacity, uint32_t after = 0);
+
+    // Formats one page of saved photos and their metadata as JSON.
+    bool Overview(char* json, size_t capacity, uint32_t after = 0);
+
+    // Returns a saved media preview as a JSON pixel response.
+    bool Thumbnail(uint32_t id, char* json, size_t capacity, bool video = false);
+
+    // Formats the current display selection and saved controls as JSON.
+    bool PlaybackStatus(char* json, size_t capacity) const;
+
+    // Formats managed SD storage capacity and consumption as JSON.
+    bool MemoryStatus(char* json, size_t capacity);
+
 private:
+    // Calculates the saved video duration in milliseconds.
+    static uint64_t CalculateVideoDurationMs(const MediaMetadata& metadata);
+
     MemoryManager& memory_;
     FrameBufferController& upload_;
     MediaPlayer& player_;

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HUB75 photo upload</title>
+<title>HUB75 media library</title>
 <style>
 :root{color-scheme:dark;font:17px system-ui,sans-serif;background:#111827;color:#f9fafb}
 body{max-width:480px;margin:0 auto;padding:24px}h1{font-size:1.7rem}h2{font-size:1.25rem}
@@ -17,17 +17,28 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 .check{display:flex;align-items:center;gap:10px}.check input{width:auto}
 .secondary{background:#374151;color:#f9fafb}progress{width:100%;height:12px}
 #video-source{display:block;width:128px;height:256px;object-fit:cover;margin:24px auto;background:#000}
+.preview-editor{position:relative;width:256px;max-width:100%;aspect-ratio:1/2;margin:24px auto;outline:1px solid #64748b}.preview-editor canvas{width:100%;height:100%;margin:0;border:0}.content-outline{position:absolute;border:1px solid #ef4444;box-sizing:border-box;pointer-events:none}.preview-editor[data-draggable=true] canvas{cursor:grab;touch-action:none}.drag-hint{font-size:.8rem;text-align:center}.tabs{display:flex;gap:8px;margin:0 0 24px}.tabs button{flex:1;width:auto;margin:0;padding:12px 6px;background:#1f2937;color:#cbd5e1;border:1px solid #475569}.tabs button[aria-selected=true]{background:#38bdf8;color:#082f49}.summary-box,.photo-card{padding:16px;border:1px solid #475569;border-radius:12px;background:#1f2937}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.photo-card{padding:12px;min-width:0}.photo-card h3{font-size:1rem;overflow-wrap:anywhere}.photo-card p{font-size:.8rem}.photo-card canvas{width:64px;height:128px;margin:8px auto;image-rendering:pixelated}.photo-card button{padding:10px;margin-top:8px}.photo-card.showing{border-color:#38bdf8}.library-actions{display:flex;align-items:center;gap:10px}.library-actions button{padding:10px}.summary-box p{overflow-wrap:anywhere}
 </style>
 </head>
 <body>
 <h1>HUB75</h1>
+<nav class="tabs" role="tablist" aria-label="Media sections"><button id="tab-summary" type="button" role="tab" aria-controls="panel-summary" aria-selected="true">Summary</button><button id="tab-photos" type="button" role="tab" aria-controls="panel-photos" aria-selected="false" tabindex="-1">Photos</button><button id="tab-videos" type="button" role="tab" aria-controls="panel-videos" aria-selected="false" tabindex="-1">Videos</button></nav>
+<div id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
+<div class="summary-box"><p>Active mode on panel</p><strong id="active-mode">Checking…</strong><p id="active-mode-detail"></p></div>
+<section><h2>Display settings</h2><label for="playback-max-fps">Maximum video FPS</label><input id="playback-max-fps" type="number" min="1" max="60" step="1" placeholder="Use video FPS"><label for="panel-brightness">Brightness %</label><input id="panel-brightness" type="number" min="0" max="100" step="1" value="80"><button id="display-settings-save" type="button">Apply settings</button></section>
+<section><h2>Storage</h2><p id="storage-usage">Checking…</p><p id="storage-capacity"></p></section><button id="summary-refresh" class="secondary" type="button">Refresh summary</button><p id="summary-status" role="status" aria-live="polite"></p></div>
+<div id="panel-photos" role="tabpanel" aria-labelledby="tab-photos" hidden>
 <h2>Upload a photo</h2>
 <label for="photo">Photo</label>
 <input id="photo" type="file" accept="image/*">
-<canvas id="preview" width="128" height="256" aria-label="Photo preview" hidden></canvas>
+<label for="photo-name">Photo name</label><input id="photo-name" type="text" maxlength="63" placeholder="Use filename">
+<div class="options"><div><label for="photo-format">Photo format</label><select id="photo-format"><option value="rgb565">RGB565</option><option value="jpeg">JPEG</option><option value="rgb888">RGB888</option></select></div><div><label for="photo-jpeg-quality">JPEG quality</label><input id="photo-jpeg-quality" type="number" min="1" max="95" value="85" disabled></div></div>
+<div class="options"><div><label for="photo-sizing">Sizing</label><select id="photo-sizing"><option value="crop">Fill / crop</option><option value="fit">Fit</option><option value="manual">Manual zoom</option></select></div><div><label for="photo-zoom">Zoom %</label><input id="photo-zoom" type="number" min="1" max="500" step="1" value="100" disabled></div></div>
+<div id="photo-editor" class="preview-editor"><canvas id="preview" tabindex="0" width="128" height="256" aria-label="Photo preview" hidden></canvas><div id="photo-outline" class="content-outline" hidden></div></div><p id="photo-drag-hint" class="drag-hint"></p>
 <button id="upload" type="button" disabled>Save and show photo</button>
 <p id="status" role="status" aria-live="polite">Choose a photo.</p>
-<section>
+<section><h2>Saved photos</h2><label class="check" for="slideshow-enabled"><input id="slideshow-enabled" type="checkbox">Slideshow</label><label for="slideshow-minutes">Change every (minutes)</label><input id="slideshow-minutes" type="number" min="0.1" max="1440" step="0.1" value="1"><button id="slideshow-save" type="button">Apply slideshow</button><p id="photo-library-count"></p><div id="photo-library" class="photo-grid"></div><div class="library-actions"><button id="photo-previous" class="secondary" type="button" disabled>Previous</button><span id="photo-page">1</span><button id="photo-next" class="secondary" type="button" disabled>Next</button></div><button id="photo-refresh" class="secondary" type="button">Refresh library</button><p id="photo-library-status" role="status" aria-live="polite"></p></section>
+</div><div id="panel-videos" role="tabpanel" aria-labelledby="tab-videos" hidden><section>
 <h2>Upload a video</h2>
 <label for="video-file">Video</label><input id="video-file" type="file" accept="video/*">
 <label for="video-name">Video name</label><input id="video-name" type="text" maxlength="63" placeholder="Use filename">
@@ -36,13 +47,310 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 <div><label for="video-format">Format</label><select id="video-format"><option value="rgb565">RGB565</option><option value="jpeg">JPEG</option><option value="rgb888">RGB888</option></select></div>
 <div><label for="jpeg-quality">JPEG quality</label><input id="jpeg-quality" type="number" min="1" max="95" step="1" value="85" disabled></div></div>
 <label class="check" for="video-pingpong"><input id="video-pingpong" type="checkbox">Ping-pong</label>
-<video id="video-source" controls muted playsinline preload="metadata" hidden></video>
+<div class="options"><div><label for="video-sizing">Sizing</label><select id="video-sizing"><option value="crop">Fill / crop</option><option value="fit">Fit</option><option value="manual">Manual zoom</option></select></div><div><label for="video-zoom">Zoom %</label><input id="video-zoom" type="number" min="1" max="500" step="1" value="100" disabled></div></div>
+<video id="video-source" muted playsinline preload="metadata" hidden></video><div id="video-editor" class="preview-editor"><canvas id="video-preview" tabindex="0" width="128" height="256" aria-label="Video preview"></canvas><div id="video-outline" class="content-outline" hidden></div></div><p id="video-drag-hint" class="drag-hint"></p>
 <progress id="video-progress" max="100" value="0" aria-label="Video preparation and upload progress"></progress>
 <button id="video-send" type="button" disabled>Upload video</button><button id="video-cancel" class="secondary" type="button" disabled>Cancel</button>
 <p id="video-status" role="status" aria-live="polite">Choose a video.</p>
 </section>
+<section><h2>Saved videos</h2><p id="video-library-count"></p><div id="video-library" class="photo-grid"></div><div class="library-actions"><button id="video-previous" class="secondary" type="button" disabled>Previous</button><span id="video-page">1</span><button id="video-next" class="secondary" type="button" disabled>Next</button></div><button id="video-refresh" class="secondary" type="button">Refresh library</button><p id="video-library-status" role="status" aria-live="polite"></p></section></div>
 <script>
 'use strict';
+
+/**
+    Calculates scaled image size and placement for crop, fit, or manual zoom.
+
+    Full scaled bounds may extend off-screen. Store only their visible intersection.
+
+    @param width Image width in pixels.
+    @param height Image height in pixels.
+    @param sizing Placement mode: crop, fit or manual zoom.
+    @param zoom Manual zoom percentage, from 1 to 500.
+    @param position Normalized horizontal and vertical placement, each from 0 to 1.
+
+    @return value - Scaled image bounds and allowed placement ranges in logical panel pixels.
+*/
+function calculateMediaGeometry(width, height, sizing = 'crop', zoom = 100, position = {
+  x: .5,
+  y: .5
+}) {
+  if (!['crop', 'fit', 'manual'].includes(sizing) || !width || !height) {
+    throw new Error('Invalid sizing.');
+  }
+  if (sizing === 'manual' && (!Number.isFinite(zoom) || zoom < 1 || zoom > 500)) {
+    throw new Error('Choose zoom from 1 to 500%.');
+  }
+  let baseScale;
+  if (sizing === 'crop') {
+    baseScale = Math.max(WIDTH / width, HEIGHT / height);
+  } else {
+    baseScale = Math.min(WIDTH / width, HEIGHT / height);
+  }
+  let zoomScale;
+  if (sizing === 'manual') {
+    zoomScale = zoom / 100;
+  } else {
+    zoomScale = 1;
+  }
+  const scale = baseScale * zoomScale;
+  const w = Math.max(1, Math.round(width * scale));
+  const h = Math.max(1, Math.round(height * scale));
+  return {
+    width: w,
+    height: h,
+    x: Math.floor((WIDTH - w) * Math.max(0, Math.min(1, position.x)) + 1e-8),
+    y: Math.floor((HEIGHT - h) * Math.max(0, Math.min(1, position.y)) + 1e-8)
+  };
+}
+
+/**
+    Calculates the image region visible inside the panel bounds.
+
+    @param bounds Calculated source-image bounds in logical panel coordinates.
+
+    @return value - Intersection of the positioned image and the logical panel.
+*/
+function calculateVisibleMediaArea(bounds) {
+  const x = Math.max(0, bounds.x);
+  const y = Math.max(0, bounds.y);
+  return {
+    width: Math.min(WIDTH, bounds.x + bounds.width) - x,
+    height: Math.min(HEIGHT, bounds.y + bounds.height) - y,
+    x,
+    y
+  };
+}
+
+/**
+    Returns the stored image region after clipping its placement to the panel.
+
+    @param width Image width in pixels.
+    @param height Image height in pixels.
+    @param sizing Placement mode: crop, fit or manual zoom.
+    @param zoom Manual zoom percentage, from 1 to 500.
+    @param position Normalized horizontal and vertical placement, each from 0 to 1.
+
+    @return value - Visible stored rectangle in logical panel pixels after clipping the
+                    positioned source.
+*/
+function getMediaPlacement(width, height, sizing = 'crop', zoom = 100, position = {
+  x: .5,
+  y: .5
+}) {
+  return calculateVisibleMediaArea(calculateMediaGeometry(width, height, sizing, zoom, position));
+}
+
+/**
+    Draws the positioned source image onto the logical panel canvas.
+
+    @param context 2D canvas drawing context or caller-owned callback state.
+    @param source Loaded image or video element drawn onto the logical panel canvas.
+    @param width Image width in pixels.
+    @param height Image height in pixels.
+    @param sizing Placement mode: crop, fit or manual zoom.
+    @param zoom Manual zoom percentage, from 1 to 500.
+    @param position Normalized horizontal and vertical placement, each from 0 to 1.
+
+    @return value - Visible stored rectangle after drawing the source and clearing the
+                    surrounding black area.
+*/
+function drawPlacedMedia(context, source, width, height, sizing = 'crop', zoom = 100, position = {
+  x: .5,
+  y: .5
+}) {
+  const bounds = calculateMediaGeometry(width, height, sizing, zoom, position);
+  const area = calculateVisibleMediaArea(bounds);
+  context.fillStyle = '#000';
+  context.fillRect(0, 0, WIDTH, HEIGHT);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(
+      source, (area.x - bounds.x) * width / bounds.width, (area.y - bounds.y) * height / bounds.height,
+      area.width * width / bounds.width, area.height * height / bounds.height, area.x, area.y, area.width,
+      area.height);
+  return area;
+}
+
+/**
+    Draws the red boundary separating image data from black panel space.
+
+    @param kind Media category identifying the photo or video editor.
+    @param area Visible stored-pixel rectangle within the logical panel.
+    @param available Whether a valid source preview is available.
+    @param bounds Calculated source-image bounds in logical panel coordinates.
+*/
+function drawMediaBoundary(kind, area, available, bounds = area) {
+  bounds ??= area;
+  const outline = document.getElementById(kind + '-outline');
+  const editor = document.getElementById(kind + '-editor');
+  outline.hidden = !area;
+  if (area) {
+    Object.assign(outline.style, {
+      left: area.x / WIDTH * 100 + '%',
+      top: area.y / HEIGHT * 100 + '%',
+      width: area.width / WIDTH * 100 + '%',
+      height: area.height / HEIGHT * 100 + '%'
+    });
+  }
+  editor.dataset.draggable =
+      String(!!(available && area && bounds && (bounds.width !== WIDTH || bounds.height !== HEIGHT)));
+  if (!area) {
+    document.getElementById(kind + '-drag-hint').textContent = '';
+  } else {
+    if (bounds.width === WIDTH && bounds.height === HEIGHT) {
+      document.getElementById(kind + '-drag-hint').textContent = 'Fills the screen.';
+    } else {
+      if (bounds.width === WIDTH) {
+        document.getElementById(kind + '-drag-hint').textContent = 'Drag vertically.';
+      } else {
+        if (bounds.height === HEIGHT) {
+          document.getElementById(kind + '-drag-hint').textContent = 'Drag horizontally.';
+        } else {
+          document.getElementById(kind + '-drag-hint').textContent = 'Drag to position.';
+        }
+      }
+    }
+  }
+}
+
+/**
+    Lets pointer dragging adjust the source placement in an upload preview.
+
+    @param target Preview element that receives pointer dragging.
+    @param getArea Callback returning the current draggable image bounds.
+    @param isAvailable Callback reporting whether a preview is available.
+    @param move Callback applying the updated normalized drag position.
+*/
+function enableMediaDragging(target, getArea, isAvailable, move) {
+  let drag = null;
+  /**
+      Clamps dragged placement to the available image movement range.
+
+      @param value Value to encode, display or apply.
+      @param space Available travel distance along this placement axis, in pixels.
+
+      @return value - Normalized drag position clamped to the supported travel range.
+  */
+  const clamp = (value, space) => Math.max(Math.min(0, space), Math.min(Math.max(0, space), value));
+  /**
+      Converts pointer coordinates into logical panel coordinates.
+
+      @param event Video event name to wait for.
+
+      @return value - Pointer coordinates converted to logical panel pixels.
+  */
+  const coordinates = event => {
+    const rect = target.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * WIDTH / rect.width,
+      y: (event.clientY - rect.top) * HEIGHT / rect.height
+    };
+  };
+  /**
+      Ends pointer dragging and releases the active pointer capture.
+
+      @param event Video event name to wait for.
+  */
+  const finish = event => {
+    if (!drag || event.pointerId !== drag.id) {
+      return;
+    }
+    drag = null;
+    target.dataset.dragging = 'false';
+    if (target.hasPointerCapture(event.pointerId)) {
+      target.releasePointerCapture(event.pointerId);
+    }
+  };
+  target.addEventListener('pointerdown', event => {
+    if (!isAvailable() || event.isPrimary === false || (event.button !== undefined && event.button !== 0)) {
+      return;
+    }
+    const area = getArea();
+    if (!area || (area.width === WIDTH && area.height === HEIGHT)) {
+      return;
+    }
+    const point = coordinates(event);
+    if (point.x < area.x || point.x > area.x + area.width || point.y < area.y ||
+        point.y > area.y + area.height) {
+      return;
+    }
+    drag = {id: event.pointerId, point, area};
+    target.setPointerCapture(event.pointerId);
+    target.dataset.dragging = 'true';
+    event.preventDefault();
+  });
+  target.addEventListener('pointermove', event => {
+    if (!drag || event.pointerId !== drag.id) {
+      return;
+    }
+    const current = getArea();
+    if (!isAvailable() || !current || current.width !== drag.area.width ||
+        current.height !== drag.area.height) {
+      finish(event);
+      return;
+    }
+    const point = coordinates(event);
+    const area = drag.area;
+    move(
+        clamp(Math.round(area.x + point.x - drag.point.x), WIDTH - area.width),
+        clamp(Math.round(area.y + point.y - drag.point.y), HEIGHT - area.height));
+    event.preventDefault();
+  });
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    target.addEventListener(name, finish);
+  }
+
+  target.addEventListener('keydown', event => {
+    if (!isAvailable()) {
+      return;
+    }
+    const area = getArea();
+    if (!area) {
+      return;
+    }
+    let step;
+    if (event.shiftKey) {
+      step = 10;
+    } else {
+      step = 1;
+    }
+    const delta = {ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [
+                     0, step
+                   ]}[event.key];
+    if (!delta) {
+      return;
+    }
+    const x = clamp(area.x + delta[0], WIDTH - area.width);
+    const y = clamp(area.y + delta[1], HEIGHT - area.height);
+    if (x !== area.x || y !== area.y) {
+      move(x, y);
+      event.preventDefault();
+    }
+  });
+}
+
+/**
+    Copies only the visible stored image region into an encoding canvas.
+
+    @param canvas Canvas receiving prepared or preview pixels.
+    @param area Visible stored-pixel rectangle within the logical panel.
+
+    @return value - Canvas containing only the visible image rectangle to be stored.
+*/
+function createStoredPreviewCanvas(canvas, area) {
+  if (area.width === WIDTH && area.height === HEIGHT) {
+    return canvas;
+  }
+  const stored = document.createElement('canvas');
+  stored.width = area.width;
+  stored.height = area.height;
+  stored.getContext('2d').drawImage(
+      canvas, area.x, area.y, area.width, area.height, 0, 0, area.width, area.height);
+  return stored;
+}
+
+
+
 const WIDTH = 128;
 const HEIGHT = 256;
 const RGBA_CHANNELS = 4;
@@ -57,6 +365,15 @@ let prepared = false;
 let preparing = false;
 let uploading = false;
 let selectionRevision = 0;
+let photoSource = null;
+let photoArea = null;
+let photoGeometry = null;
+let photoPosition = {x: .5, y: .5};
+const photoSizing = document.getElementById('photo-sizing');
+const photoZoom = document.getElementById('photo-zoom');
+const photoFormat = document.getElementById('photo-format');
+const photoQuality = document.getElementById('photo-jpeg-quality');
+const photoName = document.getElementById('photo-name');
 
 /**
     Updates input availability while a photo is prepared or sent.
@@ -66,56 +383,15 @@ let selectionRevision = 0;
 */
 function updatePhotoControls() {
     fileInput.disabled = uploading || videoBusy;
+    for (const control of [photoSizing, photoFormat, photoQuality, photoName]) {
+        control.disabled = uploading || videoBusy;
+    }
+    photoZoom.disabled = uploading || videoBusy || photoSizing.value !== 'manual';
+    photoQuality.disabled = uploading || videoBusy || photoFormat.value !== 'jpeg';
     uploadButton.disabled = !prepared || preparing || uploading || videoBusy;
 }
 
-/**
-    Calculates a centered crop that fills the logical display.
 
-    The larger axis scale covers every panel pixel. The other axis extends beyond
-    the canvas equally at both ends, preserving the source aspect ratio.
-
-    @param width Source image width in pixels.
-    @param height Source image height in pixels.
-
-    @return object - Draw position and dimensions for the centered full-panel crop.
-*/
-function calculatePhotoCrop(width, height) {
-    const scale = Math.max(WIDTH / width, HEIGHT / height);
-    const drawWidth = width * scale;
-    const drawHeight = height * scale;
-
-    return {
-        x: (WIDTH - drawWidth) / 2,
-        y: (HEIGHT - drawHeight) / 2,
-        width: drawWidth,
-        height: drawHeight
-    };
-}
-
-/**
-    Converts browser RGBA pixels to the raw RGB888 photo upload layout.
-
-    Canvas alpha is omitted after compositing the photo onto a black background.
-    The output is one top-to-bottom, left-to-right frame with three bytes per pixel.
-
-    @param rgba Canvas pixel bytes in red, green, blue, alpha order.
-
-    @return Uint8Array - Full-panel RGB888 bytes expected by the Pico receiver.
-*/
-function encodePhotoPixels(rgba) {
-    const pixels = new Uint8Array(WIDTH * HEIGHT * RGB_CHANNELS);
-    let source = 0;
-    let destination = 0;
-
-    while (destination < pixels.length) {
-        pixels[destination++] = rgba[source++];
-        pixels[destination++] = rgba[source++];
-        pixels[destination++] = rgba[source++];
-        source += RGBA_CHANNELS - RGB_CHANNELS;
-    }
-    return pixels;
-}
 
 /**
     Decodes the selected image and prepares the upload preview.
@@ -134,6 +410,9 @@ async function preparePhotoPreview() {
     prepared = false;
     preparing = true;
     preview.hidden = true;
+    photoSource = null;
+    photoArea = null;
+    drawMediaBoundary('photo', null, false);
     updatePhotoControls();
     try {
         if (!file) {
@@ -153,10 +432,9 @@ async function preparePhotoPreview() {
         }
 
         // Composite before extracting bytes so transparent regions display as black.
-        const crop = calculatePhotoCrop(image.naturalWidth, image.naturalHeight);
-        context.fillStyle = '#000';
-        context.fillRect(0, 0, WIDTH, HEIGHT);
-        context.drawImage(image, crop.x, crop.y, crop.width, crop.height);
+        photoSource = image;
+        photoPosition = {x: .5, y: .5};
+        redrawPhoto();
         prepared = true;
         preview.hidden = false;
         statusText.textContent = 'Ready to upload.';
@@ -176,42 +454,64 @@ async function preparePhotoPreview() {
 }
 
 /**
-    Sends the prepared RGB888 photo to the Pico over the local HTTP connection.
+    Uploads a named photo using its selected encoding and saved placement.
 
-    The server acknowledgement confirms complete pixel reception. The foreground
-    firmware then attempts to save the photo through the existing SD library path.
-    A timeout or rejected response unlocks the page for a deliberate retry.
+    Preparation stores only the visible data rectangle and a small legacy thumbnail.
+    The shared media protocol transfers bounded chunks and confirms SD verification
+    before reporting success. Failed or canceled transfers retain earlier photos.
 
-    @return Promise<void> - Completes after displaying reception confirmation or an upload error.
+    @return Promise<void> - Completes after a saved confirmation or an upload error.
 */
 async function uploadPhoto() {
-    if (!prepared || preparing || uploading || videoBusy) {
+    if (!prepared || preparing || uploading || videoBusy || !photoArea) {
         return;
     }
     const controller = new AbortController();
     const timeout = setTimeout(controller.abort.bind(controller), UPLOAD_TIMEOUT_MS);
-
+    let session = 0;
     uploading = true;
-    updatePhotoControls();
     updateVideoControls();
-    statusText.textContent = 'Uploading photo…';
     try {
-        const rgba = context.getImageData(0, 0, WIDTH, HEIGHT).data;
-        const response = await fetch('/api/frame', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: encodePhotoPixels(rgba),
-            signal: controller.signal
-        });
-        const acknowledgement = await response.text();
-        if (!response.ok || acknowledgement.trim() !== 'ACK') {
-            throw new Error('The Pico did not accept the photo (HTTP ' + response.status + ').');
+        const file = fileInput.files[0];
+        const name = photoName.value.trim() || file.name.replace(/\.[^.]+$/, '');
+        const clip = await preparePhotoPayload(preview, photoArea, photoFormat.value,
+            Number(photoQuality.value), name);
+        let acknowledgement = await videoRequest(5, 0, 0, clip.header, controller.signal);
+        session = acknowledgement.id;
+        if (!Number.isInteger(session) || session <= 0 || acknowledgement.state !== 'receiving' ||
+            acknowledgement.offset !== 0 || acknowledgement.total !== clip.payload.length) {
+            throw new Error('Unexpected photo start response.');
         }
-        statusText.textContent = 'Photo received.';
+        for (let offset = 0; offset < clip.payload.length;) {
+            const end = Math.min(offset + 6144, clip.payload.length);
+            acknowledgement = await videoRequest(2, session, offset, clip.payload.subarray(offset, end), controller.signal);
+            if (acknowledgement.id !== session || acknowledgement.offset !== end) {
+                throw new Error('Unexpected photo progress response.');
+            }
+            offset = end;
+            statusText.textContent = `Uploading ${Math.floor(offset / clip.payload.length * 100)}%`;
+        }
+        while (acknowledgement.state === 'verifying') {
+            statusText.textContent = 'Verifying SD copy…';
+            await new Promise(resolve => setTimeout(resolve, 250));
+            acknowledgement = await videoRequest(3, session, 0, new Uint8Array(), controller.signal);
+        }
+        if (acknowledgement.state !== 'saved' || !acknowledgement.photoId || acknowledgement.id !== session) {
+            throw new Error('The Pico did not confirm a saved photo.');
+        }
+        session = 0;
+        statusText.textContent = 'Photo saved and verified. ' + acknowledgement.warning;
     } catch (error) {
         statusText.textContent = 'Photo upload failed: ' + error.message;
     } finally {
         clearTimeout(timeout);
+        if (session) {
+            try {
+                await videoRequest(4, session, 0, new Uint8Array(), new AbortController().signal);
+            } catch (error) {
+                // An unreachable receiving session is also released by the Pico's inactivity deadline.
+            }
+        }
         uploading = false;
         updateVideoControls();
     }
@@ -222,7 +522,7 @@ uploadButton.addEventListener('click', uploadPhoto);
 
 const videoFile = document.getElementById('video-file');
 const videoSource = document.getElementById('video-source');
-const videoCanvas = document.createElement('canvas');
+const videoCanvas = document.getElementById('video-preview');
 videoCanvas.width = WIDTH;
 videoCanvas.height = HEIGHT;
 const videoCtx = videoCanvas.getContext('2d', {willReadFrequently: true});
@@ -239,6 +539,11 @@ const videoStatus = document.getElementById('video-status');
 let videoBusy = false;
 let videoAbort = null;
 let previewUrl = '';
+let videoArea = null;
+let videoGeometry = null;
+let videoPosition = {x: .5, y: .5};
+const videoSizing = document.getElementById('video-sizing');
+const videoZoom = document.getElementById('video-zoom');
 /**
     Provides RGB pixel conversion, indexed JPEG records and checked upload envelopes.
 
@@ -414,58 +719,94 @@ const VideoCodec = (() => {
   }
 
   /**
-      Encodes a full-panel video descriptor and its payload checksum.
+      Builds the versioned photo or video metadata descriptor.
 
-      Raw pixels use descriptor version 1; JPEG uses version 2 when quality is
-      unknown or version 3 when its encoder setting is stored. The final four
-      bytes contain the payload CRC and are outside the 32-byte descriptor.
+      @param frames Prepared frames or number of frames described by the media header.
+      @param fps Requested video frames per second.
+      @param format Stored pixel format selected for the prepared media.
+      @param pingpong Whether the saved video plays forward and then backward.
+      @param bytes Input byte array or byte count to format, as required by this operation.
+      @param checksum Expected CRC32 checksum of the media payload.
+      @param quality JPEG encoder quality; zero means unknown or not applicable.
+      @param width Image width in pixels.
+      @param height Image height in pixels.
+      @param left Left edge of the stored image rectangle, in panel pixels.
+      @param top Top edge of the stored image rectangle, in panel pixels.
 
-      @param frames Number of prepared frames.
-      @param fps Requested integer video frames per second.
-      @param format Raw RGB888, raw RGB565 or indexed JPEG.
-      @param pingpong Whether playback reverses at the clip endpoints.
-      @param bytes Complete encoded payload size.
-      @param checksum Finalized payload CRC32.
-      @param quality JPEG encoder quality, or zero when unknown.
+      @return value - Serialized media descriptor including dimensions, playback, placement and
+                      CRC32.
+*/
+function encodeMediaDescriptor(
+    frames, fps, format, pingpong, bytes, checksum, quality = 0, width = WIDTH, height = HEIGHT,
+    left = Math.floor((WIDTH - width) / 2), top = Math.floor((HEIGHT - height) / 2)) {
+  const out = new Uint8Array(36);
 
-      @return Uint8Array - The 32-byte metadata descriptor followed by its CRC field.
-  */
-  function encodeMediaDescriptor(frames, fps, format, pingpong, bytes, checksum, quality = 0) {
-    const formats = {rgb888: 1, rgb565: 2, jpeg: 3};
-    if (!formats[format] || !Number.isInteger(frames) || frames < 1 ||
-        !Number.isInteger(fps) || fps < 1 || fps > 60 ||
-        !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 0xffffffff) {
-      throw new Error('Invalid video metadata.');
-    }
-    let savedQuality = 0;
-    let version = 1;
-    let flags = 0;
+  // Write the fixed binary fields explicitly; the controller expects little-endian values.
+  const v = new DataView(out.buffer);
+  let savedQuality;
+  if (format === 'jpeg') {
+    savedQuality = quality;
+  } else {
+    savedQuality = 0;
+  }
+  if (!Number.isInteger(savedQuality) || savedQuality < 0 || savedQuality > 95) {
+    throw new Error('Invalid saved JPEG quality.');
+  }
+  if (!Number.isInteger(left) || !Number.isInteger(top) || left < 0 || top < 0 || left + width > WIDTH ||
+      top + height > HEIGHT) {
+    throw new Error('Invalid placement.');
+  }
+  const placed = left !== Math.floor((WIDTH - width) / 2) || top !== Math.floor((HEIGHT - height) / 2);
+  let version;
+  if (placed) {
+    version = 4;
+  } else {
     if (format === 'jpeg') {
-      savedQuality = quality;
-      version = 2;
       if (savedQuality) {
         version = 3;
+      } else {
+        version = 2;
       }
+    } else {
+      version = 1;
     }
-    if (!Number.isInteger(savedQuality) || savedQuality < 0 || savedQuality > 95) {
-      throw new Error('Invalid JPEG quality.');
-    }
-    if (pingpong) {
-      flags = 1;
-    }
-    const out = new Uint8Array(36);
-    const view = new DataView(out.buffer);
-    out.set([72, 55, 53, 77, version, 2, formats[format], (savedQuality << 1) | flags]);
-    view.setUint16(8, WIDTH, true);
-    view.setUint16(10, HEIGHT, true);
-    view.setUint32(12, frames, true);
-    view.setUint32(16, fps, true);
-    view.setUint32(20, 1, true);
-    view.setUint32(24, bytes, true);
-    view.setUint32(28, 0, true);
-    view.setUint32(32, checksum, true);
-    return out;
   }
+  let loopFlag;
+  if (pingpong) {
+    loopFlag = 1;
+  } else {
+    loopFlag = 0;
+  }
+  out.set([
+    72, 55, 53, 77, version, 2, {rgb888: 1, rgb565: 2, jpeg: 3}[format],
+    (savedQuality << 1) | loopFlag
+  ]);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > WIDTH ||
+      height > HEIGHT) {
+    throw new Error('Invalid stored dimensions.');
+  }
+  let encodedWidth;
+  if (placed) {
+    encodedWidth = (width - 1) | (left << 7);
+  } else {
+    encodedWidth = width;
+  }
+  v.setUint16(8, encodedWidth, true);
+  let encodedHeight;
+  if (placed) {
+    encodedHeight = (height - 1) | (top << 8);
+  } else {
+    encodedHeight = height;
+  }
+  v.setUint16(10, encodedHeight, true);
+  v.setUint32(12, frames, true);
+  v.setUint32(16, fps, true);
+  v.setUint32(20, 1, true);
+  v.setUint32(24, bytes, true);
+  v.setUint32(28, 0, true);
+  v.setUint32(32, checksum, true);
+  return out;
+}
   return {calculateCrc32, encodeFramePixels, encodeMediaDescriptor, buildUploadDescriptor,
           encodeJpegFrameIndex, validateBaselineJpeg};
 })();
@@ -859,19 +1200,34 @@ function readVideoUploadOptions() {
     if (format === 'jpeg' && (!Number.isInteger(quality) || quality < 1 || quality > 95)) {
         throw new Error('Choose JPEG quality from 1 to 95.');
     }
-    return {fps, seconds, quality, format, pingpong: videoPingpong.checked};
+    const sizing = videoSizing.value;
+    const zoom = Number(videoZoom.value);
+    if (!['crop', 'fit', 'manual'].includes(sizing) ||
+        (sizing === 'manual' && (!Number.isFinite(zoom) || zoom < 1 || zoom > 500))) {
+        throw new Error('Choose crop, fit or manual zoom from 1 to 500%.');
+    }
+    return {fps, seconds, quality, format, pingpong: videoPingpong.checked,
+            sizing, zoom, position: {...videoPosition}};
 }
 
 /**
-    Redraws a decoded video frame using the same centered crop as photo uploads.
+    Draws a source video frame using the chosen sizing and placement.
 
-    @param video Decoded browser video element containing the current source frame.
+    @param video Browser video element used as the source frame.
+    @param sizing Placement mode: crop, fit or manual zoom.
+    @param zoom Manual zoom percentage, from 1 to 500.
+    @param position Normalized horizontal and vertical placement, each from 0 to 1.
+
+    @return value - Visible stored rectangle after rendering the current source video frame.
 */
-function drawVideoFrame(video) {
-    const crop = calculatePhotoCrop(video.videoWidth, video.videoHeight);
-    videoCtx.fillStyle = '#000';
-    videoCtx.fillRect(0, 0, WIDTH, HEIGHT);
-    videoCtx.drawImage(video, crop.x, crop.y, crop.width, crop.height);
+function drawVideoFrame(video, sizing = 'crop', zoom = 100, position = {
+  x: .5,
+  y: .5
+}) {
+  const bounds = calculateMediaGeometry(video.videoWidth, video.videoHeight, sizing, zoom, position);
+  const area = drawPlacedMedia(videoCtx, video, video.videoWidth, video.videoHeight, sizing, zoom, position);
+  drawMediaBoundary('video', area, !videoBusy && !uploading, bounds);
+  return area;
 }
 
 /**
@@ -908,11 +1264,15 @@ async function prepareBrowserVideo(file, options, signal) {
         }
         const duration = Math.min(video.duration, options.seconds);
         const frames = Math.max(1, Math.ceil(duration * options.fps - 1e-8));
+        const area = getMediaPlacement(video.videoWidth, video.videoHeight, options.sizing,
+            options.zoom, options.position);
+        const encodedCanvas = createStoredPreviewCanvas(videoCanvas, area);
+        const encodedContext = encodedCanvas.getContext('2d', {willReadFrequently: true});
         let rawPixelBytes = 3;
         if (options.format === 'rgb565') {
             rawPixelBytes = 2;
         }
-        if (options.format !== 'jpeg' && frames * WIDTH * HEIGHT * rawPixelBytes > records.limit) {
+        if (options.format !== 'jpeg' && frames * area.width * area.height * rawPixelBytes > records.limit) {
             await records.spill();
         }
         for (let i = 0; i < frames; i++) {
@@ -921,16 +1281,20 @@ async function prepareBrowserVideo(file, options, signal) {
             if (i || Math.abs(video.currentTime - target) > 0.0001) {
                 await waitForVideoEvent(video, 'seeked', () => { video.currentTime = target; }, signal);
             }
-            drawVideoFrame(video);
+            drawVideoFrame(video, options.sizing, options.zoom, options.position);
+            if (encodedCanvas !== videoCanvas) {
+                encodedContext.drawImage(videoCanvas, area.x, area.y, area.width, area.height,
+                    0, 0, area.width, area.height);
+            }
             let frame;
             if (options.format === 'jpeg') {
-                const blob = await new Promise(resolve => videoCanvas.toBlob(resolve, 'image/jpeg', options.quality / 100));
+                const blob = await new Promise(resolve => encodedCanvas.toBlob(resolve, 'image/jpeg', options.quality / 100));
                 throwIfUploadCanceled(signal);
                 if (!blob || blob.type !== 'image/jpeg') {
                     throw new Error('JPEG encoding is unavailable. Select RGB565.');
                 }
                 frame = new Uint8Array(await blob.arrayBuffer());
-                if (frame.length > 128 * 1024 || !VideoCodec.validateBaselineJpeg(frame)) {
+                if (frame.length > 128 * 1024 || !VideoCodec.validateBaselineJpeg(frame, area.width, area.height)) {
                     throw new Error('The browser produced an unsupported JPEG. Select RGB565.');
                 }
                 const header = new Uint8Array(8);
@@ -940,7 +1304,7 @@ async function prepareBrowserVideo(file, options, signal) {
                 await records.append(new Blob([header, frame]));
                 lengths.push(frame.length);
             } else {
-                frame = VideoCodec.encodeFramePixels(videoCtx.getImageData(0, 0, WIDTH, HEIGHT).data, options.format);
+                frame = VideoCodec.encodeFramePixels(encodedContext.getImageData(0, 0, area.width, area.height).data, options.format);
                 await records.append(new Blob([frame]));
                 checksum = VideoCodec.calculateCrc32(frame, checksum);
             }
@@ -963,7 +1327,7 @@ async function prepareBrowserVideo(file, options, signal) {
             payload = records.payload();
         }
         const header = VideoCodec.encodeMediaDescriptor(frames, options.fps, options.format,
-            options.pingpong, payload.size, checksum, options.quality);
+            options.pingpong, payload.size, checksum, options.quality, area.width, area.height, area.x, area.y);
         prepared = true;
         return {payload, frames, header, dispose: records.dispose.bind(records)};
     } finally {
@@ -1016,7 +1380,7 @@ function videoLibraryHeader(header, name, seconds) {
 
     @return Promise<object> - Parsed acknowledgement containing session, progress and state.
 */
-async function videoRequest(operation, id, offset, body, signal) {
+async function sendVideoRequest(operation, id, offset, body, signal) {
     const request = new AbortController();
     const abort = request.abort.bind(request);
     const timer = setTimeout(abort, 30000);
@@ -1049,13 +1413,15 @@ async function videoRequest(operation, id, offset, body, signal) {
 */
 function updateVideoControls() {
     const busy = videoBusy || uploading;
-    for (const control of [videoFile, videoFps, videoSeconds, videoFormat, jpegQuality, videoPingpong, videoName]) {
+    for (const control of [videoFile, videoFps, videoSeconds, videoFormat, jpegQuality, videoPingpong, videoName, videoSizing, videoZoom]) {
         control.disabled = busy;
     }
     jpegQuality.disabled = busy || videoFormat.value !== 'jpeg';
+    videoZoom.disabled = busy || videoSizing.value !== 'manual';
     videoSend.disabled = busy || !videoFile.files.length;
     videoCancel.disabled = !videoBusy;
     updatePhotoControls();
+    redrawVideoPreview();
 }
 
 /**
@@ -1157,15 +1523,15 @@ function disposeVideoPreview() {
     Shows the selected source video with the centered crop used during encoding.
 
     Replaces and releases the preceding object URL before attaching the new source.
-    The native preview is cropped through CSS; upload preparation decodes its own
-    source from the beginning and applies the matching canvas crop.
+    The native video supplies decoded pixels to the draggable preview canvas. Upload
+    preparation decodes from the beginning and applies the same saved placement.
 */
 function prepareVideoPreview() {
     disposeVideoPreview();
     if (videoFile.files.length) {
         previewUrl = URL.createObjectURL(videoFile.files[0]);
         videoSource.src = previewUrl;
-        videoSource.hidden = false;
+        videoSource.hidden = true;
         videoSource.load();
     } else {
         videoSource.hidden = true;
@@ -1178,7 +1544,588 @@ videoSend.addEventListener('click', uploadVideo);
 videoCancel.addEventListener('click', cancelVideoUpload);
 videoFormat.addEventListener('change', updateVideoControls);
 window.addEventListener('pagehide', disposeVideoPreview);
+
+let mediaRequestTail = Promise.resolve();
+/**
+    Serializes one media protocol request with other browser controls and previews.
+
+    A queued request retains its cancellation signal. The queue is released in all
+    success and failure paths so one failed action cannot stall later commands.
+
+    @param operation Binary protocol operation.
+    @param id Session, media ID or first control value.
+    @param offset Payload offset, page cursor or second control value.
+    @param body Optional binary request body.
+    @param signal Cancellation signal for this operation.
+
+    @return Promise<object> - Parsed protocol or library response.
+*/
+async function videoRequest(operation, id, offset, body, signal) {
+    const previous = mediaRequestTail;
+    let release;
+    mediaRequestTail = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+        return await sendVideoRequest(operation, id, offset, body, signal);
+    } finally {
+        release();
+    }
+}
+
+/**
+    Redraws the selected photo and its stored-data boundary after drag or zoom changes.
+*/
+function redrawPhoto() {
+    photoZoom.disabled = uploading || videoBusy || photoSizing.value !== 'manual';
+    photoQuality.disabled = uploading || videoBusy || photoFormat.value !== 'jpeg';
+    for (const control of [photoSizing, photoFormat, photoName]) {
+        control.disabled = uploading || videoBusy;
+    }
+    if (!photoSource) {
+        drawMediaBoundary('photo', null, false);
+        return;
+    }
+    try {
+        photoGeometry = calculateMediaGeometry(photoSource.naturalWidth, photoSource.naturalHeight,
+            photoSizing.value, Number(photoZoom.value), photoPosition);
+        photoArea = drawPlacedMedia(context, photoSource, photoSource.naturalWidth, photoSource.naturalHeight,
+            photoSizing.value, Number(photoZoom.value), photoPosition);
+        drawMediaBoundary('photo', photoArea, !uploading && !videoBusy, photoGeometry);
+    } catch (error) {
+        photoArea = null;
+        drawMediaBoundary('photo', null, false);
+        statusText.textContent = error.message;
+    }
+}
+
+/**
+    Redraws the first source video frame and its editable data rectangle.
+*/
+function redrawVideoPreview() {
+    if (!videoSource.videoWidth || !videoSource.videoHeight || !previewUrl || videoBusy) {
+        return;
+    }
+    try {
+        videoGeometry = calculateMediaGeometry(videoSource.videoWidth, videoSource.videoHeight,
+            videoSizing.value, Number(videoZoom.value), videoPosition);
+        videoArea = drawVideoFrame(videoSource, videoSizing.value, Number(videoZoom.value), videoPosition);
+    } catch (error) {
+        videoArea = null;
+        drawMediaBoundary('video', null, false);
+        videoStatus.textContent = error.message;
+    }
+}
+
+/**
+    Builds a photo payload, thumbnail and named start header from the visible rectangle.
+
+    The preview includes generated black borders, while encoded payload pixels cover
+    only the saved rectangle. JPEG is a one-entry indexed stream, compatible with the
+    same verified storage reader used for videos. All quality and placement fields
+    belong to the individual saved photo.
+
+    @param canvas Full logical-panel preview canvas.
+    @param area Visible stored rectangle in panel coordinates.
+    @param format Selected RGB565, RGB888 or JPEG format.
+    @param quality JPEG encoder quality from 1 to 95.
+    @param name Optional photo name or filename-derived fallback.
+
+    @return Promise<object> - Named start header and complete photo payload bytes.
+*/
+async function preparePhotoPayload(canvas, area, format, quality, name) {
+    if (!['rgb565', 'rgb888', 'jpeg'].includes(format) ||
+        (format === 'jpeg' && (!Number.isInteger(quality) || quality < 1 || quality > 95))) {
+        throw new Error('Choose a valid photo format and JPEG quality.');
+    }
+    const thumbnailCanvas = document.createElement('canvas');
+    thumbnailCanvas.width = 16;
+    thumbnailCanvas.height = 32;
+    const thumbnailContext = thumbnailCanvas.getContext('2d');
+    thumbnailContext.drawImage(canvas, 0, 0, 16, 32);
+    const thumbnail = VideoCodec.encodeFramePixels(thumbnailContext.getImageData(0, 0, 16, 32).data, 'rgb565');
+    const stored = createStoredPreviewCanvas(canvas, area);
+    let payload;
+    if (format === 'jpeg') {
+        const blob = await new Promise(resolve => stored.toBlob(resolve, 'image/jpeg', quality / 100));
+        if (!blob || blob.type !== 'image/jpeg') {
+            throw new Error('JPEG encoding is unavailable. Select RGB565.');
+        }
+        const frame = new Uint8Array(await blob.arrayBuffer());
+        if (frame.length > 128 * 1024 || !VideoCodec.validateBaselineJpeg(frame, area.width, area.height)) {
+            throw new Error('The browser produced an unsupported JPEG. Select RGB565.');
+        }
+        const record = new Uint8Array(8);
+        new DataView(record.buffer).setUint32(0, frame.length, true);
+        new DataView(record.buffer).setUint32(4, VideoCodec.calculateCrc32(frame), true);
+        payload = new Uint8Array(await new Blob([VideoCodec.encodeJpegFrameIndex([frame.length]), record, frame]).arrayBuffer());
+    } else {
+        payload = VideoCodec.encodeFramePixels(stored.getContext('2d').getImageData(0, 0, area.width, area.height).data, format);
+    }
+    const descriptor = VideoCodec.encodeMediaDescriptor(1, 0, format, false, payload.length,
+        VideoCodec.calculateCrc32(payload), quality, area.width, area.height, area.x, area.y);
+    descriptor[5] = 1;
+    const header = new Uint8Array(1124);
+    header.set(descriptor);
+    const ascii = String(name || 'Photo').replace(/[^\x20-\x7e]/g, '_').slice(0, 63);
+    for (let i = 0; i < ascii.length; i++) {
+        header[36 + i] = ascii.charCodeAt(i);
+    }
+    header.set(thumbnail, 100);
+    return {header, payload};
+}
+
+/**
+    Applies a drag update to a media source's normalized placement.
+
+    A full axis cannot move; other axes map the dragged coordinate onto their
+    available range, including negative coordinates for off-screen crop areas.
+
+    @param kind Photo or video editor identifier.
+    @param x New source left edge in logical pixels.
+    @param y New source top edge in logical pixels.
+*/
+function updateDraggedPlacement(kind, x, y) {
+    let geometry = photoGeometry;
+    if (kind === 'video') {
+        geometry = videoGeometry;
+    }
+    let horizontal = .5;
+    let vertical = .5;
+    if (geometry.width !== WIDTH) {
+        horizontal = x / (WIDTH - geometry.width);
+    }
+    if (geometry.height !== HEIGHT) {
+        vertical = y / (HEIGHT - geometry.height);
+    }
+    if (kind === 'photo') {
+        photoPosition = {x: horizontal, y: vertical};
+        redrawPhoto();
+    } else {
+        videoPosition = {x: horizontal, y: vertical};
+        redrawVideoPreview();
+    }
+}
+
+photoSizing.addEventListener('change', redrawPhoto);
+photoZoom.addEventListener('input', redrawPhoto);
+photoFormat.addEventListener('change', redrawPhoto);
+videoSizing.addEventListener('change', updateVideoControls);
+videoZoom.addEventListener('input', redrawVideoPreview);
+videoSource.addEventListener('loadeddata', redrawVideoPreview);
+enableMediaDragging(preview, () => photoGeometry, () => !!photoSource && !uploading && !videoBusy,
+    (x, y) => updateDraggedPlacement('photo', x, y));
+enableMediaDragging(videoCanvas, () => videoGeometry, () => !!videoArea && !uploading && !videoBusy,
+    (x, y) => updateDraggedPlacement('video', x, y));
+
+const libraryPages = {
+    photo: {history: [0], nextAfter: 0, hasMore: false, ticket: 0, busy: false},
+    video: {history: [0], nextAfter: 0, hasMore: false, ticket: 0, busy: false}
+};
+let galleryBusy = false;
+
+/**
+    Sends an empty-body library or control command through the shared request queue.
+
+    @param operation Binary mailbox operation.
+    @param id Media ID or first control value.
+    @param offset Exclusive page cursor or second control value.
+
+    @return Promise<object> - Parsed bounded library or control response.
+*/
+function libraryRequest(operation, id = 0, offset = 0) {
+    return videoRequest(operation, id, offset, new Uint8Array(), new AbortController().signal);
+}
+
+/**
+    Formats a byte count for the saved-item and storage summaries.
+
+    @param bytes Nonnegative byte count reported by the controller.
+
+    @return string - Human-readable bytes, KiB, MiB or GiB value.
+*/
+function formatStorageBytes(bytes) {
+    const units = ['B', 'KiB', 'MiB', 'GiB'];
+    let value = Number(bytes);
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+    }
+    let precision = 0;
+    if (unit) {
+        precision = 1;
+    }
+    return value.toFixed(precision) + ' ' + units[unit];
+}
+
+/**
+    Renders a cached display-mode response without clearing the current summary first.
+
+    @param status Validated display status returned by the controller.
+*/
+function renderPlaybackStatus(status) {
+    const labels = {builtin: 'Built-in', photo: 'Photo', slideshow: 'Slideshow', video: 'Video'};
+    document.getElementById('active-mode').textContent = labels[status.mode] || 'Unknown';
+    let detail = status.displayedName || '';
+    if (status.mode === 'video') {
+        if (status.pingPong) {
+            detail += ' · Ping-pong';
+        } else {
+            detail += ' · Loop';
+        }
+    }
+    document.getElementById('active-mode-detail').textContent = detail;
+    if (status.displaySettings) {
+        const fps = document.getElementById('playback-max-fps');
+        fps.value = '';
+        if (status.displaySettings.maxFps) {
+            fps.value = status.displaySettings.maxFps;
+        }
+        document.getElementById('panel-brightness').value = status.displaySettings.brightness;
+    }
+}
+
+/**
+    Refreshes active display mode and managed storage totals on demand.
+
+    Requests are serialized with other page actions. Failed reads leave previously
+    displayed values visible and report the failure separately from those values.
+
+    @return Promise<void> - Completes after updating the summary or showing an error.
+*/
+async function refreshSummary() {
+    const message = document.getElementById('summary-status');
+    try {
+        renderPlaybackStatus(await libraryRequest(15));
+        const result = await libraryRequest(23);
+        if (result.storage && result.storage.available) {
+            document.getElementById('storage-usage').textContent = 'Managed files: ' + formatStorageBytes(result.storage.fileBytes);
+            document.getElementById('storage-capacity').textContent = 'Allocated: ' + formatStorageBytes(result.storage.allocatedBytes) + ' / ' + formatStorageBytes(result.storage.totalBytes);
+        } else {
+            document.getElementById('storage-usage').textContent = 'Storage unavailable';
+        }
+        message.textContent = '';
+    } catch (error) {
+        message.textContent = 'Could not refresh summary: ' + error.message;
+    }
+}
+
+/**
+    Shows one accessible media tab and requests its latest data.
+
+    @param name Summary, photos or videos tab identifier.
+*/
+function selectMediaTab(name) {
+    for (const candidate of ['summary', 'photos', 'videos']) {
+        const active = candidate === name;
+        const button = document.getElementById('tab-' + candidate);
+        button.setAttribute('aria-selected', String(active));
+        button.tabIndex = -1;
+        if (active) {
+            button.tabIndex = 0;
+        }
+        document.getElementById('panel-' + candidate).hidden = !active;
+    }
+    if (name === 'summary') {
+        refreshSummary();
+    } else if (name === 'photos') {
+        loadLibraryPage('photo');
+    } else {
+        loadLibraryPage('video');
+    }
+}
+
+/**
+    Converts a checked RGB565 preview response into its saved-item canvas.
+
+    @param canvas Destination miniature canvas.
+    @param preview Saved image or first-video-frame preview containing base64 RGB565 pixels.
+*/
+function renderLibraryPreview(canvas, preview) {
+    const bytes = Uint8Array.from(atob(preview.pixels), character => character.charCodeAt(0));
+    if (preview.width !== 32 || preview.height !== 64 || bytes.length !== preview.width * preview.height * 2) {
+        throw new Error('Incomplete preview response.');
+    }
+    canvas.width = preview.width;
+    canvas.height = preview.height;
+    const context = canvas.getContext('2d');
+    const pixels = context.createImageData(canvas.width, canvas.height);
+    for (let source = 0, target = 0; source < bytes.length; source += 2, target += 4) {
+        const packed = bytes[source] | bytes[source + 1] << 8;
+        const red = packed >>> 11;
+        const green = packed >>> 5 & 63;
+        const blue = packed & 31;
+        pixels.data[target] = red << 3 | red >>> 2;
+        pixels.data[target + 1] = green << 2 | green >>> 4;
+        pixels.data[target + 2] = blue << 3 | blue >>> 2;
+        pixels.data[target + 3] = 255;
+    }
+    context.putImageData(pixels, 0, 0);
+}
+
+/**
+    Creates a text-only saved-item card with explicit show and delete actions.
+
+    Metadata names are assigned through textContent. Encoded names and other
+    controller values are never interpreted as markup in the page.
+
+    @param kind Photo or video collection identifier.
+    @param item Stored item metadata.
+    @param displayed ID currently displayed by this collection.
+
+    @return object - Card element and preview canvas to fill asynchronously.
+*/
+function createLibraryCard(kind, item, displayed) {
+    const card = document.createElement('article');
+    card.className = 'photo-card';
+    if (item.id === displayed) {
+        card.className += ' showing';
+    }
+    const title = document.createElement('h3');
+    title.textContent = item.name;
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 64;
+    canvas.setAttribute('aria-label', item.name + ' preview');
+    const metadata = document.createElement('p');
+    let text = item.format + ' · ' + item.width + '×' + item.height;
+    if (item.format === 'JPEG') {
+        text += ' · Q';
+        if (item.jpegQuality) {
+            text += item.jpegQuality;
+        } else {
+            text += 'XX';
+        }
+    }
+    if (kind === 'video') {
+        text += ' · ' + (item.fpsNumerator / item.fpsDenominator).toFixed(1) + ' FPS';
+        text += ' · ' + (item.durationMillis / 1000).toFixed(1) + ' s';
+        if (item.pingPong) {
+            text += ' · Ping-pong';
+        } else {
+            text += ' · Loop';
+        }
+    }
+    metadata.textContent = text + ' · ' + formatStorageBytes(item.bytes);
+    const show = document.createElement('button');
+    show.type = 'button';
+    show.textContent = 'Show';
+    show.disabled = !item.valid;
+    show.addEventListener('click', () => libraryAction(kind, 'show', item.id));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'secondary';
+    remove.textContent = 'Delete';
+    remove.addEventListener('click', () => libraryAction(kind, 'delete', item.id));
+    card.append(title, canvas, metadata, show, remove);
+    return {card, canvas};
+}
+
+/**
+    Loads an ordered saved-media page and then its previews without clearing old data early.
+
+    Page cursors are bounded media IDs. Preview requests are sequential, and a new
+    page ticket prevents an older response from drawing into a replaced page.
+
+    @param kind Photo or video collection identifier.
+
+    @return Promise<void> - Completes after the current page and its previews are processed.
+*/
+async function loadLibraryPage(kind) {
+    if (libraryPages[kind].busy || uploading || videoBusy) {
+        return;
+    }
+    const state = libraryPages[kind];
+    const ticket = ++state.ticket;
+    const message = document.getElementById(kind + '-library-status');
+    state.busy = true;
+    message.textContent = 'Loading…';
+    try {
+        let operation = 10;
+        let previewOperation = 14;
+        let listField = 'photos';
+        if (kind === 'video') {
+            operation = 16;
+            previewOperation = 19;
+            listField = 'videos';
+        }
+        const cursor = state.history[state.history.length - 1];
+        const page = await libraryRequest(operation, 0, cursor);
+        if (!Array.isArray(page[listField]) || page[listField].length > 10 || !Number.isInteger(page.count)) {
+            throw new Error('Incomplete library response.');
+        }
+        state.nextAfter = page.nextAfter;
+        state.hasMore = page.hasMore;
+        const cards = page[listField].map(item => createLibraryCard(kind, item, page.displayed));
+        document.getElementById(kind + '-library').replaceChildren(...cards.map(item => item.card));
+        document.getElementById(kind + '-library-count').textContent = page.count + ' saved';
+        document.getElementById(kind + '-page').textContent = state.history.length;
+        if (kind === 'photo') {
+            document.getElementById('slideshow-enabled').checked = page.slideshow;
+            document.getElementById('slideshow-minutes').value = page.intervalSeconds / 60;
+        }
+        for (let index = 0; index < cards.length; index++) {
+            if (ticket !== state.ticket || uploading || videoBusy) {
+                return;
+            }
+            try {
+                renderLibraryPreview(cards[index].canvas, await libraryRequest(previewOperation, page[listField][index].id));
+            } catch (error) {
+                cards[index].canvas.setAttribute('aria-label', 'Preview unavailable: ' + error.message);
+            }
+        }
+        message.textContent = '';
+    } catch (error) {
+        message.textContent = 'Could not load library: ' + error.message;
+    } finally {
+        state.busy = false;
+        document.getElementById(kind + '-previous').disabled = state.history.length <= 1;
+        document.getElementById(kind + '-next').disabled = !state.hasMore;
+    }
+}
+
+/**
+    Requests the preceding or next bounded saved-media page.
+
+    @param kind Photo or video collection identifier.
+    @param forward True selects the next cursor; false returns to the previous cursor.
+*/
+function changeLibraryPage(kind, forward) {
+    if (galleryBusy || libraryPages[kind].busy || uploading || videoBusy) {
+        return;
+    }
+    const state = libraryPages[kind];
+    if (forward && state.hasMore) {
+        state.history.push(state.nextAfter);
+    } else if (!forward && state.history.length > 1) {
+        state.history.pop();
+    } else {
+        return;
+    }
+    loadLibraryPage(kind);
+}
+
+/**
+    Selects or deletes one saved item, then reloads its current collection page.
+
+    @param kind Photo or video collection identifier.
+    @param action Show or delete operation chosen by the user.
+    @param id Saved item identifier.
+
+    @return Promise<void> - Completes after the action and refreshed page, or displays an error.
+*/
+async function libraryAction(kind, action, id) {
+    if (galleryBusy || uploading || videoBusy) {
+        return;
+    }
+    galleryBusy = true;
+    let succeeded = false;
+    try {
+        let operation = 11;
+        if (kind === 'video') {
+            operation = 17;
+        }
+        if (action === 'delete') {
+            operation += 2;
+            if (kind === 'video') {
+                operation = 18;
+            }
+        }
+        await libraryRequest(operation, id);
+        libraryPages[kind].history = [0];
+        succeeded = true;
+    } catch (error) {
+        document.getElementById(kind + '-library-status').textContent = error.message;
+    } finally {
+        galleryBusy = false;
+    }
+    if (succeeded) {
+        await loadLibraryPage(kind);
+    }
+}
+
+/**
+    Saves the slideshow switch and its user-facing interval in minutes.
+
+    @return Promise<void> - Completes after persisting settings or showing an error.
+*/
+async function applySlideshow() {
+    if (uploading || videoBusy || galleryBusy) {
+        return;
+    }
+    try {
+        const seconds = Math.round(Number(document.getElementById('slideshow-minutes').value) * 60);
+        if (!Number.isInteger(seconds) || seconds < 6 || seconds > 86400) {
+            throw new Error('Choose an interval from 0.1 to 1440 minutes.');
+        }
+        let enabled = 0;
+        if (document.getElementById('slideshow-enabled').checked) {
+            enabled = 1;
+        }
+        await libraryRequest(12, enabled, seconds);
+        await loadLibraryPage('photo');
+    } catch (error) {
+        document.getElementById('photo-library-status').textContent = error.message;
+    }
+}
+
+/**
+    Saves the panel brightness and optional playback FPS cap.
+
+    @return Promise<void> - Completes after applying saved controls or showing an error.
+*/
+async function applyDisplaySettings() {
+    if (uploading || videoBusy) {
+        return;
+    }
+    try {
+        const fpsText = document.getElementById('playback-max-fps').value.trim();
+        let fps = 0;
+        if (fpsText) {
+            fps = Number(fpsText);
+        }
+        const brightness = Number(document.getElementById('panel-brightness').value);
+        if (!Number.isInteger(fps) || fps < 0 || fps > 60 || !Number.isInteger(brightness) || brightness < 0 || brightness > 100) {
+            throw new Error('Choose FPS 1–60 or leave blank, and brightness 0–100.');
+        }
+        renderPlaybackStatus(await libraryRequest(21, fps, brightness));
+        document.getElementById('summary-status').textContent = 'Settings saved.';
+    } catch (error) {
+        document.getElementById('summary-status').textContent = error.message;
+    }
+}
+
+for (const name of ['summary', 'photos', 'videos']) {
+    document.getElementById('tab-' + name).addEventListener('click', () => selectMediaTab(name));
+    document.getElementById('tab-' + name).addEventListener('keydown', event => {
+        const names = ['summary', 'photos', 'videos'];
+        let target = names.indexOf(name);
+        if (event.key === 'ArrowRight') {
+            target = (target + 1) % names.length;
+        } else if (event.key === 'ArrowLeft') {
+            target = (target + names.length - 1) % names.length;
+        } else if (event.key === 'Home') {
+            target = 0;
+        } else if (event.key === 'End') {
+            target = names.length - 1;
+        } else {
+            return;
+        }
+        event.preventDefault();
+        selectMediaTab(names[target]);
+        document.getElementById('tab-' + names[target]).focus();
+    });
+}
+for (const kind of ['photo', 'video']) {
+    document.getElementById(kind + '-refresh').addEventListener('click', () => loadLibraryPage(kind));
+    document.getElementById(kind + '-previous').addEventListener('click', () => changeLibraryPage(kind, false));
+    document.getElementById(kind + '-next').addEventListener('click', () => changeLibraryPage(kind, true));
+}
+document.getElementById('summary-refresh').addEventListener('click', refreshSummary);
+document.getElementById('display-settings-save').addEventListener('click', applyDisplaySettings);
+document.getElementById('slideshow-save').addEventListener('click', applySlideshow);
 updateVideoControls();
+selectMediaTab('summary');
 
 </script>
 </body>

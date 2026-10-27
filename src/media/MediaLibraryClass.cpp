@@ -6,6 +6,16 @@
 #include <cstring>
 #include "config/defines.h"
 
+#define BASE64_CHARACTER_MASK 63
+#define BASE64_FIRST_INPUT_SHIFT 16
+#define BASE64_FIRST_OUTPUT_SHIFT 18
+#define BASE64_INPUT_BYTES 3
+#define BASE64_SECOND_INPUT_SHIFT 8
+#define BASE64_SECOND_OUTPUT_SHIFT 6
+#define BASE64_THIRD_INPUT_INDEX 2
+#define BASE64_THIRD_OUTPUT_SHIFT 12
+#define MILLISECONDS_PER_SECOND 1000
+
 /**
     Checks whether a media ID is temporarily excluded after a playback failure.
 
@@ -160,12 +170,18 @@ MediaLibrary::Has (
     ) const
 {
     MemoryManager::LibraryPhoto photo;
+    size_t count;
 
     if (!id) {
         return false;
     }
+    // Directory membership remains sufficient for deleting an item with a damaged header.
+    if (!requireValid) {
+        count = 0;
+        return memory_.ListLibraryPhotos(&photo, 1, count, id - 1) && count == 1 && photo.id == id;
+    }
     photo = {};
-    return memory_.GetLibraryPhoto(id, photo) && (!requireValid || (photo.valid && !Rejected(id, false)));
+    return memory_.GetLibraryPhoto(id, photo) && photo.valid && !Rejected(id, false);
 } // Has
 
 /**
@@ -184,12 +200,18 @@ MediaLibrary::HasVideo (
     ) const
 {
     MemoryManager::LibraryVideo video;
+    size_t count;
 
     if (!id) {
         return false;
     }
+    // Directory membership remains sufficient for deleting an item with a damaged header.
+    if (!requireValid) {
+        count = 0;
+        return memory_.ListLibraryVideos(&video, 1, count, id - 1) && count == 1 && video.id == id;
+    }
     video = {};
-    return memory_.GetLibraryVideo(id, video) && (!requireValid || (video.valid && !Rejected(id, true)));
+    return memory_.GetLibraryVideo(id, video) && video.valid && !Rejected(id, true);
 } // HasVideo
 
 /**
@@ -1201,3 +1223,433 @@ MediaLibrary::WantsMedia (
 {
     return WantsPhoto() || WantsVideo();
 } // WantsMedia
+
+/**
+    Calculates the saved video duration in milliseconds.
+
+    @param metadata Media dimensions, pixel format, placement and playback settings.
+
+    @return value - Saved video duration in milliseconds, rounded down.
+    @return 0 - The descriptor is not a video or has no valid frame rate.
+*/
+uint64_t
+MediaLibrary::CalculateVideoDurationMs (
+    const MediaMetadata& metadata
+    )
+{
+    uint64_t ticks;
+
+    if (!metadata.fpsNumerator) {
+        return 0;
+    }
+    ticks = uint64_t(metadata.frameCount) * metadata.fpsDenominator;
+    // Divide before multiplying by 1000; unreduced rational FPS can be large.
+    return ticks / metadata.fpsNumerator * MILLISECONDS_PER_SECOND +
+           ticks % metadata.fpsNumerator * MILLISECONDS_PER_SECOND / metadata.fpsNumerator;
+} // CalculateVideoDurationMs
+
+/**
+    Formats one page of saved videos and their metadata as JSON.
+
+    Loads a bounded video page and encodes per-item format, dimensions, frame rate, duration, loop
+    direction and upload metadata together with paging/selection state. Runtime rejection marks
+    can make a stored item unavailable without deleting it. Names are JSON-escaped and first-frame
+    previews are fetched separately, keeping the overview from decoding every listed video.
+
+    @param json Output buffer for the generated JSON text.
+    @param capacity Number of elements available in the destination buffer, including any text
+                    terminator.
+    @param after Exclusive library ID cursor; zero starts at the first page.
+
+    @return true - The requested library information was read and encoded as JSON.
+    @return false - Storage, lookup or JSON buffer capacity prevented a complete response.
+*/
+bool
+MediaLibrary::VideoOverview (
+    char* json,
+    size_t capacity,
+    uint32_t after
+    )
+{
+    size_t i;
+    JsonWriter out;
+    const char* hasMore = nullptr;
+    size_t innerIndex;
+    const MemoryManager::LibraryVideo* video = nullptr;
+    const MediaMetadata* m = nullptr;
+    const char* valid = nullptr;
+    const char* format = nullptr;
+    const char* pingPong = nullptr;
+
+    if (!memory_.ListLibraryVideos(videos_, MemoryManager::LibraryPageSize, videoCount_, after,
+                                   &videoPage_)) {
+        error_ = memory_.GetLastError();
+        return false;
+    }
+    for (i = 0; i < videoCount_; ++i) {
+        if (Rejected(videos_[i].id, true)) {
+            videos_[i].valid = false;
+        }
+    }
+
+    error_ = "";
+    out = {json, capacity};
+    hasMore = {};
+    if (videoPage_.hasMore) {
+        hasMore = "true";
+    } else {
+        hasMore = "false";
+    }
+    out.AppendFormattedText(
+        "{\"pageSize\":10,\"after\":%lu,\"nextAfter\":%lu,\"hasMore\":%s,\"count\":%lu,\"selected\":%lu,"
+        "\"displayed\":%lu,\"videos\":[",
+        static_cast<unsigned long>(after), static_cast<unsigned long>(videoPage_.nextAfter),
+        hasMore, static_cast<unsigned long>(videoPage_.total),
+        static_cast<unsigned long>(settings_.selectedVideo),
+        static_cast<unsigned long>(player_.GetLibraryVideoId()));
+    for (innerIndex = 0; innerIndex < videoCount_; ++innerIndex) {
+        video = &(videos_[innerIndex]);
+        m = &(video->metadata);
+        if (innerIndex) {
+            out.AppendFormattedText(",");
+        }
+        out.AppendFormattedText("{\"id\":%lu,\"name\":", static_cast<unsigned long>(video->id));
+        out.AppendEscapedString(video->name);
+        valid = {};
+        if (video->valid) {
+            valid = "true";
+        } else {
+            valid = "false";
+        }
+        format = {};
+        if (video->valid) {
+            format = m->FormatName();
+        } else {
+            format = "unknown";
+        }
+        pingPong = {};
+        if (m->pingPong) {
+            pingPong = "true";
+        } else {
+            pingPong = "false";
+        }
+        out.AppendFormattedText(
+            ",\"revision\":%lu,\"valid\":%s,\"format\":\"%s\",\"jpegQuality\":%u,\"width\":%u,\"height\":"
+            "%u,\"left\":%u,\"top\":%u,\"frames\":%lu,\"fpsNumerator\":%lu,\"fpsDenominator\":%lu,"
+            "\"durationMillis\":%llu,\"maxSecondsMillis\":%lu,\"pingPong\":%s,\"bytes\":%llu}",
+            static_cast<unsigned long>(video->checksum), valid, format,
+            unsigned(m->jpegQuality), unsigned(m->width), unsigned(m->height),
+            unsigned(m->Left(LOGICAL_IMAGE_WIDTH)), unsigned(m->Top(LOGICAL_IMAGE_HEIGHT)),
+            static_cast<unsigned long>(m->frameCount), static_cast<unsigned long>(m->fpsNumerator),
+            static_cast<unsigned long>(m->fpsDenominator),
+            static_cast<unsigned long long>(CalculateVideoDurationMs((*m))),
+            static_cast<unsigned long>(video->maxSecondsMillis), pingPong,
+            static_cast<unsigned long long>(video->bytes));
+    }
+
+    out.AppendFormattedText("],\"error\":");
+    out.AppendEscapedString(error_);
+    out.AppendFormattedText("}");
+    return out.good;
+} // VideoOverview
+
+/**
+    Formats one page of saved photos and their metadata as JSON.
+
+    Reads one cursor-based photo page and overlays runtime rejection flags before encoding each
+    item's metadata and escaped name. The response also carries active selection, paging cursors and managed storage usage. It reads headers rather than
+    generating thumbnails; previews are requested separately. A listing or output-capacity failure
+    prevents a partial page from being returned as a successful library response.
+
+    @param json Output buffer for the generated JSON text.
+    @param capacity Number of elements available in the destination buffer, including any text
+                    terminator.
+    @param after Exclusive library ID cursor; zero starts at the first page.
+
+    @return true - The requested library information was read and encoded as JSON.
+    @return false - Storage, lookup or JSON buffer capacity prevented a complete response.
+*/
+bool
+MediaLibrary::Overview (
+    char* json,
+    size_t capacity,
+    uint32_t after
+    )
+{
+    size_t i;
+    JsonWriter out;
+    const char* hasMore = nullptr;
+    uint32_t displayedPhoto;
+    const char* slideshow = nullptr;
+    const char* pingPong = nullptr;
+    size_t innerIndex;
+    const MemoryManager::LibraryPhoto* photo = nullptr;
+    const char* format = nullptr;
+    const char* valid = nullptr;
+    MemoryManager::StorageUsage storage;
+    bool measured;
+    const char* available = nullptr;
+
+    if (!memory_.ListLibraryPhotos(photos_, MemoryManager::LibraryPageSize, count_, after, &photoPage_)) {
+        error_ = memory_.GetLastError();
+        return false;
+    }
+    for (i = 0; i < count_; ++i) {
+        if (Rejected(photos_[i].id, false)) {
+            photos_[i].valid = false;
+        }
+    }
+
+    error_ = "";
+    out = {json, capacity};
+    hasMore = {};
+    if (photoPage_.hasMore) {
+        hasMore = "true";
+    } else {
+        hasMore = "false";
+    }
+    displayedPhoto = {};
+    if (player_.IsPlayingVideo()) {
+        displayedPhoto = 0;
+    } else {
+        displayedPhoto = displayed_;
+    }
+    slideshow = {};
+    if (settings_.slideshow) {
+        slideshow = "true";
+    } else {
+        slideshow = "false";
+    }
+    pingPong = {};
+    if (player_.IsPlayingVideo() && player_.GetPlaybackMetadata().pingPong) {
+        pingPong = "true";
+    } else {
+        pingPong = "false";
+    }
+    out.AppendFormattedText(
+        "{\"mode\":\"%s\",\"pageSize\":10,\"after\":%lu,\"nextAfter\":%lu,\"hasMore\":%s,\"count\":%lu,"
+        "\"selected\":%lu,\"displayed\":%lu,\"displayedVideo\":%lu,\"slideshow\":%s,\"intervalSeconds\":%"
+        "lu,\"pingPong\":%s,\"photos\":[",
+        ActiveMode(), static_cast<unsigned long>(after), static_cast<unsigned long>(photoPage_.nextAfter),
+        hasMore, static_cast<unsigned long>(photoPage_.total),
+        static_cast<unsigned long>(settings_.selectedPhoto), static_cast<unsigned long>(displayedPhoto),
+        static_cast<unsigned long>(player_.GetLibraryVideoId()), slideshow,
+        static_cast<unsigned long>(settings_.intervalSeconds), pingPong);
+    for (innerIndex = 0; innerIndex < count_; ++innerIndex) {
+        photo = &(photos_[innerIndex]);
+        if (innerIndex) {
+            out.AppendFormattedText(",");
+        }
+        out.AppendFormattedText(
+            "{\"id\":%lu,\"revision\":%lu,\"name\":", static_cast<unsigned long>(photo->id),
+            static_cast<unsigned long>(photo->checksum));
+        out.AppendEscapedString(photo->name);
+        format = {};
+        if (photo->valid) {
+            format = photo->metadata.FormatName();
+        } else {
+            format = "unknown";
+        }
+        valid = {};
+        if (photo->valid) {
+            valid = "true";
+        } else {
+            valid = "false";
+        }
+        out.AppendFormattedText(
+            ",\"format\":\"%s\",\"jpegQuality\":%u,\"width\":%u,\"height\":%u,\"left\":%u,\"top\":%u,"
+            "\"frames\":1,\"bytes\":%llu,\"valid\":%s}",
+            format, unsigned(photo->metadata.jpegQuality), unsigned(photo->metadata.width),
+            unsigned(photo->metadata.height), unsigned(photo->metadata.Left(LOGICAL_IMAGE_WIDTH)),
+            unsigned(photo->metadata.Top(LOGICAL_IMAGE_HEIGHT)), static_cast<unsigned long long>(photo->bytes),
+            valid);
+    }
+
+    out.AppendFormattedText("],\"displayedName\":");
+    out.AppendEscapedString(displayedName_);
+    out.AppendFormattedText(",");
+    storage = {};
+    measured = memory_.GetStorageUsage(storage);
+    available = {};
+    if (measured) {
+        available = "true";
+    } else {
+        available = "false";
+    }
+    out.AppendFormattedText(
+        "\"storage\":{\"available\":%s,\"totalBytes\":%llu,\"fileBytes\":%llu,\"allocatedBytes\":%llu},"
+        "\"error\":",
+        available, static_cast<unsigned long long>(storage.totalBytes),
+        static_cast<unsigned long long>(storage.fileBytes),
+        static_cast<unsigned long long>(storage.allocatedBytes));
+    out.AppendEscapedString(error_);
+    out.AppendFormattedText("}");
+    return out.good;
+} // Overview
+
+/**
+    Returns a saved media preview as a JSON pixel response.
+
+    Reads the requested photo or first-video-frame preview through MemoryManager, then
+    base64-encodes the RGB565 pixels into a bounded JSON response. Preview loading may read or
+    decode stored media synchronously, so this executes in the foreground. Storage failure or
+    output overflow returns failure rather than publishing an incomplete pixel sample.
+
+    @param id Saved media library identifier; valid IDs are nonzero.
+    @param json Output buffer for the generated JSON text.
+    @param capacity Number of elements available in the destination buffer, including any text
+                    terminator.
+    @param video True selects videos; false selects photos.
+
+    @return true - The requested library information was read and encoded as JSON.
+    @return false - Storage, lookup or JSON buffer capacity prevented a complete response.
+*/
+bool
+MediaLibrary::Thumbnail (
+    uint32_t id,
+    char* json,
+    size_t capacity,
+    bool video
+    )
+{
+    JsonWriter out;
+    constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t i;
+    bool second;
+    bool third;
+    uint32_t secondByte;
+    uint32_t thirdByte;
+    uint32_t word;
+    char thirdCharacter;
+    char fourthCharacter;
+
+    static uint8_t thumbnail[MemoryManager::PreviewBytes];
+    if (!memory_.ReadLibraryPreview(id, video, thumbnail, sizeof(thumbnail))) {
+        error_ = memory_.GetLastError();
+        return false;
+    }
+    out = {json, capacity};
+    out.AppendFormattedText("{\"width\":32,\"height\":64,\"pixels\":\"");
+    for (i = 0; i < sizeof(thumbnail); i += BASE64_INPUT_BYTES) {
+        second = i + 1 < sizeof(thumbnail);
+        third = i + BASE64_THIRD_INPUT_INDEX < sizeof(thumbnail);
+        secondByte = {};
+        if (second) {
+            secondByte = uint32_t(thumbnail[i + 1]) << BASE64_SECOND_INPUT_SHIFT;
+        } else {
+            secondByte = 0;
+        }
+        thirdByte = {};
+        if (third) {
+            thirdByte = thumbnail[i + BASE64_THIRD_INPUT_INDEX];
+        } else {
+            thirdByte = 0;
+        }
+        word = uint32_t(thumbnail[i]) << BASE64_FIRST_INPUT_SHIFT | secondByte | thirdByte;
+        thirdCharacter = {};
+        if (second) {
+            thirdCharacter = alphabet[(word >> BASE64_SECOND_OUTPUT_SHIFT) & BASE64_CHARACTER_MASK];
+        } else {
+            thirdCharacter = '=';
+        }
+        fourthCharacter = {};
+        if (third) {
+            fourthCharacter = alphabet[word & BASE64_CHARACTER_MASK];
+        } else {
+            fourthCharacter = '=';
+        }
+        out.AppendFormattedText("%c%c%c%c", alphabet[word >> BASE64_FIRST_OUTPUT_SHIFT],
+                                alphabet[(word >> BASE64_THIRD_OUTPUT_SHIFT) & BASE64_CHARACTER_MASK],
+                                thirdCharacter, fourthCharacter);
+    }
+
+    out.AppendFormattedText("\",\"error\":\"\"}");
+    return out.good;
+} // Thumbnail
+
+/**
+    Formats the current display selection and saved controls as JSON.
+
+    Returns the published display mode and cached selected name without accessing SD
+    files. Deferred selections remain distinct from the frame currently on the panel.
+    The caller may query this snapshot while a media upload owns storage.
+
+    @param json Caller-owned output buffer.
+    @param capacity Output capacity including its text terminator.
+
+    @return true - The complete status fits in the output buffer.
+    @return false - The response would exceed the output capacity.
+*/
+bool
+MediaLibrary::PlaybackStatus (
+    char* json,
+    size_t capacity
+    ) const
+{
+    JsonWriter out;
+    uint32_t displayedPhoto;
+    const char* ready = nullptr;
+    const char* pingPong = nullptr;
+
+    out = {json, capacity};
+    displayedPhoto = displayed_;
+    if (player_.IsPlayingVideo()) {
+        displayedPhoto = 0;
+    }
+    ready = "false";
+    if (memory_.IsReady()) {
+        ready = "true";
+    }
+    pingPong = "false";
+    if (player_.IsPlayingVideo() && player_.GetPlaybackMetadata().pingPong) {
+        pingPong = "true";
+    }
+    out.AppendFormattedText("{\"mode\":\"%s\",\"displayed\":%lu,\"displayedVideo\":%lu,\"intervalSeconds\":%lu,\"pingPong\":%s,\"storageReady\":%s,",
+                            ActiveMode(), static_cast<unsigned long>(displayedPhoto),
+                            static_cast<unsigned long>(player_.GetLibraryVideoId()),
+                            static_cast<unsigned long>(settings_.intervalSeconds), pingPong, ready);
+    out.AppendFormattedText("\"displaySettings\":{\"maxFps\":%lu,\"brightness\":%lu},\"displayedName\":",
+                            static_cast<unsigned long>(settings_.maxFps), static_cast<unsigned long>(settings_.brightness));
+    out.AppendEscapedString(displayedName_);
+    out.AppendFormattedText(",\"error\":\"\"}");
+    return out.good;
+} // PlaybackStatus
+
+
+/**
+    Formats managed SD storage capacity and consumption as JSON.
+
+    The filesystem query runs in foreground code and counts controller-managed files,
+    including staged data and retained settings. An unavailable or busy card reports
+    available false without presenting a partial usage total as a complete result.
+
+    @param json Caller-owned output buffer.
+    @param capacity Output capacity including its text terminator.
+
+    @return true - The complete response fits in the output buffer.
+    @return false - The response would exceed the output capacity.
+*/
+bool
+MediaLibrary::MemoryStatus (
+    char* json,
+    size_t capacity
+    )
+{
+    MemoryManager::StorageUsage storage;
+    bool measured;
+    const char* available = nullptr;
+    JsonWriter out;
+
+    storage = {};
+    measured = memory_.GetStorageUsage(storage);
+    available = "false";
+    if (measured) {
+        available = "true";
+    }
+    out = {json, capacity};
+    out.AppendFormattedText("{\"storage\":{\"available\":%s,\"totalBytes\":%llu,\"fileBytes\":%llu,\"allocatedBytes\":%llu},\"error\":\"\"}",
+                            available, static_cast<unsigned long long>(storage.totalBytes),
+                            static_cast<unsigned long long>(storage.fileBytes),
+                            static_cast<unsigned long long>(storage.allocatedBytes));
+    return out.good;
+} // MemoryStatus
