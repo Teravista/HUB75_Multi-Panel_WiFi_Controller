@@ -32,12 +32,16 @@ finishes its current storage/render operation, handles the command and acknowled
 Listener creation and shutdown use pause/resume commands so foreground transport users
 cannot overlap lifecycle changes.
 
-Radio initialization uses a separate suspend/ready handoff. Core 0 completes canceled
-upload cleanup, closes playback and releases the SD session before the radio changes.
-After the initialization attempt, Core 0 remounts storage and schedules saved-media
-restoration. This finishes before the SDK association/DHCP wait, so that wait leaves
-Core 0 available for playback. Failed storage initialization retains the built-in
-fallback. A radio restart therefore also reopens storage.
+Wi-Fi radio initialization and reconnects retain the SD session, open playback file,
+cache and playback position. Storage recovery never invokes radio or listener lifecycle
+operations. A network interruption can cancel an in-progress upload, releasing that
+transaction's ownership without remounting SD.
+
+Core 0 advances the independent SD state machine between bounded foreground operations.
+Storage loss discards failed handles and clears saved-media display state; the built-in
+fallback remains available. A successful remount reloads that card's library and persisted
+selection before accepting new storage jobs. Worker completion precedes any buffer or
+session invalidation.
 
 ## Upload and rendering ownership
 

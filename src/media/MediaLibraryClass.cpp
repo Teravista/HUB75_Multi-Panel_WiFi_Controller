@@ -1608,6 +1608,7 @@ MediaLibrary::PlaybackStatus (
                             ActiveMode(), static_cast<unsigned long>(displayedPhoto),
                             static_cast<unsigned long>(player_.GetLibraryVideoId()),
                             static_cast<unsigned long>(settings_.intervalSeconds), pingPong, ready);
+    AppendStorageStateJson(out, memory_);
     out.AppendFormattedText("\"displaySettings\":{\"maxFps\":%lu,\"brightness\":%lu},\"displayedName\":",
                             static_cast<unsigned long>(settings_.maxFps), static_cast<unsigned long>(settings_.brightness));
     out.AppendEscapedString(displayedName_);
@@ -1647,9 +1648,32 @@ MediaLibrary::MemoryStatus (
         available = "true";
     }
     out = {json, capacity};
-    out.AppendFormattedText("{\"storage\":{\"available\":%s,\"totalBytes\":%llu,\"fileBytes\":%llu,\"allocatedBytes\":%llu},\"error\":\"\"}",
+    out.AppendFormattedText("{\"storage\":{\"available\":%s,\"totalBytes\":%llu,\"fileBytes\":%llu,\"allocatedBytes\":%llu},",
                             available, static_cast<unsigned long long>(storage.totalBytes),
                             static_cast<unsigned long long>(storage.fileBytes),
                             static_cast<unsigned long long>(storage.allocatedBytes));
+    AppendStorageStateJson(out, memory_);
+    out.AppendFormattedText("\"error\":\"\"}");
     return out.good;
 } // MemoryStatus
+
+/**
+    Adds SD availability and retry information to a JSON response.
+
+    @param out JSON writer receiving the appended fields.
+    @param memory SD storage manager used for saved media operations.
+*/
+void
+MediaLibrary::AppendStorageStateJson (
+    JsonWriter& out,
+    const MemoryManager& memory
+    )
+{
+    out.AppendFormattedText(
+        "\"storageState\":\"%s\",\"storageRetryMs\":%lu,\"storageGeneration\":%lu,\"storageError\":",
+        memory.GetStateName(),
+        static_cast<unsigned long>(memory.GetRetryInMs(to_ms_since_boot(get_absolute_time()))),
+        static_cast<unsigned long>(memory.GetStorageGeneration()));
+    out.AppendEscapedString(memory.GetStorageError());
+    out.AppendFormattedText(",");
+} // AppendStorageStateJson

@@ -3,6 +3,12 @@
 #include "hw_config.h"
 #include "hardware/clocks.h"
 
+#define SD_BUS_LOCK_TIMEOUT_MS 500
+#define SD_COMMAND_RETRY_COUNT 2
+#define SD_INITIAL_COMMAND_TIMEOUT_MS 1000
+#define SD_MOUNTED_COMMAND_TIMEOUT_MS 250
+#define SD_SPI_TRANSFER_TIMEOUT_MS 100
+
 #define SD_PERIPHERAL_CLOCK_THRESHOLD_HZ 24'000'000
 
 namespace {
@@ -64,6 +70,15 @@ InitializeMemoryStorageHardware (
 {
     bool initialized;
     unsigned systemClock;
+
+    // Initialization permits slow cards; mounted runtime operations use shorter deadlines.
+    sd_timeouts.sd_command = SD_INITIAL_COMMAND_TIMEOUT_MS;
+    sd_timeouts.sd_command_retries = SD_COMMAND_RETRY_COUNT;
+    sd_timeouts.sd_lock = SD_BUS_LOCK_TIMEOUT_MS;
+    sd_timeouts.spi_lock = SD_BUS_LOCK_TIMEOUT_MS;
+    sd_timeouts.sd_spi_read = SD_SPI_TRANSFER_TIMEOUT_MS;
+    sd_timeouts.sd_spi_write = SD_SPI_TRANSFER_TIMEOUT_MS;
+    sd_timeouts.sd_spi_write_read = SD_SPI_TRANSFER_TIMEOUT_MS;
 
     // Set the SPI peripheral clock source before the bus is initialized. The
     // card still starts at the driver's slow initialization clock.
@@ -204,3 +219,14 @@ EndMemoryStorageReadProfile (
     storageInterface.read_profile = nullptr;
     return storageReadProfile;
 } // EndMemoryStorageReadProfile
+
+/**
+    Applies shorter SD command deadlines after a successful filesystem mount.
+*/
+void
+SetMemoryStorageMounted (
+    void
+    )
+{
+    sd_timeouts.sd_command = SD_MOUNTED_COMMAND_TIMEOUT_MS;
+} // SetMemoryStorageMounted

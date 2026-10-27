@@ -14,14 +14,9 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "network-core-services"
+#define WIFI_STATE_MACHINE_REV "independent-storage-recovery"
 
-struct NetworkStorageContext {
-    MemoryManager* memory;
-    MediaLibrary* library;
-    MediaPlayer* player;
-    TcpVideoUpload* video;
-    HttpMediaUpload* http;
+struct NetworkPauseContext {
     bool* servicesPaused;
 };
 
@@ -39,55 +34,27 @@ YieldNetworkWorker (
 /**
     Handles a network lifecycle request at a safe foreground boundary.
 
-    Listener changes pause foreground transport users until Core 1 finishes the change.
-    Radio restart also cancels unfinished storage work and releases the SD session.
-    The session is reopened immediately after the radio initialization attempt, before
-    Wi-Fi association can block, so saved playback can advance during the join wait.
+    Pauses foreground transport users only while Core 1 changes listeners. Radio restart
+    never releases SD resources or changes saved playback. These acknowledgements occur
+    outside storage/render operations, avoiding concurrent transport teardown.
 
-    @param opaque Foreground-owned storage and media context.
-    @param command Requested listener or radio lifecycle boundary.
+    @param opaque Foreground-owned transport pause flag.
+    @param command Requested listener lifecycle boundary.
 */
 static void
-HandleNetworkStorageRequest (
+HandleNetworkPauseRequest (
     void* opaque,
     NetworkServices::Command command
     )
 {
-    NetworkStorageContext* context = nullptr;
-    context = static_cast<NetworkStorageContext*>(opaque);
-
-    switch (command) {
-    case NetworkServices::Command::PauseServices:
+    NetworkPauseContext* context = nullptr;
+    context = static_cast<NetworkPauseContext*>(opaque);
+    if (command == NetworkServices::Command::PauseServices) {
         *context->servicesPaused = true;
-        break;
-    case NetworkServices::Command::ResumeServices:
+    } else if (command == NetworkServices::Command::ResumeServices) {
         *context->servicesPaused = false;
-        break;
-    case NetworkServices::Command::SuspendRadio:
-        // Listener shutdown has queued cancellation; finish it before releasing SD.
-        *context->servicesPaused = true;
-        context->video->UpdateStorage();
-        context->http->Update(false);
-        context->player->Stop();
-        context->memory->Shutdown();
-        break;
-    case NetworkServices::Command::RadioReady:
-    case NetworkServices::Command::RadioFailed:
-        // Mount and schedule restoration on Core 0 before the worker starts association.
-        if (context->memory->Initialize()) {
-            context->library->Initialize();
-            if (!context->library->WantsMedia()) {
-                context->player->RequestReload();
-            }
-        } else {
-            printf("[memory] saves unavailable: %s\n", context->memory->GetLastError());
-        }
-        *context->servicesPaused = false;
-        break;
-    case NetworkServices::Command::None:
-        break;
     }
-} // HandleNetworkStorageRequest
+} // HandleNetworkPauseRequest
 
 /**
     Prepares display frames and advances foreground storage and media services.
@@ -124,9 +91,12 @@ RenderLoop (
     size_t frameIndex;
     bool animationMovingForward;
     bool servicesPaused;
+    bool storageLost;
+    bool storageRestored;
+    MemoryManager::Event storageEvent;
     NetworkServices::Status networkStatus;
     NetworkServices::Handler handler;
-    NetworkStorageContext context;
+    NetworkPauseContext context;
     bool reloadVideo;
     bool reloadHttp;
     uint32_t lastFrameCount;
@@ -143,10 +113,12 @@ RenderLoop (
     frameIndex = FIRST_FRAME_INDEX;
     animationMovingForward = true;
     servicesPaused = false;
+    storageLost = false;
+    storageRestored = false;
     reloadVideo = false;
     reloadHttp = false;
-    context = {&memory, &library, &player, &video, &http, &servicesPaused};
-    handler = {&context, HandleNetworkStorageRequest};
+    context = {&servicesPaused};
+    handler = {&context, HandleNetworkPauseRequest};
     attemptedPhotoRevision = 0;
     lastFrameCount = 0;
     lastFpsTime = get_absolute_time();
@@ -161,6 +133,32 @@ RenderLoop (
         if (servicesPaused) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
             continue;
+        }
+
+        // Recover storage independently, and discard old-card selections before accepting new jobs.
+        storageEvent = memory.Update(to_ms_since_boot(get_absolute_time()));
+        if (storageEvent == MemoryManager::Event::Unavailable) {
+            storageLost = true;
+            storageRestored = false;
+        } else if (storageEvent == MemoryManager::Event::Ready) {
+            storageRestored = true;
+        }
+        if ((storageLost || storageRestored) && upload.TryBeginRender()) {
+            if (storageLost) {
+                library.StorageUnavailable();
+                storageLost = false;
+            }
+            if (storageRestored) {
+                storageRestored = false;
+                if (library.Initialize()) {
+                    if (library.WantsMedia()) {
+                        library.RequestReload();
+                    } else {
+                        player.RequestReload();
+                    }
+                }
+            }
+            upload.EndRender();
         }
 
         // Storage runs only here; transport callbacks and reply pumping run on Core 1.
@@ -223,8 +221,8 @@ RenderLoop (
             lastFpsTime = get_absolute_time();
         }
         if (uptimeMs - lastStatusMs >= STATUS_PRINT_INTERVAL_10S) {
-            printf("[status] t=%us fps=%u net=%s ip=%s\n", uptimeMs / MILLISECONDS_PER_SECOND_U,
-                   framesPerSecond, networkStatus.state, networkStatus.ip);
+            printf("[status] t=%us fps=%u net=%s ip=%s sd=%s\n", uptimeMs / MILLISECONDS_PER_SECOND_U,
+                   framesPerSecond, networkStatus.state, networkStatus.ip, memory.GetStateName());
             lastStatusMs = uptimeMs;
         }
 
@@ -242,9 +240,8 @@ RenderLoop (
 
     The flashed frame is queued first so display scanning has visible content
     during SD probing. A verified saved photo or first video frame replaces it; missing or damaged
-    storage leaves the flashed image available. Startup temporarily releases SD
-    resources for the initial radio claim; the foreground lifecycle handler reopens
-    storage before the network core begins association.
+    storage leaves the flashed image available. The mounted SD session remains
+    independent of Core 1 radio initialization and connection retries.
 
     @return value - The controller normally remains in RenderLoop indefinitely.
 */
@@ -306,9 +303,7 @@ main (
             printf("[memory] using flashed image: %s\n", memory.GetLastError());
         }
 
-        // Release the startup SD session before the initial radio resource claim.
-        player.Stop();
-        memory.Shutdown();
+        // SD retains its SPI/DMA resources while Core 1 initializes or reconnects the radio.
     } else {
         printf("[memory] using flashed image: %s\n", memory.GetLastError());
     }

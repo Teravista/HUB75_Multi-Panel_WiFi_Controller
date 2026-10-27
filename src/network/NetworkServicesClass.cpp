@@ -4,7 +4,7 @@
 #include <cstring>
 
 /**
-    Connects Wi-Fi service transitions to foreground storage handoffs.
+    Connects Wi-Fi service transitions to foreground transport handoffs.
 
     @param wifi Wi-Fi connection and local-service state controller.
     @param yield Callback allowing the worker to yield while waiting for foreground work.
@@ -24,20 +24,9 @@ NetworkServices::NetworkServices (
             NetworkServices* worker = nullptr;
             worker = static_cast<NetworkServices*>(context);
             worker->PublishStatus(true);
-            worker->Request(Command::SuspendRadio);
         },
         this);
-    wifi_.SetAfterRadioInitialization(
-        [](void* context, bool initialized) {
-            NetworkServices* worker = nullptr;
-            worker = static_cast<NetworkServices*>(context);
-            if (initialized) {
-                worker->Request(Command::RadioReady);
-            } else {
-                worker->Request(Command::RadioFailed);
-            }
-        },
-        this);
+
 } // NetworkServices
 
 /**
@@ -49,7 +38,6 @@ NetworkServices::~NetworkServices (
 {
     wifi_.SetServiceLifecycle(nullptr, nullptr, nullptr);
     wifi_.SetBeforeRadioRestart(nullptr, nullptr);
-    wifi_.SetAfterRadioInitialization(nullptr, nullptr);
 } // ~NetworkServices
 
 /**
@@ -70,8 +58,8 @@ NetworkServices::Initialize (
     Publishes a pause/resume command and yields until Core 0 acknowledges that it has handled the
     safe foreground boundary. No shared status lock is held during this wait. The handler must
     continue being polled on Core 0; the protocol is for listener lifecycle transitions, not for
-    waiting through Wi-Fi association. Radio initialization has explicit
-    suspend/ready commands before the blocking association call begins.
+    waiting through Wi-Fi association. Radio restarts leave the independent
+    storage session and playback position intact.
 
     @param command Controller command exchanged with the foreground worker.
 */
@@ -169,7 +157,7 @@ NetworkServices::Update (
 } // Update
 
 /**
-    Handles and acknowledges a pending storage-side service handoff.
+    Handles and acknowledges a pending transport lifecycle handoff.
 
     Reads the pending service command with acquire ordering and invokes the supplied foreground
     handler before publishing acknowledgement. Listener changes may resume on Core 1 only after

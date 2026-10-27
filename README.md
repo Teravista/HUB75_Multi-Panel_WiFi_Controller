@@ -196,10 +196,9 @@ starts the HTTP and TCP services.
 
 Core 1 advances Wi-Fi and HTTP/TCP transport work and accepts JPEG decode jobs when idle.
 Core 0 handles upload/save jobs, library selection, local JPEG fallback and video playback,
-then prepares and submits frames
-under shared-frame ownership. Lifecycle handoffs pause foreground transport users
-while listeners change. SD resources are released for radio initialization and reopened
-before the association wait, allowing saved playback to continue during that wait.
+then prepares and submits frames under shared-frame ownership. Listener changes use
+brief foreground handoffs. Wi-Fi retries retain the mounted SD session and playback
+position; SD loss and remounting do not restart the network services.
 See [runtime ownership and handoffs](docs/RUNTIME.md).
 
 ## Driver Overview
@@ -218,10 +217,12 @@ image preparation can pause while the scanner displays the last submitted frame.
 - `WifiNoTcp`: has a station address and retries binding the HTTP, photo and video
   listeners until all required services are available.
 - `Ready`: accepts uploads and checks station/link health and listener availability.
-  Lost links or repeated radio-response failures stop services and schedule recovery.
+  Lost links, repeated radio-response failures or debounced loss of fresh gateway
+  replies and incoming traffic stop services and schedule recovery.
 
 A periodic TCP connection to the local gateway is diagnostic. A filtered or closed
-gateway port alone does not stop active upload services. No Internet access is required.
+gateway port alone does not stop active upload services. Fresh ARP replies or recent
+incoming traffic verify the local path. No Internet access is required.
 
 # 5. Credits / License
 
