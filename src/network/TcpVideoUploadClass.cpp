@@ -490,6 +490,40 @@ TcpVideoUpload::FinishJob (
 /**
     Advances foreground storage and pending TCP replies.
 
+    Single-core callers process storage before pumping transport. The dual-core
+    application invokes the two sides on their owning cores instead.
+*/
+void
+TcpVideoUpload::Update (
+    void
+    )
+{
+    UpdateStorage();
+    UpdateTransport();
+} // Update
+
+/**
+    Pumps video replies and expires inactive transport clients.
+
+    Runs on Core 1; accesses only transport state while holding the lwIP lock.
+    File writes and verification remain on the foreground storage side.
+*/
+void
+TcpVideoUpload::UpdateTransport (
+    void
+    )
+{
+    if (!enabled_) {
+        return;
+    }
+    cyw43_arch_lwip_begin();
+    Pump();
+    cyw43_arch_lwip_end();
+} // UpdateTransport
+
+/**
+    Writes received video chunks and advances SD readback verification.
+
     Snapshots transport state under the lwIP lock and performs bounded filesystem
     work outside it. The stop-and-wait protocol applies backpressure: a chunk is
     acknowledged only after its append succeeds. VERIFY precedes incremental SD
@@ -497,7 +531,7 @@ TcpVideoUpload::FinishJob (
     Network shutdown defers cancellation cleanup here without entering a dead radio.
 */
 void
-TcpVideoUpload::Update (
+TcpVideoUpload::UpdateStorage (
     void
     )
 {
@@ -633,10 +667,7 @@ TcpVideoUpload::Update (
             FinishJob("SAVED\n");
         }
     }
-    cyw43_arch_lwip_begin();
-    Pump();
-    cyw43_arch_lwip_end();
-} // Update
+} // UpdateStorage
 
 /**
     Returns and clears the ID of the last verified library video.

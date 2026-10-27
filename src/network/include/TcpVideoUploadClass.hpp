@@ -7,8 +7,8 @@
     Receives raw or indexed-JPEG videos without retaining the clip in RAM.
 
     TCP callbacks collect at most one acknowledged chunk and handle replies;
-    Update performs every filesystem write and verification step in foreground
-    code, outside the lwIP lock. Exclusive framebuffer ownership pauses playback
+    UpdateStorage performs filesystem writes and verification on Core 0, outside
+    the lwIP lock. UpdateTransport pumps replies on Core 1. Exclusive framebuffer ownership pauses playback
     while a transaction is active. Completion or cancellation releases that
     ownership and requests saved playback restoration. Library mode publishes an
     independent item ID; retained mode preserves the alternating legacy generations.
@@ -29,6 +29,12 @@ public:
 
     // Advances foreground storage and pending TCP replies.
     void Update(void);
+
+    // Writes received video chunks and advances SD readback verification.
+    void UpdateStorage(void);
+
+    // Pumps video replies and expires inactive transport clients.
+    void UpdateTransport(void);
 
     // Reports whether the video upload holds exclusive framebuffer access.
     bool OwnsDisplay(void) const;

@@ -694,35 +694,67 @@ WebServer::SetMediaUpload (
 /**
     Advances foreground media work, client deadlines and pending responses.
 
-    The coordinator processes one request or verification step outside the lwIP
-    lock. The transport then publishes its completed JSON response and pumps TCP
-    output. A borrowed response stays reserved until the connection closes.
+    Single-core callers run storage before transport. The application separates
+    these entry points so filesystem access cannot block the network worker.
 */
 void
 WebServer::Update (
     void
     )
 {
+    UpdateStorage();
+    UpdateTransport();
+} // Update
+
+/**
+    Processes queued HTTP requests that need foreground storage access.
+
+    Runs on Core 0 outside the lwIP lock. Listener lifecycle handoffs pause this
+    entry before Core 1 changes or tears down its radio/transport context.
+*/
+void
+WebServer::UpdateStorage (
+    void
+    )
+{
     if (httpUpload) {
         httpUpload->Update(enabled);
     }
+} // UpdateStorage
+
+/**
+    Maintains HTTP client deadlines and pending responses.
+
+    Polls the retained client for a completed foreground response and attempts to queue pending
+    TCP output. It only moves transport state and response bytes; SD processing is advanced
+    separately by the foreground update path. Backpressure keeps the client pending until a later
+    update or callback can make progress.
+*/
+void
+WebServer::UpdateTransport (
+    void
+    )
+{
     if (!enabled) {
         return;
     }
+
+    // Serialize TCP state changes with lwIP; keep storage work outside this lock.
     cyw43_arch_lwip_begin();
     if (client.pcb) {
         PollHttpClient(nullptr, client.pcb);
     }
     if (client.pcb && client.waiting && httpUpload->ResponseReady()) {
         client.waiting = false;
-        if (!BuildHttpResponse("200 OK", "application/json", httpUpload->Response(), std::strlen(httpUpload->Response()))) {
+        if (!BuildHttpResponse("200 OK", "application/json", httpUpload->Response(),
+                               std::strlen(httpUpload->Response()))) {
             AbortHttpClient();
         } else {
             SendPendingHttpResponse();
         }
     }
     cyw43_arch_lwip_end();
-} // Update
+} // UpdateTransport
 
 /**
     Starts the media HTTP listener on port 80.

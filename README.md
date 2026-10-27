@@ -11,6 +11,7 @@
 | Binary descriptors and container compatibility | [Media metadata](docs/MEDIA-METADATA.md) |
 | Compressed frame layout and bounded decoder | [JPEG video](docs/JPEG-VIDEO.md) |
 | Frame buffers, scan isolation and FPS | [Display](docs/DISPLAY.md) |
+| Core ownership, network lifecycle and upload handoffs | [Runtime](docs/RUNTIME.md) |
 
 <table>
   <tr>
@@ -122,16 +123,15 @@ with your local settings.
 - `PICO_PORT` - TCP image-upload port. CMake gives this value to the firmware listener, and the Python upload script connects to the same port.
 - `WIFI_SSID` - WiFi network name compiled into the firmware.
 - `WIFI_PASSWORD` - WiFi password compiled into the firmware.
-- `WIFI_GATEWAY_PROBE_PORT` - gateway health-check port used by the firmware
+- `WIFI_GATEWAY_PROBE_PORT` - local gateway TCP diagnostic port
 
 CMake generates `build/generated/networkConfig.h` from `.env`. Do not edit or commit
 that generated file; a normal build recreates it when it is missing or when `.env`
 changes. The Python upload script reads `PICO_IP` and `PICO_PORT` directly from the same
 `.env` file.
 
-If wrong credentials are provided, the connection fails, the WiFi icon in the top right
-corner shows red, and only the default flashed image/animation is shown - with no way to
-update it over TCP.
+If the connection fails, the Wi-Fi icon shows red and network uploads are unavailable.
+Saved media or the built-in fallback continues displaying while the controller retries.
 
 ## Build & Flash Quickstart
 Configure `.env` as described above before the first build. This project is built and
@@ -194,10 +194,12 @@ Startup initializes HUB75, prepares a fallback frame, mounts storage and restore
 saved library selection where available. It then attempts the Wi-Fi connection and
 starts the HTTP and TCP services.
 
-The foreground loop advances networking, upload/save jobs, library selection and video
-playback, then prepares and submits frames under shared-frame ownership. Connection
-attempts can block this loop and pause new-frame preparation; the independent scanner
-continues displaying its last submitted frame.
+Core 1 advances Wi-Fi and HTTP/TCP transport work. Core 0 handles upload/save jobs,
+library selection, JPEG decoding and video playback, then prepares and submits frames
+under shared-frame ownership. Lifecycle handoffs pause foreground transport users
+while listeners change. SD resources are released for radio initialization and reopened
+before the association wait, allowing saved playback to continue during that wait.
+See [runtime ownership and handoffs](docs/RUNTIME.md).
 
 ## Driver Overview
 
@@ -208,32 +210,17 @@ image preparation can pause while the scanner displays the last submitted frame.
 
 ## WiFi State Machine
 
-The state machine has three states - `NoWifi`, `WifiNoTcp`, and `Ready` - advanced once
-per main loop iteration by `UpdateNetworkStateMachine()`.
+`WifiConnection` advances `NoWifi`, `WifiNoTcp` and `Ready` on Core 1.
 
-### NoWifi
-No usable WiFi link; any previous TCP upload listener has already been stopped. Once a
-retry timer elapses (every 10s), it runs the connect sequence: re-initializes the CYW43
-driver and makes a blocking connect attempt to the configured AP (up to 15s). On success
-it moves to `WifiNoTcp`; on failure it stays in `NoWifi` and reschedules the same retry.
+- `NoWifi`: retries radio initialization and association after the configured delay.
+  A timed-out join receives a grace period so a late DHCP address can be adopted.
+- `WifiNoTcp`: has a station address and retries binding the HTTP, photo and video
+  listeners until all required services are available.
+- `Ready`: accepts uploads and checks station/link health and listener availability.
+  Lost links or repeated radio-response failures stop services and schedule recovery.
 
-### WifiNoTcp
-WiFi link is up and an IP address has been obtained, but the TCP upload listener isn't
-bound yet. Each update first runs the shared health check described below; if that
-passes, it retries binding the TCP upload listener (on port 5001) every 2s until it
-succeeds, then moves to `Ready`. A failed health check drops it back to `NoWifi`.
-
-### Ready
-WiFi is up and the TCP upload listener is bound and accepting connections - this is the
-only state uploads can happen in. Each update runs the same shared health check; if it
-fails, or if the listener is found to have stopped listening, it drops back to `NoWifi`.
-
-### Shared Health Check
-`WifiNoTcp` and `Ready` both run the same health check on every update (throttled to
-once every 2s), any part of which can force a drop back to `NoWifi`:
-- Confirms the WiFi link is still up and an IP address is still assigned.
-- Queries the radio for RSSI to catch an AP that vanished without dropping the link - allowed to fail a few times in a row before it's treated as lost.
-- Periodically opens a TCP probe to the gateway to confirm the path is actually alive (and to keep the connection from being dropped as idle)
+A periodic TCP connection to the local gateway is diagnostic. A filtered or closed
+gateway port alone does not stop active upload services. No Internet access is required.
 
 # 5. Credits / License
 
