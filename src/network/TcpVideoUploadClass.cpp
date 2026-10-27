@@ -688,3 +688,22 @@ TcpVideoUpload::TakeSavedLibraryId (
     savedLibraryId_ = 0;
     return id;
 } // TakeSavedLibraryId
+
+/**
+    Reports whether a raw TCP video upload client is active.
+
+    @return true - A client currently owns the service connection.
+    @return false - No client connection is active.
+*/
+bool
+TcpVideoUpload::HasActiveClient (
+    void
+    )
+{
+    bool active;
+
+    cyw43_arch_lwip_begin();
+    active = client_ != nullptr;
+    cyw43_arch_lwip_end();
+    return active;
+} // HasActiveClient

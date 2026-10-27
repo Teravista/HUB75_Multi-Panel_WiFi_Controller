@@ -56,6 +56,9 @@ public:
     bool ShowLibraryPhoto(uint32_t id);
 
 private:
+    // Selects the decoded pixel format used by the CPU framebuffer.
+    static PixelFormat DecodedFormat(void);
+
     // Reads one checked frame after clearing any generated black borders.
     bool ReadFrame(uint32_t frame);
 

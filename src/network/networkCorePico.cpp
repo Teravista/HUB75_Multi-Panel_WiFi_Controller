@@ -1,38 +1,57 @@
 #include "network/include/networkCore.hpp"
+#include "media/jpeg/include/jpegWorker.hpp"
+static_assert(JPEG_PARALLEL_READER == 1, "Shared Core 1 requires the parallel JPEG input path");
+#include "core/include/sharedCore1.hpp"
+static_assert(!HUB75_MULTICORE, "The display driver must stay on Core 0");
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
-#include "config/defines.h"
-#include "hub75.hpp"
-
-static_assert(!HUB75_MULTICORE, "Application networking owns Core 1; HUB75 must use Core 0");
+#include <cstdio>
 
 namespace {
 NetworkServices* networkServices = nullptr;
 
 /**
-    Runs connection management and upload transport maintenance on Core 1.
+    Runs network work and available JPEG decode jobs on Core 1.
 
-    Wi-Fi association may wait inside the SDK. Core 0 remains available for storage
-    and rendering, apart from acknowledged listener/radio handoff boundaries.
+    Initializes network timing once, enables the shared scheduler, then repeatedly runs either a
+    queued JPEG decode or a permitted network-services update. An idle network pass can offer Core
+    1 to the decoder; a reservation suppresses new network foreground work while Core 0 prepares
+    input. Short sleeps keep that wait yielding without entering a service handoff that could
+    deadlock the foreground.
 */
 void
-RunNetworkCore (
+NetworkCore (
     void
     )
 {
+    Core1Scheduler* scheduler = nullptr;
+
     networkServices->Initialize();
+    scheduler = &(SharedCore1Scheduler());
+    if (!scheduler->Enable()) {
+        panic("Core 1 scheduler already enabled");
+    }
     for (;;) {
-        networkServices->Update();
+        if (scheduler->RunDecode()) {
+            continue;
+        }
+        if (scheduler->TryBeginNetwork()) {
+            networkServices->Update();
+            scheduler->OfferDecode(networkServices->CanDecodeOnCore1());
+        }
+        // During a reservation, wait for input preparation/submission on Core 0
+        // without entering a network lifecycle that would wait for that same core.
         sleep_ms(UPLOAD_POLL_DELAY_1MS);
     }
-} // RunNetworkCore
+} // NetworkCore
 
 } // namespace
 
 /**
     Launches the network worker on Core 1 exactly once.
 
-    @param worker Long-lived worker whose referenced services outlive the core loop.
+
+    @param worker Network worker to launch on the second core.
 */
 void
 StartNetworkCore (
@@ -43,5 +62,5 @@ StartNetworkCore (
         panic("Network core already launched");
     }
     networkServices = &worker;
-    multicore_launch_core1(RunNetworkCore);
+    multicore_launch_core1(NetworkCore);
 } // StartNetworkCore

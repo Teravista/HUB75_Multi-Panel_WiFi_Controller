@@ -45,6 +45,10 @@ public:
     // Returns and clears the ID of the last verified library video.
     uint32_t TakeSavedLibraryId(void);
 
+    // Reports whether a raw TCP video upload client is active.
+    bool HasActiveClient(void);
+
+
 private:
     // Returns elapsed boot time in milliseconds for transport deadlines.
     static uint32_t GetVideoUploadTimeMs(void);

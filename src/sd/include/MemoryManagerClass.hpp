@@ -10,7 +10,9 @@
 /**
     Provides the foreground SD storage boundary for saved photos and raw/indexed-JPEG videos.
 
-    It owns SPI, the filesystem, file handles and one shared 24 KiB I/O buffer.
+    It owns SPI, the filesystem, file handles, shared 24 KiB scratch and a 64 KiB
+    active-playback cache. JPEG reads can feed an available Core 1 decoder through
+    bounded input slots; all filesystem operations remain on Core 0.
     Independent library items and alternating retained generations use checked
     metadata and CRCs. Bounded directory pages, thumbnails and persistent selection
     settings share this storage boundary. Video transactions verify segments without keeping
@@ -22,7 +24,9 @@
 class MemoryManager {
 public:
     static constexpr size_t IoChunkBytes = 24 * 1024;
-    // Pixel fragments are provisional until the complete read succeeds.
+    static constexpr size_t PrefetchBytes = 64 * 1024;
+    // Pixel fragments are provisional until the complete read succeeds. JPEG
+    // sinks may run on the reserved worker and must not perform storage I/O.
     using ImageSink = bool (*)(void* context, const uint8_t* pixels, size_t bytes, size_t offset);
 
     using ImageSource = bool (*)(void* context, uint8_t* pixels, size_t bytes, size_t offset);
@@ -78,8 +82,50 @@ public:
     // Opens the newest valid photo or video for checked frame playback.
     bool OpenLastMedia(MediaMetadata& metadata);
 
+    struct FrameReadTiming {
+        uint64_t seekUs = 0;
+        uint64_t readUs = 0;
+        uint64_t crcUs = 0;
+        uint64_t consumerUs = 0;
+        uint64_t totalUs = 0;
+        uint64_t overlapWorkUs = 0;
+        uint64_t decodeUs = 0;
+        uint64_t encodedBytes = 0;
+        uint64_t jpegInputWaitUs = 0;
+        uint32_t jpegCore1Frames = 0;
+        uint32_t jpegCore0Frames = 0;
+        uint32_t indexCacheHits = 0;
+        uint32_t indexCacheLoads = 0;
+        uint32_t sequentialReads = 0;
+        // Detailed decoder CPU stages sample one in 16 timed JPEG reads.
+        uint32_t jpegSamples = 0;
+        uint32_t jpegMcus = 0;
+        uint32_t jpegIdctBlocks = 0;
+        uint32_t jpegDcBlocks = 0;
+        uint32_t jpegClockReads = 0;
+        uint64_t sampledDecodeUs = 0;
+        uint64_t jpegPrepareUs = 0;
+        uint64_t jpegEntropyUs = 0;
+        uint64_t jpegTransformUs = 0;
+        uint64_t jpegColorUs = 0;
+        uint64_t jpegOtherUs = 0;
+        uint32_t overlapBytes = 0;
+        uint64_t commandUs = 0;
+        uint64_t tokenUs = 0;
+        uint64_t transferUs = 0;
+        uint64_t sectorCrcUs = 0;
+        uint32_t transactions = 0;
+        uint32_t sectors = 0;
+        uint32_t readCalls = 0;
+        uint64_t prefetchHitBytes = 0;
+        uint64_t prefetchReadBytes = 0;
+        uint32_t prefetchLoads = 0;
+        uint32_t prefetchAheadLoads = 0;
+        uint32_t prefetchFailures = 0;
+    };
+
     // Reads and verifies one frame from the selected saved media.
-    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context);
+    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context, FrameReadTiming* timing = nullptr, PixelFormat jpegOutput = PixelFormat::RGB888);
 
     // Closes the active playback file and clears its runtime state.
     void CloseMediaPlayback(void);
@@ -359,7 +405,7 @@ private:
     static SavedPhotoSlot InspectSavedMediaSlot(unsigned index, const char* path = nullptr, bool checkFirstFrame = true);
 
     // Streams and checks a raw frame from the inspection or playback handle.
-    static FrameResult ReadAndVerifyRawVideoFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting);
+    static FrameResult ReadAndVerifyRawVideoFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting, FrameReadTiming* timing = nullptr);
 
     struct JpegIndexEntry {
         uint32_t offset = 0;
@@ -369,22 +415,8 @@ private:
     // Loads and checks a bounded index window for JPEG playback.
     static bool LoadJpegIndexWindow(const SavedPhotoSlot& slot, uint32_t index, int& result);
 
-    struct JpegReadContext {
-        void* file = nullptr;
-        size_t remaining = 0;
-        size_t buffered = 0;
-        size_t cursor = 0;
-        uint32_t crc = STORAGE_CRC32_INITIAL_U;
-        int result = 0;
-        uint8_t previousByte = 0;
-        uint8_t lastByte = 0;
-    };
-
-    // Supplies bounded compressed bytes and checksums their exact record data.
-    static size_t ReadJpegInput(void* context, uint8_t* bytes, size_t count);
-
     // Validates an indexed JPEG record before completing provisional frame output.
-    static FrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting, bool verifying = false);
+    static FrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting, bool verifying = false, FrameReadTiming* timing = nullptr, bool outputRGB565 = false);
 
     // Checks one bounded JPEG payload block or one complete encoded frame.
     bool VerifyJpegSaveStep(bool& finished);

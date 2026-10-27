@@ -25,4 +25,7 @@ void Stop(void);
 // Reports whether the HTTP listener is active.
 bool IsListening(void);
 
+// Reports whether an HTTP request is currently being handled.
+bool HasActiveClient(void);
+
 } // namespace WebServer

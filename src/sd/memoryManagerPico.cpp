@@ -10,14 +10,13 @@ spi_t storageSpi{};
 sd_spi_if_t storageInterface{};
 sd_card_t storageCard{};
 bool configured = false;
+sd_spi_read_profile_t storageReadProfile{};
 } // namespace
 
 /**
     Reports the number of configured SD card devices to the driver.
 
-    Hooks required by the SD driver. Configuration stays within this module.
-
-    @return 1 - Exactly one SD device is configured.
+    @return 1 - Exactly one SD card is configured.
 */
 extern "C" size_t
 sd_get_num (
@@ -30,10 +29,10 @@ sd_get_num (
 /**
     Returns the configured SD card device for a valid driver index.
 
-    @param index Zero-based index of the requested entry, slot or frame.
+    @param index Zero-based SD device index.
 
-    @return pointer - Borrowed configuration for device index zero.
-    @return nullptr - The requested device index is not configured.
+    @return pointer - Borrowed SD device configuration for index zero.
+    @return nullptr - The requested index is not configured.
 */
 extern "C" sd_card_t*
 sd_get_by_num (
@@ -135,6 +134,8 @@ ReleaseMemoryStorageHardware (
     size_t pinIndex;
     unsigned pin;
 
+    SetMemoryStorageReadWork(nullptr, nullptr);
+    EndMemoryStorageReadProfile();
     if (!configured || !storageSpi.initialized) {
         return;
     }
@@ -157,3 +158,49 @@ ReleaseMemoryStorageHardware (
     // Leave the card deselected instead of allowing its CS input to float.
     gpio_put(StorageConfig::ChipSelect, 1);
 } // ReleaseMemoryStorageHardware
+
+/**
+    Installs bounded CPU work to run during SD read DMA waits.
+
+    @param work Bounded CPU-work callback to run while the independent operation progresses.
+    @param context Caller-owned state passed unchanged to the callback.
+*/
+void
+SetMemoryStorageReadWork (
+    MemoryStorageReadWork work,
+    void* context
+    )
+{
+    storageInterface.read_work = work;
+    if (work) {
+        storageInterface.read_work_context = context;
+    } else {
+        storageInterface.read_work_context = nullptr;
+    }
+} // SetMemoryStorageReadWork
+
+/**
+    Starts low-level SD command, transfer, and checksum timing collection.
+*/
+void
+BeginMemoryStorageReadProfile (
+    void
+    )
+{
+    storageReadProfile = {};
+    storageInterface.read_profile = &storageReadProfile;
+} // BeginMemoryStorageReadProfile
+
+/**
+    Stops low-level SD profiling and returns its accumulated timings.
+
+    @return profile - Accumulated command, token, DMA and checksum timing counters.
+*/
+sd_spi_read_profile_t
+EndMemoryStorageReadProfile (
+    void
+    )
+{
+    storageInterface.read_profile = nullptr;
+    return storageReadProfile;
+} // EndMemoryStorageReadProfile

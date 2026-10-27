@@ -11,7 +11,8 @@
     pause or resume, a command mailbox asks Core 0 to finish its current foreground operation and
     acknowledge a safe boundary. A small synchronized status snapshot supplies the display with
     coherent connection and IP data. Core launch belongs to networkCorePico.cpp; SD I/O
-    and library mutations remain on Core 0.
+    and library mutations remain on Core 0. Idle passes also report whether the
+    shared scheduler may accept a decoder reservation.
 */
 class NetworkServices {
 public:
@@ -47,6 +48,10 @@ public:
 
     // Copies a coherent network state and IP snapshot for the display core.
     Status ReadStatus(void);
+
+    // Checks whether network work permits an idle Core 1 decode job.
+    bool CanDecodeOnCore1(void);
+
 
 private:
     WifiConnection& wifi_;

@@ -4,7 +4,9 @@ The CPU graphics frame is RGB565: 128 x 256 x 2 bytes = 64 KiB. Flashed images a
 TCP photo uploads use RGB888 input. Pixel conversion preserves the panel mapping and
 wiring correction, with 5/6/5-bit CPU colour precision. Set `CPU_FRAME_RGB565=0` in the
 CMake definitions to use the 128 KiB RGB888 CPU buffer instead. The driver has two 128
-KiB scan buffers.
+KiB scan buffers. The RGB888 CPU option needs an extra 64 KiB, so its RAM budget must
+also accommodate the playback cache and JPEG input slots; reduce
+`PlaybackPrefetch::Bytes` when that combination exceeds available RAM.
 
 The driver expands RGB565 through compile-time gamma lookup tables when temporal
 dithering is disabled. Foreground submission checks `hub75_ready_for_update()` before

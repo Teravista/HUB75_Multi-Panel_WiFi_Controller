@@ -50,12 +50,21 @@ preceding usable generation to load. Normal and ping-pong playback seek directly
 independent frames. RGB888/RGB565 and older photo slots remain readable without
 conversion.
 
-TJpgDec uses the existing 24 KiB storage buffer as 12 KiB compressed input and 12 KiB
-aligned decoder workspace. MCU tiles are delivered as provisional RGB888 row fragments
-directly to the existing CPU framebuffer; no second complete RGB888 frame is allocated.
-A separate four-KiB cache retains at most 512 checked index entries, and adjacent
-forward records skip redundant seeks. Storage access and decoding run synchronously in
-foreground.
+TJpgDec uses the shared 24 KiB storage buffer as 12 KiB compressed input and 12 KiB
+aligned workspace. MCU tiles are delivered directly to the existing CPU framebuffer as
+provisional RGB565 or RGB888 rows. RGB565 output packs small tile rows without allocating
+a complete RGB888 image. Validation-only reads parse the encoded stream without pixel
+reconstruction.
+
+A four-KiB index cache retains at most 512 checked entries. The active playback file
+also has a 64 KiB cache with two 32 KiB blocks for sequential, reverse and random access.
+Adjacent forward records reuse their logical cursor. Closing or changing the playback
+file invalidates both caches; upload readback verification uses independent uncached
+reads.
+
+When Core 1 is available, two 8 KiB input slots overlap SD reads on Core 0 with JPEG
+decoding on Core 1. Busy networking selects the local Core 0 decoder. See
+[runtime ownership](RUNTIME.md#shared-jpeg-worker).
 
 The decoder uses `-O3` locally, fast entropy lookup and chroma reuse. Its original
 copyright and license remain in the vendored files; local changes are noted in

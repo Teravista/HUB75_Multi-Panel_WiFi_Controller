@@ -194,8 +194,9 @@ Startup initializes HUB75, prepares a fallback frame, mounts storage and restore
 saved library selection where available. It then attempts the Wi-Fi connection and
 starts the HTTP and TCP services.
 
-Core 1 advances Wi-Fi and HTTP/TCP transport work. Core 0 handles upload/save jobs,
-library selection, JPEG decoding and video playback, then prepares and submits frames
+Core 1 advances Wi-Fi and HTTP/TCP transport work and accepts JPEG decode jobs when idle.
+Core 0 handles upload/save jobs, library selection, local JPEG fallback and video playback,
+then prepares and submits frames
 under shared-frame ownership. Lifecycle handoffs pause foreground transport users
 while listeners change. SD resources are released for radio initialization and reopened
 before the association wait, allowing saved playback to continue during that wait.
