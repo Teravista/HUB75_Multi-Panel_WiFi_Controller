@@ -109,6 +109,9 @@ public:
     bool MemoryStatus(char* json, size_t capacity);
 
 private:
+    // Adds SD availability and retry information to a JSON response.
+    static void AppendStorageStateJson(JsonWriter& out, const MemoryManager& memory);
+
     // Calculates the saved video duration in milliseconds.
     static uint64_t CalculateVideoDurationMs(const MediaMetadata& metadata);
 

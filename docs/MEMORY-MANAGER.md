@@ -1,4 +1,4 @@
-# SD image storage
+# SD storage and recovery
 
 `MemoryManager` owns the SPI hardware, FAT/exFAT filesystem, file operations and a
 shared 24 KiB read buffer. Its APIs store named photos, retained legacy media and
@@ -26,7 +26,11 @@ shutdown releases only those channels and its SPI resources.
 
 ## API
 
-- `Initialize()` mounts the card; `Shutdown()` unmounts and releases hardware.
+- `Initialize()` enables monitoring and mounts the card; `Shutdown()` releases hardware
+  and suspends retries until the next explicit initialization.
+- `Update(nowMs)` advances recovery and returns `None`, `Unavailable` or `Ready`.
+- `GetState()`, `GetStateName()`, `GetRetryInMs(nowMs)`, `GetStorageError()` and
+  `GetStorageGeneration()` expose the current session and retry state.
 - `IsReady()` and `GetLastError()` report availability and operation failures.
 - `SaveImage(name, pixels, bytes)` creates a new file, preserving existing files.
 - `ReadImage(name, sink, context)` streams bounded fragments and checks the file.
@@ -59,14 +63,44 @@ if (memory.Initialize()) {
 Completed raw TCP photos become independent library items before the connection overlay
 is drawn. TCP videos are published to the video collection after SD verification.
 Startup restores the saved photo/video selection or slideshow; unavailable content falls
-back to retained legacy content or the flashed image. The first radio setup releases SD
-resources and explicitly mounts storage again.
+back to retained legacy content or the flashed image. Radio initialization and reconnects
+retain SD resources and playback state.
 
 `MediaLibrary` coordinates selection and display settings. `MemoryManager` provides
 checked file operations and bounded directory pages. See the [saved media
 library](MEDIA-LIBRARY.md) for publication, settings, filenames and migration behavior.
 `SaveLastImage`, `ReadLastImage` and `PhotoPersistence` remain available for retained
 RGB888 compatibility.
+
+## Availability lifecycle
+
+| State | Behavior |
+| --- | --- |
+| `Unavailable` | Attempts a fresh mount every 15 seconds after failure |
+| `Mounting` | Synchronously initializes SD hardware and mounts the existing FAT/exFAT volume |
+| `Ready` | Serves storage operations and checks one physical sector every 15 seconds |
+| `Recovering` | Discards failed-session handles and caches before entering `Unavailable` |
+
+Six-pin SPI readers have no card-detect signal. A failed required transfer or the
+read-only physical health check detects removal; cached reads alone cannot establish
+that the card remains present. Health checks skip active save/verification transactions
+so their shared scratch bytes remain intact. Initialization allows a 1 s SD command
+wait; mounted commands use 250 ms, two retries and bounded lock/transfer waits.
+
+Disk, readiness, timeout and invalid-object errors invalidate the session. Missing files,
+invalid media, full cards and write protection remain operation failures when the card
+is still usable. Failed-session cleanup performs no close/flush/delete writes against
+a potentially reinserted or replacement card. Existing published media and settings
+remain available for restoration.
+
+Each successful mount increments the storage generation and clears read caches. Core 0
+reloads the newly mounted card's library and selection; it never resumes an unfinished
+upload from a previous session. The firmware neither formats cards nor restarts Wi-Fi
+as part of SD recovery. Startup and failed mount attempts keep network services and
+the built-in display content available.
+
+Browser status and memory responses include `storageState`, `storageRetryMs`,
+`storageGeneration` and `storageError`; these supplement existing readiness/usage fields.
 
 ## Per-photo metadata
 

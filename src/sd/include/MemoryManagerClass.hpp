@@ -11,7 +11,8 @@
     Provides the foreground SD storage boundary for saved photos and raw/indexed-JPEG videos.
 
     It owns SPI, the filesystem, file handles, shared 24 KiB scratch and a 64 KiB
-    active-playback cache. JPEG reads can feed an available Core 1 decoder through
+    active-playback cache. Mount retries and read-only health checks recover
+    unavailable cards without restarting Wi-Fi. JPEG reads can feed an available Core 1 decoder through
     bounded input slots; all filesystem operations remain on Core 0.
     Independent library items and alternating retained generations use checked
     metadata and CRCs. Bounded directory pages, thumbnails and persistent selection
@@ -23,6 +24,29 @@
 */
 class MemoryManager {
 public:
+    enum class State { Unavailable, Mounting, Ready, Recovering };
+    enum class Event { None, Unavailable, Ready };
+    static constexpr uint32_t RetryIntervalMs = 15000;
+    static constexpr uint32_t HealthIntervalMs = 15000;
+
+    // Advances SD health checks, failure recovery, and periodic mount retries.
+    Event Update(uint32_t nowMs);
+
+    // Returns the current SD lifecycle state.
+    State GetState(void) const;
+
+    // Returns the readable SD lifecycle state name.
+    const char* GetStateName(void) const;
+
+    // Returns the most recent SD availability error.
+    const char* GetStorageError(void) const;
+
+    // Returns the remaining delay before the next SD mount attempt.
+    uint32_t GetRetryInMs(uint32_t nowMs) const;
+
+    // Returns the generation identifying the current mounted storage session.
+    uint32_t GetStorageGeneration(void) const;
+
     static constexpr size_t IoChunkBytes = 24 * 1024;
     static constexpr size_t PrefetchBytes = 64 * 1024;
     // Pixel fragments are provisional until the complete read succeeds. JPEG
@@ -40,10 +64,10 @@ public:
     // Restores the newest verified retained photo through a chunk sink.
     bool ReadLastImage(ImageSink sink, void* context, MediaMetadata* metadata = nullptr);
 
-    // Mounts the SD card for image storage.
+    // Enables storage monitoring and attempts to mount the SD card.
     bool Initialize(void);
 
-    // Unmounts storage and releases its SPI and DMA resources.
+    // Closes storage resources and suspends automatic mount retries.
     bool Shutdown(void);
 
     // Reports whether mounted SD storage is available for use.
@@ -393,10 +417,10 @@ private:
     static bool QueueMediaWrite(const uint8_t* bytes, size_t count, int& result);
 
     // Closes playback without acquiring a second storage guard.
-    static void CloseSavedMediaPlayback(void);
+    static void CloseSavedMediaPlayback(bool safe = true);
 
     // Discards an unpublished save without reacquiring storage ownership.
-    static void DiscardIncompleteMediaSave(bool safe);
+    static int DiscardIncompleteMediaSave(bool safe);
 
     // Builds the checked raw or indexed-JPEG video header for the current save.
     static void BuildVideoStorageHeader(uint8_t* header);
@@ -476,16 +500,25 @@ private:
     // Selects the path owned by the current save transaction.
     static const char* BuildActiveSaveFilePath(char* path);
 
-    // Reports whether a filesystem result indicates lost storage communication.
+    // Identifies filesystem failures that require SD session recovery.
     static bool IsStorageIoError(int result);
 
     // Builds the checked retained or named-library header after complete verification.
     static void BuildLibraryPublicationHeader(uint8_t* header);
 
+    // Releases failed-session resources before a fresh SD mount attempt.
+    void DiscardSession(void);
+
+    State state_ = State::Unavailable;
+    bool suspended_ = false;
+    uint32_t lastAttemptMs_ = 0;
+    uint32_t lastHealthMs_ = 0;
+    uint32_t generation_ = 0;
+    const char* storageError_ = "not initialized";
     bool ready_ = false;
     const char* error_ = "storage not initialized";
 
-    // Records a storage error and invalidates readiness after failed SD I/O.
+    // Records a storage error and schedules recovery after failed SD I/O.
     bool ReportStorageFailure(const char* message, int filesystemResult = 0);
 
 };

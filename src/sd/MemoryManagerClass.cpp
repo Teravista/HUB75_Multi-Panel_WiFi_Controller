@@ -5,6 +5,7 @@
 #include "sd/include/storageCrc32.hpp"
 #include "config/defines.h"
 #include "ff.h"
+#include "diskio.h"
 #include "media/jpeg/include/jpegFrameDecoder.hpp"
 #include <algorithm>
 #include <atomic>
@@ -240,18 +241,18 @@ MemoryManager::CompareSavedImageBytes (
 } // CompareSavedImageBytes
 
 /**
-    Records a storage error and invalidates readiness after failed SD I/O.
+    Records a storage error and schedules recovery after failed SD I/O.
 
-    Retains the supplied diagnostic and clears mounted readiness after disk/not-ready failures
-    so a later explicit initialization can retry storage. Invalid arguments or content checks
-    can report failure without treating the card as disconnected. The baseline API reports
-    availability but does not schedule automatic remounts.
+    Disk, readiness, timeout and invalid-session errors invalidate the mounted session.
+    The next foreground update discards its handles and schedules a fresh mount. Invalid
+    arguments or corrupt content remain operation failures without declaring the card
+    unavailable. Retains a separate availability error so ordinary busy requests cannot
+    hide the cause while the card is unavailable.
 
-    @param message Human-readable result or error message.
-    @param filesystemResult FatFs result code; zero means no filesystem error.
+    @param message Explanation of the failed storage operation.
+    @param filesystemResult FatFs status; zero indicates a validation or input failure.
 
-    @return false - Always reports failure after storing the diagnostic and invalidating storage
-                    when required.
+    @return false - The operation failed; diagnostics and availability state are updated.
 */
 bool
 MemoryManager::ReportStorageFailure (
@@ -260,20 +261,28 @@ MemoryManager::ReportStorageFailure (
     )
 {
     error_ = message;
-    if (filesystemResult == FR_DISK_ERR || filesystemResult == FR_NOT_READY) {
+    if (IsStorageIoError(filesystemResult)) {
         ready_ = false;
+        storageError_ = message;
+        if (state_ == State::Ready) {
+            state_ = State::Recovering;
+        }
     }
     std::printf("[memory] %s (FatFs=%d)\n", message, filesystemResult);
     return false;
 } // ReportStorageFailure
 
 /**
-    Mounts the SD card for image storage.
+    Enables storage monitoring and attempts to mount the SD card.
 
-    Claims the shared storage guard without waiting, prepares the dedicated SPI/card resources
-    and immediately asks FatFs to mount the existing filesystem. Hardware initialization and
-    mounting run synchronously in the foreground. Failure releases partially claimed hardware;
-    an already ready manager returns without remounting. The operation never formats the card.
+    Claims the non-waiting storage guard, enables monitoring and reuses an already ready mount
+    when possible. A recovering session is discarded before SD hardware initialization and an
+    immediate FatFs mount attempt. These driver/filesystem calls are synchronous and can take
+    time; successful mounting starts a new generation for cache invalidation and health checks.
+
+    Any initialization or mount failure releases partial resources, records the cause and
+    schedules the unavailable-state retry deadline. Mounting uses existing card contents and never
+    formats the card.
 
     @return true - Storage initialization succeeded, including an already initialized device.
     @return false - Storage is busy or hardware/filesystem initialization failed.
@@ -284,19 +293,28 @@ MemoryManager::Initialize (
     )
 {
     FRESULT result;
+    const char* mountError = nullptr;
 
     // Claim the shared storage buffer before filesystem access or user callbacks.
     StorageGuard guard;
-
     if (!guard.acquired) {
         return ReportStorageFailure("storage busy");
     }
+    suspended_ = false;
     if (ready_) {
         error_ = "none";
         return true;
     }
+    if (state_ == State::Recovering) {
+        DiscardSession();
+    }
+    state_ = State::Mounting;
+    std::puts("[sd] -> mounting");
     if (!InitializeMemoryStorageHardware()) {
         ReleaseMemoryStorageHardware();
+        state_ = State::Unavailable;
+        lastAttemptMs_ = to_ms_since_boot(get_absolute_time());
+        storageError_ = "SD driver initialization failed";
         return ReportStorageFailure("SD driver initialization failed");
     }
 
@@ -306,25 +324,40 @@ MemoryManager::Initialize (
     if (result != FR_OK) {
         f_mount(nullptr, "0:", 0);
         ReleaseMemoryStorageHardware();
+        state_ = State::Unavailable;
+        lastAttemptMs_ = to_ms_since_boot(get_absolute_time());
         if (result == FR_NO_FILESYSTEM) {
-            return ReportStorageFailure("card has no supported FAT/exFAT filesystem", result);
+            storageError_ = "unsupported filesystem";
+        } else {
+            storageError_ = "SD card mount failed";
         }
-        return ReportStorageFailure("SD card mount failed", result);
+        mountError = {};
+        if (result == FR_NO_FILESYSTEM) {
+            mountError = "card has no supported FAT/exFAT filesystem";
+        } else {
+            mountError = "SD card mount failed";
+        }
+        return ReportStorageFailure(mountError, result);
     }
     ready_ = true;
+    state_ = State::Ready;
+    storageError_ = "";
+    lastHealthMs_ = to_ms_since_boot(get_absolute_time());
+    ++generation_;
+    SetMemoryStorageMounted();
 
     error_ = "none";
-    std::printf("[memory] SD card mounted; SPI clock=%u Hz\n", GetMemoryStorageClockHz());
+    std::printf("[sd] -> ready clock=%u Hz\n", GetMemoryStorageClockHz());
     return true;
 } // Initialize
 
 /**
-    Unmounts storage and releases its SPI and DMA resources.
+    Closes storage resources and suspends automatic mount retries.
 
-    Claims storage ownership before unregistering the filesystem and releasing only the SD
-    reader's SPI/DMA resources. Readiness is cleared even if unmounting reports an error. A busy
-    guard returns immediately rather than waiting inside a callback or concurrent storage
-    operation.
+    A healthy session may close and remove its unfinished transaction before releasing
+    resources. Failed sessions discard handles without writeback. Automatic retry stays
+    suspended until Initialize is explicitly called again. A busy storage guard returns
+    immediately rather than waiting inside another operation.
 
     @return true - Storage handles and hardware resources were released.
     @return false - Storage is busy and cannot be shut down safely.
@@ -334,27 +367,17 @@ MemoryManager::Shutdown (
     void
     )
 {
-    FRESULT result;
-
-    // Claim the shared storage buffer before filesystem access or user callbacks.
     StorageGuard guard;
-
     if (!guard.acquired) {
         return ReportStorageFailure("storage busy");
     }
-
-    DiscardIncompleteMediaSave(ready_);
-    CloseSavedMediaPlayback();
-
-    // Register the existing filesystem; mounting does not format or replace card contents.
-    result = f_mount(nullptr, "0:", 0);
-    ready_ = false;
-    ReleaseMemoryStorageHardware();
-
-    if (result != FR_OK) {
-        return ReportStorageFailure("SD unmount failed", result);
+    if (ready_) {
+        DiscardIncompleteMediaSave(true);
+        CloseSavedMediaPlayback();
     }
-
+    DiscardSession();
+    suspended_ = true;
+    state_ = State::Unavailable;
     error_ = "none";
     return true;
 } // Shutdown
@@ -1237,15 +1260,19 @@ MemoryManager::QueueMediaWrite (
 /**
     Closes playback without acquiring a second storage guard.
 
+    Lost sessions discard the handle without touching a replacement card.
+
+    @param safe Whether the current playback file may be closed against its card.
+
     Callers already hold storage ownership. Clearing the description prevents a
     closed file or old generation from being reused by the player.
 */
 void
 MemoryManager::CloseSavedMediaPlayback (
-    void
+    bool safe
     )
 {
-    if (storage_.playback.open) {
+    if (safe && storage_.playback.open) {
         f_close(&storage_.playbackFile);
     }
     storage_.playbackFile = {};
@@ -1259,29 +1286,42 @@ MemoryManager::CloseSavedMediaPlayback (
 /**
     Discards an unpublished save without reacquiring storage ownership.
 
-    Only an unpublished target is removed. On lost storage, handles are discarded
-    without further writes so cleanup cannot modify a disconnected/replaced card.
+    Closes and removes only an unpublished target while the card session remains safe.
+    A failed close is checked before unlinking so a lost or replaced card receives no
+    further writes. Handles are reset in every case; the caller decides whether the
+    returned cleanup error invalidates storage.
 
-    @param safe Whether the current SD session remains safe for cleanup writes.
+    @param safe True permits cleanup writes while the current card session is usable.
+
+    @return 0 - No transaction needed cleanup, or cleanup completed successfully.
+    @return other - FatFs error encountered while closing or removing the unfinished target.
 */
-void
+int
 MemoryManager::DiscardIncompleteMediaSave (
     bool safe
     )
 {
     char path[LIBRARY_PATH_BYTES];
+    FRESULT result;
+    FRESULT removed;
 
+    result = FR_OK;
     if (storage_.save.phase == SavePhase::Idle) {
-        return;
+        return int(result);
+    }
+    if (safe && storage_.save.open) {
+        result = f_close(&storage_.mediaFile);
+        safe = !IsStorageIoError(result);
     }
     if (safe) {
-        if (storage_.save.open) {
-            f_close(&storage_.mediaFile);
+        removed = f_unlink(BuildActiveSaveFilePath(path));
+        if (result == FR_OK && removed != FR_NO_FILE) {
+            result = removed;
         }
-        f_unlink(BuildActiveSaveFilePath(path));
     }
     storage_.mediaFile = {};
     storage_.save = {};
+    return int(result);
 } // DiscardIncompleteMediaSave
 
 /**
@@ -1577,7 +1617,7 @@ MemoryManager::BeginMediaSave (
     std::memcpy(staged, "H75P", MEDIA_MAGIC_BYTES);
     result = f_write(&storage_.mediaFile, staged, sizeof(staged), &count);
     if (result != FR_OK || count != sizeof(staged)) {
-        DiscardIncompleteMediaSave(result != FR_DISK_ERR && result != FR_NOT_READY);
+        DiscardIncompleteMediaSave(!IsStorageIoError(result));
         return ReportStorageFailure("video staging failed", result);
     }
     error_ = "none";
@@ -1826,13 +1866,17 @@ MemoryManager::AbortMediaSave (
     void
     )
 {
+    int result;
     StorageGuard guard;
 
     if (!guard.acquired) {
         ReportStorageFailure("storage busy");
         return;
     }
-    DiscardIncompleteMediaSave(ready_);
+    result = DiscardIncompleteMediaSave(ready_);
+    if (result != FR_OK) {
+        ReportStorageFailure("SD save cleanup failed", result);
+    }
 } // AbortMediaSave
 
 /**
@@ -1939,7 +1983,7 @@ MemoryManager::ReadMediaFrame (
     }
     if (!read.complete) {
         storage_.rejectedSlot = storage_.playback.slot;
-        CloseSavedMediaPlayback();
+        CloseSavedMediaPlayback(!IsStorageIoError(read.result));
         return ReportStorageFailure(read.error, read.result);
     }
     if (timing) {
@@ -1971,7 +2015,7 @@ MemoryManager::CloseMediaPlayback (
         ReportStorageFailure("storage busy");
         return;
     }
-    CloseSavedMediaPlayback();
+    CloseSavedMediaPlayback(ready_);
 } // CloseMediaPlayback
 
 
@@ -2276,19 +2320,20 @@ MemoryManager::BuildActiveSaveFilePath (
 } // BuildActiveSaveFilePath
 
 /**
-    Reports whether a filesystem result indicates lost storage communication.
+    Identifies filesystem failures that require SD session recovery.
 
-    @param result FatFs status from the failed operation.
+    @param result Result code returned by the SDK or filesystem operation.
 
-    @return true - The card or transfer is unavailable or failed.
-    @return false - The result describes another condition or success.
+    @return true - The result indicates a disk, readiness, timeout or invalid-session error.
+    @return false - The result does not indicate one of those storage I/O failures.
 */
 bool
 MemoryManager::IsStorageIoError (
     int result
     )
 {
-    return result == FR_DISK_ERR || result == FR_NOT_READY;
+    return result == FR_DISK_ERR || result == FR_NOT_READY || result == FR_TIMEOUT ||
+           result == FR_INVALID_OBJECT;
 } // IsStorageIoError
 
 /**
@@ -4523,3 +4568,190 @@ MemoryManager::GetStorageUsage (
     usage = measured;
     return true;
 } // GetStorageUsage
+
+
+/**
+    Returns the readable SD lifecycle state name.
+
+    @return "mounting" - A mount attempt is in progress.
+    @return "ready" - Mounted SD storage is available for operations.
+    @return "recovering" - The failed SD session is being invalidated.
+    @return "unavailable" - No usable card is mounted.
+*/
+const char*
+MemoryManager::GetStateName (
+    void
+    ) const
+{
+    switch (state_) {
+    case State::Mounting:
+        return "mounting";
+    case State::Ready:
+        return "ready";
+    case State::Recovering:
+        return "recovering";
+    default:
+        return "unavailable";
+    }
+} // GetStateName
+
+
+/**
+    Returns the remaining delay before the next SD mount attempt.
+
+    @param nowMs Current monotonic time since boot, in milliseconds.
+
+    @return value - Milliseconds remaining before another automatic mount attempt.
+    @return 0 - No retry is pending or the retry deadline has arrived.
+*/
+uint32_t
+MemoryManager::GetRetryInMs (
+    uint32_t nowMs
+    ) const
+{
+    uint32_t elapsed;
+
+    if (suspended_ || state_ != State::Unavailable) {
+        return 0;
+    }
+    elapsed = nowMs - lastAttemptMs_;
+    if (elapsed >= RetryIntervalMs) {
+        return 0;
+    } else {
+        return RetryIntervalMs - elapsed;
+    }
+} // GetRetryInMs
+
+
+/**
+    Advances SD health checks, failure recovery, and periodic mount retries.
+
+    Foreground only. Shutdown explicitly suspends storage retries; Initialize resumes monitoring
+    and makes one immediate mount attempt.
+
+    @param nowMs Current monotonic time since boot, in milliseconds.
+
+    @return Event::None - No availability transition occurred.
+    @return Event::Unavailable - The current storage session failed and retries were scheduled.
+    @return Event::Ready - A card was mounted and storage became available.
+*/
+MemoryManager::Event
+MemoryManager::Update (
+    uint32_t nowMs
+    )
+{
+    if (suspended_) {
+        return Event::None;
+    }
+
+    // Claim the shared storage buffer before filesystem access or user callbacks.
+    if (state_ == State::Recovering) {
+        StorageGuard guard;
+        if (!guard.acquired) {
+            return Event::None;
+        }
+        DiscardSession();
+        state_ = State::Unavailable;
+        lastAttemptMs_ = nowMs;
+        std::printf("[sd] -> unavailable retry=%lu ms\n", static_cast<unsigned long>(RetryIntervalMs));
+        return Event::Unavailable;
+    }
+    if (state_ == State::Unavailable) {
+        if (GetRetryInMs(nowMs)) {
+            return Event::None;
+        }
+        if (Initialize()) {
+            return Event::Ready;
+        } else {
+            return Event::None;
+        }
+    }
+    if (state_ == State::Ready && nowMs - lastHealthMs_ >= HealthIntervalMs) {
+        StorageGuard guard;
+        if (!guard.acquired || storage_.save.phase != SavePhase::Idle) {
+            return Event::None;
+        }
+        // Bypass FatFs/prefetch caches: one read-only physical sector confirms
+        // idle cards are still responding, even when a static photo is in RAM.
+        lastHealthMs_ = nowMs;
+        if (disk_read(0, MemoryStorage::readBuffer, 0, 1) != RES_OK) {
+            ReportStorageFailure("SD health read failed", FR_DISK_ERR);
+        }
+    }
+    return Event::None;
+} // Update
+
+
+/**
+    Returns the current SD lifecycle state.
+
+    @return State::Unavailable - No usable mounted card is available.
+    @return State::Mounting - A mount attempt is in progress.
+    @return State::Ready - The mounted card is available.
+    @return State::Recovering - The failed session is being invalidated before retrying.
+*/
+MemoryManager::State
+MemoryManager::GetState (
+    void
+    ) const
+{
+    return state_;
+} // GetState
+
+
+/**
+    Returns the most recent SD availability error.
+
+    @return text - Borrowed null-terminated result text; do not free it.
+*/
+const char*
+MemoryManager::GetStorageError (
+    void
+    ) const
+{
+    return storageError_;
+} // GetStorageError
+
+
+/**
+    Returns the generation identifying the current mounted storage session.
+
+    @return value - Generation identifying the current mount; a changed value invalidates cached
+                    handles.
+*/
+uint32_t
+MemoryManager::GetStorageGeneration (
+    void
+    ) const
+{
+    return generation_;
+} // GetStorageGeneration
+
+/**
+    Releases failed-session resources before a fresh SD mount attempt.
+
+    Drops save and playback handles without closing or flushing them. A reinserted card
+    must never receive dirty writes from the previous session. Unmounting invalidates
+    FatFs objects, clears frame/index/prefetch state and releases only the SD hardware.
+    The next mount starts a fresh storage generation.
+*/
+void
+MemoryManager::DiscardSession (
+    void
+    )
+{
+    storage_.save = {};
+    storage_.playback = {};
+    storage_.mediaFile = {};
+    storage_.playbackFile = {};
+    storage_.imageFile = {};
+    storage_.jpegIndexCount = 0;
+    storage_.hasPlaybackFrame = false;
+    storage_.rejectedSlot = SAVED_PHOTO_NO_SLOT;
+    MemoryStorage::playbackFile = nullptr;
+    MemoryStorage::playbackPrefetch.Reset();
+    f_mount(nullptr, "0:", 0);
+    storage_.filesystem = {};
+    ReleaseMemoryStorageHardware();
+    ready_ = false;
+} // DiscardSession

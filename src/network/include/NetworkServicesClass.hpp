@@ -11,12 +11,13 @@
     pause or resume, a command mailbox asks Core 0 to finish its current foreground operation and
     acknowledge a safe boundary. A small synchronized status snapshot supplies the display with
     coherent connection and IP data. Core launch belongs to networkCorePico.cpp; SD I/O
-    and library mutations remain on Core 0. Idle passes also report whether the
+    and library mutations remain on Core 0. Network recovery never changes the SD
+    session. Idle passes also report whether the
     shared scheduler may accept a decoder reservation.
 */
 class NetworkServices {
 public:
-    enum class Command : unsigned { None, PauseServices, ResumeServices, SuspendRadio, RadioReady, RadioFailed };
+    enum class Command : unsigned { None, PauseServices, ResumeServices };
 
     // The foreground owns the context until ProcessRequests returns.
     struct Handler {
@@ -31,7 +32,7 @@ public:
     };
 
     using Yield = void (*)(void);
-    // Connects Wi-Fi service transitions to foreground storage handoffs.
+    // Connects Wi-Fi service transitions to foreground transport handoffs.
     NetworkServices(WifiConnection& wifi, Yield yield, TcpVideoUpload* video = nullptr);
 
     // Removes lifecycle callbacks after the network worker has stopped.
@@ -43,7 +44,7 @@ public:
     // Advances network connection, service handoffs, and transport maintenance.
     void Update(void);
 
-    // Handles and acknowledges a pending storage-side service handoff.
+    // Handles and acknowledges a pending transport lifecycle handoff.
     bool ProcessRequests(Handler handler);
 
     // Copies a coherent network state and IP snapshot for the display core.

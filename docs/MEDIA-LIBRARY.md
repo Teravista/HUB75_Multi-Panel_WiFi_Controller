@@ -64,7 +64,9 @@ Selections, slideshow interval, FPS cap and brightness use alternating checked
 replacement leaves the preceding valid record usable. Missing settings use built-in
 defaults. Startup restores selected library content before Wi-Fi and uses retained
 legacy content or the flashed image when no library selection is available. Radio
-initialization releases and remounts SD resources during startup.
+initialization retains the mounted storage session. SD loss clears runtime collections
+and saved-media display state without changing persisted settings; remounting reloads
+the card's collections and selected content.
 
 ## Browser collection and previews
 

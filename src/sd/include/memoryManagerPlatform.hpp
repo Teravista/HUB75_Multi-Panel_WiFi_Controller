@@ -19,3 +19,6 @@ void BeginMemoryStorageReadProfile(void);
 
 // Stops low-level SD profiling and returns its accumulated timings.
 sd_spi_read_profile_t EndMemoryStorageReadProfile(void);
+
+// Applies shorter SD command deadlines after a successful filesystem mount.
+void SetMemoryStorageMounted(void);
