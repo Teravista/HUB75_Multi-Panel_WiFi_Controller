@@ -38,7 +38,8 @@ The page serializes bounded messages to `POST /api/video` for photo/video saves,
 queries and controls. A saved result requires verified SD publication; reception alone
 is not a durable confirmation. Prior items survive unfinished or failed uploads. Small
 prepared clips use browser RAM; larger clips spill into a temporary IndexedDB database,
-removed after completion, failure or cancellation. Browser storage capacity can limit
+removed after completion, cancellation or terminal failure. A paused resumable
+video retains its prepared data. Browser storage capacity can limit
 long clips.
 
 The legacy `POST /api/frame` endpoint accepts exactly 98,304 full-panel RGB888 bytes and
@@ -79,3 +80,17 @@ source stores 128 × 72 pixels: RGB565 needs 18 KiB rather than 64 KiB per full 
 Centered uploads retain descriptor versions 1–3. Custom offsets use the 32-byte
 version-4 descriptor. Existing full-panel files remain readable. See
 [metadata](../docs/MEDIA-METADATA.md#placement-descriptor-version-4) for its encoding.
+
+## Interrupted uploads
+
+Transient video requests receive up to 100 automatic retries; photos receive up
+to eight. After a lost chunk reply, the page reads the Pico's confirmed progress
+before sending more data. Lost verification replies continue the same SD check.
+
+If video retries are exhausted, use **Resume upload/check** or **Cancel** while
+keeping the page open. Resume reuses prepared frames and checks the original job
+token; Cancel releases an unfinished save and retains verified content. A receiving
+job expires after 15 seconds without upload activity, so a long outage can require
+a new transfer. Verification after full reception is independent of that deadline.
+Resume does not survive a page reload or Pico restart. See
+[upload recovery](../docs/VIDEO-UPLOAD.md#retry-and-resume) for the protocol and limits.

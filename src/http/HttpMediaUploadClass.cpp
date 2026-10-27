@@ -2,8 +2,12 @@
 #include "media/include/MediaLibraryClass.hpp"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "sd/include/storageCrc32.hpp"
 #include <cstdio>
 #include <cstring>
+#define HTTP_OP_UPLOAD_RESUME 20
+#define HTTP_RESUME_TOKEN_BYTES 4
+#define HTTP_UPLOAD_HEADER_CRC_INITIAL_U 0xffffffffu
 
 #define HTTP_OP_DISPLAY_SETTINGS_SET 21
 #define HTTP_OP_MEMORY_STATUS 23
@@ -117,10 +121,10 @@ HttpMediaUpload::Respond (
         message = requestError;
     }
     std::snprintf(response_, sizeof(response_),
-                  "{\"id\":%lu,\"state\":\"%s\",\"offset\":%llu,\"total\":%llu,\"videoId\":%lu,\"photoId\":%lu,\"error\":\"%s\",\"warning\":\"%s\"}",
+                  "{\"id\":%lu,\"state\":\"%s\",\"offset\":%llu,\"total\":%llu,\"videoId\":%lu,\"photoId\":%lu,\"resumeToken\":%lu,\"error\":\"%s\",\"warning\":\"%s\"}",
                   static_cast<unsigned long>(session_), names[unsigned(state_)],
                   static_cast<unsigned long long>(offset_), static_cast<unsigned long long>(total_),
-                  static_cast<unsigned long>(videoId_), static_cast<unsigned long>(photoId_), message, warning_);
+                  static_cast<unsigned long>(videoId_), static_cast<unsigned long>(photoId_), static_cast<unsigned long>(resumeToken_), message, warning_);
     PublishResponse();
 } // Respond
 
@@ -132,9 +136,10 @@ HttpMediaUpload::Respond (
     offsets before accessing storage. An upload owns the framebuffer until verified
     publication, cancellation, inactivity or an SD error releases it.
 
-    Each verification update processes one bounded storage step. Socket loss requests
-    cancellation rather than retaining a resumable job. Startup and radio shutdown
-    can call this with networkActive false to complete deferred cleanup safely.
+    Each verification update processes one bounded storage step. Socket loss abandons
+    only the current HTTP request, preserving confirmed upload bytes and independent
+    verification for retry or resume. Startup and radio shutdown can call this with
+    networkActive false to complete deferred cleanup safely.
 
     @param networkActive Whether an initialized radio permits lwIP locking.
 */
@@ -158,6 +163,10 @@ HttpMediaUpload::Update (
     uint32_t maxMillis;
     const char* name = nullptr;
     bool complete;
+    bool resumable;
+    bool validHeaderLength;
+    uint32_t requestedToken;
+    uint32_t headerChecksum;
 
     // Borrow the completed request without holding lwIP while touching the SD card.
     networkActive_ = networkActive;
@@ -166,6 +175,12 @@ HttpMediaUpload::Update (
     }
     cancel = cancel_;
     cancel_ = false;
+    if (abandoned_) {
+        abandoned_ = false;
+        pending_ = false;
+        responseReady_ = false;
+        reserved_ = false;
+    }
     pending = pending_;
     pending_ = false;
     if (networkActive_) {
@@ -200,6 +215,24 @@ HttpMediaUpload::Update (
         requestedOffset = MediaMetadataCodec::ReadUnsigned32LittleEndian(input_ + HTTP_ENVELOPE_OFFSET_FIELD);
         count = bytes_ - EnvelopeBytes;
 
+        // A nonce resolves a lost start reply without allocating a second saved item.
+        if (operation == HTTP_OP_UPLOAD_RESUME) {
+            if (id || requestedOffset || count != HTTP_RESUME_TOKEN_BYTES) {
+                Respond("invalid resume request");
+                return;
+            }
+            requestedToken = MediaMetadataCodec::ReadUnsigned32LittleEndian(input_ + EnvelopeBytes);
+            if (!session_ || !requestedToken || requestedToken != resumeToken_) {
+                Respond("wrong upload session");
+            } else {
+                if (state_ == State::Receiving) {
+                    progress_ = GetUploadTimeMs();
+                }
+                Respond();
+            }
+            return;
+        }
+
         // Stateless controls share the mailbox but never become an upload session.
         if (HandleLibraryRequest(operation, id, requestedOffset, count)) {
             return;
@@ -216,17 +249,37 @@ HttpMediaUpload::Update (
             } else if (photo) {
                 expectedHeader += MemoryManager::PhotoNameBytes + MemoryManager::ThumbnailBytes;
             }
+            resumable = (named || photo) && count == expectedHeader + HTTP_RESUME_TOKEN_BYTES;
+            validHeaderLength = count == expectedHeader || resumable;
+            requestedToken = 0;
+            if (resumable) {
+                requestedToken = MediaMetadataCodec::ReadUnsigned32LittleEndian(input_ + EnvelopeBytes + expectedHeader);
+            }
             maxMillis = 0;
-            if (named && count == expectedHeader) {
+            if (named && validHeaderLength) {
                 maxMillis = MediaMetadataCodec::ReadUnsigned32LittleEndian(
                     input_ + EnvelopeBytes + MediaTransfer::RequestBytes + MemoryManager::PhotoNameBytes);
             }
-            if (id || requestedOffset || count != expectedHeader ||
+            if (id || requestedOffset || !validHeaderLength || (resumable && !requestedToken) ||
                 (named && (!library_ || maxMillis < MIN_VIDEO_DURATION_MS || maxMillis > MAX_VIDEO_DURATION_MS)) ||
                 !MediaMetadataCodec::DecodeMediaDescriptor(input_ + EnvelopeBytes, MediaMetadataCodec::HeaderBytes, metadata) ||
                 (!photo && !MediaTransfer::IsSupportedVideo(metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) ||
                 (photo && (!library_ || !metadata.IsPhotoWithin(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)))) {
                 Respond("invalid metadata");
+                return;
+            }
+            // Match the entire original header, including its name and legacy thumbnail.
+            headerChecksum = ~StorageCrc32::UpdateCrc32Checksum(
+                HTTP_UPLOAD_HEADER_CRC_INITIAL_U, input_ + EnvelopeBytes, expectedHeader);
+            if (resumable && requestedToken == resumeToken_ && session_) {
+                if (photo != photoUpload_ || headerChecksum != beginChecksum_) {
+                    Respond("resume metadata mismatch");
+                    return;
+                }
+                if (state_ == State::Receiving) {
+                    progress_ = GetUploadTimeMs();
+                }
+                Respond();
                 return;
             }
             if (external_ || memory_.IsMediaSaveActive() || !upload_.TryBeginExternalMedia()) {
@@ -241,6 +294,8 @@ HttpMediaUpload::Update (
             videoId_ = 0;
             photoId_ = 0;
             photoUpload_ = photo;
+            resumeToken_ = requestedToken;
+            beginChecksum_ = headerChecksum;
             offset_ = 0;
             metadata.PayloadBytes(total_);
             error_ = "";
@@ -322,7 +377,7 @@ HttpMediaUpload::Reserve (
     void
     )
 {
-    if (reserved_ || cancel_) {
+    if (reserved_ || cancel_ || abandoned_) {
         return false;
     }
     reserved_ = true;
@@ -555,3 +610,18 @@ HttpMediaUpload::PublishResponse (
         cyw43_arch_lwip_end();
     }
 } // PublishResponse
+
+/**
+    Drops a lost HTTP request while retaining its storage transaction.
+
+    Called from transport callbacks. The foreground consumes this flag before
+    releasing the mailbox, so no request can overwrite bytes still queued for
+    processing. Confirmed upload progress and verification remain available.
+*/
+void
+HttpMediaUpload::AbandonRequest (
+    void
+    )
+{
+    abandoned_ = true;
+} // AbandonRequest
