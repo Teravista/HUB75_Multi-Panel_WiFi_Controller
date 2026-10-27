@@ -63,8 +63,9 @@ Saved photos and videos live in independent SD libraries with persistent
 selection, slideshows, brightness and an optional video FPS cap. See the
 [saved media library](docs/PHOTO-LIBRARY.md) for storage and controller APIs.
 
-Open `http://<Pico-IP>/` to preview and upload a photo from a browser. The Pico
-receives the prepared RGB888 frame and uses the saved-photo library path.
+Open `http://<Pico-IP>/` to upload photos or prepare and save videos from a browser.
+Video options include FPS, duration, loop mode, format, JPEG quality and a saved name.
+The Pico verifies incoming videos on SD before selecting them for playback.
 See the [photo web interface](web/README.md) for reception and persistence behavior.
 
 ## Ways to Get Content Onto the Panel

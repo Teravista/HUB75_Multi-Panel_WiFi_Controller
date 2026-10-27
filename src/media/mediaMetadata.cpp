@@ -123,6 +123,9 @@ MediaMetadata::PayloadBytes (
 {
     uint64_t frameBytes;
 
+    if (jpegQuality > MAX_JPEG_QUALITY || (pixelFormat != PixelFormat::JPEG && jpegQuality)) {
+        return false;
+    }
     if (!width || !height || !frameCount || !fpsDenominator || (!PixelBytes() && pixelFormat != PixelFormat::JPEG)) {
         return false;
     }
@@ -280,14 +283,15 @@ MediaMetadataCodec::ReadUnsigned64LittleEndian (
     Serializes valid metadata into a fixed-size transfer descriptor.
 
     Validates before writing any output. The explicit versioned layout keeps
-    file/transfer metadata independent of compiler padding. Only the ping-pong flag is used; other bits stay
-    zero; the pixel payload is described but is never accessed by this function.
+    file/transfer metadata independent of compiler padding. Version 3 stores JPEG
+    quality above the ping-pong flag; older versions keep those bits zero. This
+    function describes the payload without accessing its pixels.
 
     @param metadata Logical media description to encode.
     @param out Writable destination containing at least HeaderBytes bytes.
     @param capacity Number of bytes available at out.
 
-    @return true - A complete version-1 raw or version-2 JPEG descriptor was written.
+    @return true - A complete version-1 raw or version-2/3 JPEG descriptor was written.
     @return false - Metadata, output pointer or capacity is invalid; output is unchanged.
 */
 bool
@@ -307,6 +311,9 @@ MediaMetadataCodec::EncodeMediaDescriptor (
     std::memcpy(out, "H75M", MEDIA_MAGIC_BYTES);
     if (metadata.pixelFormat == PixelFormat::JPEG) {
         out[MEDIA_VERSION_OFFSET] = JpegVersion;
+        if (metadata.jpegQuality) {
+            out[MEDIA_VERSION_OFFSET] = JpegQualityVersion;
+        }
     } else {
         out[MEDIA_VERSION_OFFSET] = Version;
     }
@@ -317,6 +324,7 @@ MediaMetadataCodec::EncodeMediaDescriptor (
     } else {
         out[MEDIA_FLAGS_OFFSET] = 0;
     }
+    out[MEDIA_FLAGS_OFFSET] |= uint8_t(metadata.jpegQuality << MEDIA_JPEG_QUALITY_SHIFT);
     WriteUnsigned16LittleEndian(out + MEDIA_WIDTH_OFFSET, metadata.width);
     WriteUnsigned16LittleEndian(out + MEDIA_HEIGHT_OFFSET, metadata.height);
     WriteUnsigned32LittleEndian(out + MEDIA_FRAME_COUNT_OFFSET, metadata.frameCount);
@@ -352,7 +360,9 @@ MediaMetadataCodec::DecodeMediaDescriptor (
     uint64_t payload;
 
     if (!in || bytes != HeaderBytes || std::memcmp(in, "H75M", MEDIA_MAGIC_BYTES) ||
-        (in[MEDIA_VERSION_OFFSET] != Version && in[MEDIA_VERSION_OFFSET] != JpegVersion) || (in[MEDIA_FLAGS_OFFSET] & ~PingPongFlag) != 0) {
+        (in[MEDIA_VERSION_OFFSET] != Version && in[MEDIA_VERSION_OFFSET] != JpegVersion &&
+         in[MEDIA_VERSION_OFFSET] != JpegQualityVersion) ||
+        (in[MEDIA_VERSION_OFFSET] != JpegQualityVersion && (in[MEDIA_FLAGS_OFFSET] & ~PingPongFlag) != 0)) {
         return false;
     }
 
@@ -360,13 +370,16 @@ MediaMetadataCodec::DecodeMediaDescriptor (
     decoded.type = MediaType(in[MEDIA_TYPE_OFFSET]);
     decoded.pixelFormat = PixelFormat(in[MEDIA_FORMAT_OFFSET]);
     decoded.pingPong = (in[MEDIA_FLAGS_OFFSET] & PingPongFlag) != 0;
+    if (in[MEDIA_VERSION_OFFSET] == JpegQualityVersion) {
+        decoded.jpegQuality = in[MEDIA_FLAGS_OFFSET] >> MEDIA_JPEG_QUALITY_SHIFT;
+    }
     decoded.width = ReadUnsigned16LittleEndian(in + MEDIA_WIDTH_OFFSET);
     decoded.height = ReadUnsigned16LittleEndian(in + MEDIA_HEIGHT_OFFSET);
     decoded.frameCount = ReadUnsigned32LittleEndian(in + MEDIA_FRAME_COUNT_OFFSET);
     decoded.fpsNumerator = ReadUnsigned32LittleEndian(in + MEDIA_FPS_NUMERATOR_OFFSET);
     decoded.fpsDenominator = ReadUnsigned32LittleEndian(in + MEDIA_FPS_DENOMINATOR_OFFSET);
     if (decoded.pixelFormat == PixelFormat::JPEG) {
-        if (in[MEDIA_VERSION_OFFSET] != JpegVersion) {
+        if (in[MEDIA_VERSION_OFFSET] != JpegVersion && in[MEDIA_VERSION_OFFSET] != JpegQualityVersion) {
             return false;
         }
         decoded.encodedBytes = ReadUnsigned64LittleEndian(in + MEDIA_PAYLOAD_BYTES_OFFSET);

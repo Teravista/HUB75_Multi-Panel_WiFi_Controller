@@ -108,3 +108,12 @@ See [JPEG layout and bounded decoder memory](JPEG-VIDEO.md).
 Independent photo/video items extend the common checked media header with names,
 photo thumbnails or a video duration setting. See [saved media library](PHOTO-LIBRARY.md)
 for container versions, pagination and persistent selections.
+
+## JPEG encoder quality, descriptor version 3
+
+JPEG descriptors can retain their encoder quality in byte 7, bits 1–7; bit 0
+remains the ping-pong flag. Quality 1–95 is recorded with each item. Zero means
+unknown, including older JPEG saves, and encoding unknown quality retains
+version 2. Raw descriptors remain version 1 and reject nonzero JPEG quality.
+The descriptor stays 32 bytes, and existing container/header CRCs also protect
+the saved quality field. Pixel data is unaffected by this metadata extension.

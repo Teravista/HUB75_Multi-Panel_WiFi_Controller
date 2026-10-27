@@ -105,3 +105,32 @@ Firmware TCP uploads publish an independent video library item and select it aft
 verification. Existing clips remain available. The TCP handshake and payload
 encoding are unchanged. See [saved media library](PHOTO-LIBRARY.md) for item
 metadata, publication and selection.
+
+## Browser video messages
+
+`POST /api/video` uses `Content-Type: application/octet-stream`. Its nine-byte
+little-endian envelope contains operation (one byte), session ID (four bytes)
+and confirmed payload offset (four bytes). The body contains at most 6144 bytes.
+HTTP callbacks receive only this bounded message; `HttpMediaUpload::Update`
+performs filesystem work in the foreground, outside the lwIP lock.
+
+| Operation | ID / offset | Body |
+| --- | --- | --- |
+| 1: begin | Both zero | 32-byte descriptor and four-byte payload CRC |
+| 6: named begin | Both zero | Begin fields, 64-byte ASCII name, duration limit as uint32 milliseconds |
+| 2: chunk | Session / confirmed offset | Up to 6144 payload bytes |
+| 3: status | Session / zero | Empty |
+| 4: cancel | Session / zero | Empty |
+
+Responses contain `id`, `state`, `offset`, `total`, `videoId`, `error` and
+`warning`. A protocol rejection is reported through `error`; successful HTTP
+transport alone does not confirm a saved clip. After `receiving`, the upload
+enters `verifying`. Only a fully checked SD publication produces `saved` and a
+nonzero library ID. A selection-settings failure is a separate warning when the
+video itself is already saved. Frames and earlier clips remain managed by the
+existing library storage rules.
+
+The browser sends one request at a time and follows acknowledged offsets.
+Cancellation, connection loss or receive inactivity releases the unfinished
+transaction and schedules saved playback restoration. Verification advances in
+bounded foreground steps between status requests.

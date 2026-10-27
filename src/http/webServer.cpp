@@ -1,5 +1,6 @@
 // Bounded one-client HTTP transport; both upload paths share FrameBufferController.
 #include "http/include/webServer.hpp"
+#include "http/include/HttpMediaUploadClass.hpp"
 #include "webPage.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "http/include/httpRequest.hpp"
@@ -24,6 +25,7 @@ namespace {
 constexpr size_t kHeaderCapacity = HttpRequest::kHeaderCapacity;
 static_assert(SOURCE_FRAME_SIZE_BYTES == HttpRequest::kFrameBytes, "Page/firmware dimensions differ");
 FrameBufferController* receiver = nullptr;
+HttpMediaUpload* httpUpload = nullptr;
 bool enabled = false;
 constexpr size_t kFlightLimit = 1024; // Payload queued but not acknowledged.
 constexpr uint32_t kIdleMs = 10000;
@@ -44,6 +46,8 @@ struct Client {
     uint32_t progress = 0;
     bool responding = false;
     bool receiving = false;
+    bool video = false;
+    bool waiting = false;
     size_t expected = 0;
     FrameBufferController::Token owner = 0;
     size_t frameBytes = 0;
@@ -178,6 +182,13 @@ AbortHttpClient (
         receiver->AbortFrame(client.owner);
     }
 
+    if (client.video && httpUpload) {
+        if (client.responding) {
+            httpUpload->Release();
+        } else {
+            httpUpload->Disconnect();
+        }
+    }
     pcb = client.pcb;
     if (pcb) {
         DetachHttpClientCallbacks(pcb);
@@ -211,6 +222,9 @@ CloseHttpClient (
     result = tcp_close(pcb);
     if (result == ERR_OK) {
 
+        if (client.video && httpUpload) {
+            httpUpload->Release();
+        }
         // PCB must never be accessed again after successful tcp_close.
         client = Client{};
         return ERR_OK;
@@ -354,18 +368,21 @@ RejectHttpRequest (
     client.owner = 0;
     client.receiving = false;
 
+    if (client.video && httpUpload) {
+        httpUpload->Disconnect();
+    }
     text = HttpRequest::GetHttpStatusText(status);
     return BuildHttpResponse(text, "text/plain; charset=utf-8", text, std::strlen(text));
 } // RejectHttpRequest
 
 /**
-    Routes a complete HTTP header to the embedded page or photo receiver.
+    Routes an HTTP header to the page, raw-photo receiver or video mailbox.
 
     Checks the request against the PCB's local address before borrowing a page response
-    or claiming the shared photo receiver. Competing uploads are rejected immediately.
+    or claiming the shared photo receiver or video mailbox. Conflicting claims are rejected.
     Routing performs no SD I/O; completed frames are saved later by the main loop.
 
-    @return true - A response or photo receive transaction was prepared.
+    @return true - A page response, photo transaction or bounded video message was prepared.
     @return false - The response header or local address could not be prepared.
 */
 bool
@@ -388,6 +405,20 @@ RouteHttpRequest (
         return BuildHttpResponse("200 OK", "text/html; charset=utf-8", WebPage::kHtml, WebPage::kLength);
     }
 
+    // Reserve one protocol message; the foreground coordinator performs SD work later.
+    if (result.route == HttpRequest::Route::Video) {
+        if (!httpUpload) {
+            return RejectHttpRequest(HTTP_STATUS_NOT_FOUND);
+        }
+        if (!httpUpload->Reserve()) {
+            return RejectHttpRequest(HTTP_STATUS_CONFLICT);
+        }
+        client.video = true;
+        client.receiving = true;
+        client.expected = result.bodyBytes;
+        return true;
+    }
+
     // Hold the same token used by TCP photos until the complete HTTP body arrives.
     client.expected = HttpRequest::kFrameBytes;
     client.owner = receiver->BeginFrame(client.expected);
@@ -403,7 +434,8 @@ RouteHttpRequest (
 
     Consumes chained and fragmented lwIP buffers, building a bounded header before copying exactly
     the declared request body into its reserved destination. Photo bytes go through their
-    ownership token and are published only after the exact frame length arrives.
+    ownership token; video messages are copied into the reserved mailbox. SD work is
+    deferred to the foreground coordinator after the complete message arrives.
 
     The callback acknowledges and frees received packet buffers after consumption. Malformed
     input, excess body bytes or transport errors release the client through the abort path.
@@ -439,25 +471,33 @@ ReceiveHttpRequestBytes (
         return AbortHttpClient();
     }
     if (!packet) {
-        if (client.responding) {
+        if (client.responding || client.waiting) {
             return SendPendingHttpResponse();
         } else {
             return AbortHttpClient();
         }
     }
 
+    if (client.waiting) {
+        pbuf_free(packet);
+        return AbortHttpClient();
+    }
     valid = true;
-    for (part = packet; part && !client.responding && valid; part = part->next) {
+    for (part = packet; part && !client.responding && !client.waiting && valid; part = part->next) {
         bytes = static_cast<const uint8_t*>(part->payload);
         i = 0;
-        while (i < part->len && !client.responding && valid) {
+        while (i < part->len && !client.responding && !client.waiting && valid) {
             if (client.receiving) {
                 amount = part->len - i;
                 if (amount > client.expected - client.frameBytes) {
                     valid = RejectHttpRequest(HTTP_STATUS_BAD_REQUEST);
                     break;
                 }
-                valid = receiver->FeedFrame(client.owner, bytes + i, amount);
+                if (client.video) {
+                    std::memcpy(httpUpload->Input() + client.frameBytes, bytes + i, amount);
+                } else {
+                    valid = receiver->FeedFrame(client.owner, bytes + i, amount);
+                }
                 client.frameBytes += amount;
                 i += amount;
             } else {
@@ -491,6 +531,12 @@ ReceiveHttpRequestBytes (
         return AbortHttpClient();
     }
     if (client.receiving && client.frameBytes == client.expected) {
+        if (client.video) {
+            httpUpload->Submit(client.frameBytes);
+            client.receiving = false;
+            client.waiting = true;
+            return ERR_OK;
+        }
 
         if (!receiver->FinishFrame(client.owner)) {
             return AbortHttpClient();
@@ -571,6 +617,13 @@ HandleHttpClientError (
 {
     // lwIP has already freed the PCB. Never dereference it here.
     receiver->AbortFrame(client.owner);
+    if (client.video && httpUpload) {
+        if (client.responding) {
+            httpUpload->Release();
+        } else {
+            httpUpload->Disconnect();
+        }
+    }
 
     client = Client{};
 } // HandleHttpClientError
@@ -624,32 +677,53 @@ AcceptHttpClient (
 } // namespace
 
 /**
-    Maintains HTTP client deadlines and pending responses.
+    Connects the HTTP server to the browser video upload coordinator.
 
-    Expires inactive clients and queues pending TCP output under the lwIP lock.
-    Backpressure retains unsent offsets for the next callback or foreground update.
-    The main loop performs photo persistence separately, outside this lock.
+    @param upload Foreground browser video upload coordinator; null disables its route.
+*/
+void
+WebServer::SetMediaUpload (
+    HttpMediaUpload* upload
+    )
+{
+    httpUpload = upload;
+} // SetMediaUpload
+
+/**
+    Advances foreground media work, client deadlines and pending responses.
+
+    The coordinator processes one request or verification step outside the lwIP
+    lock. The transport then publishes its completed JSON response and pumps TCP
+    output. A borrowed response stays reserved until the connection closes.
 */
 void
 WebServer::Update (
     void
     )
 {
+    if (httpUpload) {
+        httpUpload->Update(enabled);
+    }
     if (!enabled) {
         return;
     }
-
-    // Serialize TCP state changes with lwIP; keep storage work outside this lock.
     cyw43_arch_lwip_begin();
     if (client.pcb) {
         PollHttpClient(nullptr, client.pcb);
     }
-
+    if (client.pcb && client.waiting && httpUpload->ResponseReady()) {
+        client.waiting = false;
+        if (!BuildHttpResponse("200 OK", "application/json", httpUpload->Response(), std::strlen(httpUpload->Response()))) {
+            AbortHttpClient();
+        } else {
+            SendPendingHttpResponse();
+        }
+    }
     cyw43_arch_lwip_end();
 } // Update
 
 /**
-    Starts the photo HTTP listener on port 80.
+    Starts the media HTTP listener on port 80.
 
     Creates and binds the HTTP listener in serialized lwIP context, then attaches the supplied
     framebuffer controller to the receive path. An existing healthy listener can be reused;
@@ -721,6 +795,9 @@ WebServer::Stop (
     cyw43_arch_lwip_begin();
 
     enabled = false;
+    if (httpUpload) {
+        httpUpload->Disconnect();
+    }
     if (client.pcb) {
         AbortHttpClient();
     }
