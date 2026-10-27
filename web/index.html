@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HUB75 photo upload</title>
+<style>
+:root{color-scheme:dark;font:17px system-ui,sans-serif;background:#111827;color:#f9fafb}
+body{max-width:480px;margin:0 auto;padding:24px}h1{font-size:1.7rem}h2{font-size:1.25rem}
+label{display:block;margin:20px 0 10px}input,button{font:inherit;width:100%;box-sizing:border-box}
+button{margin-top:20px;padding:14px;background:#38bdf8;color:#082f49;border:0;border-radius:10px;font-weight:700}
+button:disabled{opacity:.4}canvas{display:block;width:128px;height:256px;max-width:100%;margin:24px auto;background:#000;border:1px solid #64748b}
+p{line-height:1.5;color:#cbd5e1}#status{min-height:3em}*[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<h1>HUB75</h1>
+<h2>Upload a photo</h2>
+<label for="photo">Photo</label>
+<input id="photo" type="file" accept="image/*">
+<canvas id="preview" width="128" height="256" aria-label="Photo preview" hidden></canvas>
+<button id="upload" type="button" disabled>Save and show photo</button>
+<p id="status" role="status" aria-live="polite">Choose a photo.</p>
+<script>
+'use strict';
+const WIDTH = 128;
+const HEIGHT = 256;
+const RGBA_CHANNELS = 4;
+const RGB_CHANNELS = 3;
+const UPLOAD_TIMEOUT_MS = 60000;
+const fileInput = document.getElementById('photo');
+const preview = document.getElementById('preview');
+const uploadButton = document.getElementById('upload');
+const statusText = document.getElementById('status');
+const context = preview.getContext('2d', { willReadFrequently: true });
+let prepared = false;
+let preparing = false;
+let uploading = false;
+let selectionRevision = 0;
+
+/**
+    Updates input availability while a photo is prepared or sent.
+
+    File selection remains available during decoding so a newer choice can replace
+    a slow image. An active upload locks both controls until its request finishes.
+*/
+function updatePhotoControls() {
+    fileInput.disabled = uploading;
+    uploadButton.disabled = !prepared || preparing || uploading;
+}
+
+/**
+    Calculates a centered crop that fills the logical display.
+
+    The larger axis scale covers every panel pixel. The other axis extends beyond
+    the canvas equally at both ends, preserving the source aspect ratio.
+
+    @param width Source image width in pixels.
+    @param height Source image height in pixels.
+
+    @return object - Draw position and dimensions for the centered full-panel crop.
+*/
+function calculatePhotoCrop(width, height) {
+    const scale = Math.max(WIDTH / width, HEIGHT / height);
+    const drawWidth = width * scale;
+    const drawHeight = height * scale;
+
+    return {
+        x: (WIDTH - drawWidth) / 2,
+        y: (HEIGHT - drawHeight) / 2,
+        width: drawWidth,
+        height: drawHeight
+    };
+}
+
+/**
+    Converts browser RGBA pixels to the raw RGB888 photo upload layout.
+
+    Canvas alpha is omitted after compositing the photo onto a black background.
+    The output is one top-to-bottom, left-to-right frame with three bytes per pixel.
+
+    @param rgba Canvas pixel bytes in red, green, blue, alpha order.
+
+    @return Uint8Array - Full-panel RGB888 bytes expected by the Pico receiver.
+*/
+function encodePhotoPixels(rgba) {
+    const pixels = new Uint8Array(WIDTH * HEIGHT * RGB_CHANNELS);
+    let source = 0;
+    let destination = 0;
+
+    while (destination < pixels.length) {
+        pixels[destination++] = rgba[source++];
+        pixels[destination++] = rgba[source++];
+        pixels[destination++] = rgba[source++];
+        source += RGBA_CHANNELS - RGB_CHANNELS;
+    }
+    return pixels;
+}
+
+/**
+    Decodes the selected image and prepares the upload preview.
+
+    A selection revision prevents an earlier asynchronous decode from replacing a
+    newer choice. Temporary object URLs are released after decoding. Failed images
+    leave uploading disabled until another image is successfully prepared.
+
+    @return Promise<void> - Completes after preparing the current choice or displaying an error.
+*/
+async function preparePhotoPreview() {
+    const revision = ++selectionRevision;
+    const file = fileInput.files[0];
+    let objectUrl = '';
+
+    prepared = false;
+    preparing = true;
+    preview.hidden = true;
+    updatePhotoControls();
+    try {
+        if (!file) {
+            statusText.textContent = 'Choose a photo.';
+            return;
+        }
+        statusText.textContent = 'Preparing photo…';
+        objectUrl = URL.createObjectURL(file);
+        const image = new Image();
+        image.src = objectUrl;
+        await image.decode();
+        if (revision !== selectionRevision) {
+            return;
+        }
+        if (!image.naturalWidth || !image.naturalHeight) {
+            throw new Error('The image has no readable pixels.');
+        }
+
+        // Composite before extracting bytes so transparent regions display as black.
+        const crop = calculatePhotoCrop(image.naturalWidth, image.naturalHeight);
+        context.fillStyle = '#000';
+        context.fillRect(0, 0, WIDTH, HEIGHT);
+        context.drawImage(image, crop.x, crop.y, crop.width, crop.height);
+        prepared = true;
+        preview.hidden = false;
+        statusText.textContent = 'Ready to upload.';
+    } catch (error) {
+        if (revision === selectionRevision) {
+            statusText.textContent = 'Could not prepare photo: ' + error.message;
+        }
+    } finally {
+        if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+        }
+        if (revision === selectionRevision) {
+            preparing = false;
+            updatePhotoControls();
+        }
+    }
+}
+
+/**
+    Sends the prepared RGB888 photo to the Pico over the local HTTP connection.
+
+    The server acknowledgement confirms complete pixel reception. The foreground
+    firmware then attempts to save the photo through the existing SD library path.
+    A timeout or rejected response unlocks the page for a deliberate retry.
+
+    @return Promise<void> - Completes after displaying reception confirmation or an upload error.
+*/
+async function uploadPhoto() {
+    if (!prepared || preparing || uploading) {
+        return;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(controller.abort.bind(controller), UPLOAD_TIMEOUT_MS);
+
+    uploading = true;
+    updatePhotoControls();
+    statusText.textContent = 'Uploading photo…';
+    try {
+        const rgba = context.getImageData(0, 0, WIDTH, HEIGHT).data;
+        const response = await fetch('/api/frame', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: encodePhotoPixels(rgba),
+            signal: controller.signal
+        });
+        const acknowledgement = await response.text();
+        if (!response.ok || acknowledgement.trim() !== 'ACK') {
+            throw new Error('The Pico did not accept the photo (HTTP ' + response.status + ').');
+        }
+        statusText.textContent = 'Photo received.';
+    } catch (error) {
+        statusText.textContent = 'Photo upload failed: ' + error.message;
+    } finally {
+        clearTimeout(timeout);
+        uploading = false;
+        updatePhotoControls();
+    }
+}
+
+fileInput.addEventListener('change', preparePhotoPreview);
+uploadButton.addEventListener('click', uploadPhoto);
+</script>
+</body>
+</html>

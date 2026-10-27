@@ -62,6 +62,18 @@ add_custom_command(
     VERBATIM
 )
 
+set(WEB_PAGE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/web/index.html")
+set(WEB_PAGE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/webPage.hpp")
+add_custom_command(
+    OUTPUT "${WEB_PAGE_HEADER}"
+    COMMAND "${CMAKE_COMMAND}" "-DINPUT=${WEB_PAGE_SOURCE}" "-DOUTPUT=${WEB_PAGE_HEADER}"
+            -P "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedWebPage.cmake"
+    DEPENDS "${WEB_PAGE_SOURCE}" "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedWebPage.cmake"
+            "${CMAKE_CURRENT_LIST_DIR}/cmake/webPage.hpp.in"
+    COMMENT "Embedding photo upload page"
+    VERBATIM
+)
+
 # Add executable. Default name is the project name
 add_executable(hub75 mainEntry.cpp)
 
@@ -120,6 +132,9 @@ target_compile_definitions(hub75 PRIVATE HUB75_VERBOSE_LOGS=$<BOOL:${HUB75_VERBO
 
 target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
+    ${WEB_PAGE_HEADER}
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/webServer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/httpRequest.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rgb565.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp

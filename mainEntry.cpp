@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "http/include/webServer.hpp"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hub75.hpp"
@@ -11,7 +12,7 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "saved-media-library"
+#define WIFI_STATE_MACHINE_REV "http-photo-upload"
 
 /**
     Prepares and submits display frames while advancing photo and network services.
@@ -56,10 +57,14 @@ RenderLoop (
     const unsigned char* uploadedFrame = nullptr;
     uint32_t attemptedPhotoRevision;
     uint32_t savedVideoId;
+    bool httpStarted;
+    absolute_time_t nextHttpBindTime;
 
     frameIndex = FIRST_FRAME_INDEX;
     animationMovingForward = true;
     storageStarted = false;
+    httpStarted = false;
+    nextHttpBindTime = get_absolute_time();
     attemptedPhotoRevision = 0;
     lastFrameCount = 0;
     lastFpsTime = get_absolute_time();
@@ -68,8 +73,24 @@ RenderLoop (
 
     for (;;) {
 
-        // Advance network services before claiming the shared rendering buffer.
+        // Close HTTP while the old radio context is still alive, before a reconnect can deinitialize it.
+        if (httpStarted && !wifiNetwork.IsNetworkReady()) {
+            WebServer::Stop();
+            httpStarted = false;
+            nextHttpBindTime = get_absolute_time();
+        }
         wifiNetwork.UpdateNetworkStateMachine();
+
+        // Bind independently after the existing TCP services become ready; retry a failed bind later.
+        if (wifiNetwork.IsNetworkReady()) {
+            if (!httpStarted && absolute_time_diff_us(get_absolute_time(), nextHttpBindTime) <= 0) {
+                httpStarted = WebServer::Start(upload);
+                nextHttpBindTime = make_timeout_time_ms(TCP_BIND_RETRY_INTERVAL_MS);
+            }
+            if (httpStarted) {
+                WebServer::Update();
+            }
+        }
         if (!storageStarted && wifiNetwork.IsRadioInitialized()) {
             storageStarted = true;
             if (memory.Initialize()) {
