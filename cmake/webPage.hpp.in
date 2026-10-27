@@ -1,0 +1,6 @@
+#pragma once
+#include <cstddef>
+namespace WebPage {
+inline constexpr char kHtml[] = R"HUB75PAGE(@page@)HUB75PAGE";
+inline constexpr std::size_t kLength = sizeof(kHtml) - 1;
+}

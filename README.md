@@ -63,6 +63,10 @@ Saved photos and videos live in independent SD libraries with persistent
 selection, slideshows, brightness and an optional video FPS cap. See the
 [saved media library](docs/PHOTO-LIBRARY.md) for storage and controller APIs.
 
+Open `http://<Pico-IP>/` to preview and upload a photo from a browser. The Pico
+receives the prepared RGB888 frame and uses the saved-photo library path.
+See the [photo web interface](web/README.md) for reception and persistence behavior.
+
 ## Ways to Get Content Onto the Panel
 Three Python scripts handle content:
 - `imageToRGB888ArrayConverter.py` / `mp4ToRGB888ArrayConverter.py` - convert an image or video into a C header with a byte array, included via `defines.h` under the `USE_ANIMATION` flag. This becomes the default image/animation flashed into firmware.
