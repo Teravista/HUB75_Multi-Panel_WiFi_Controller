@@ -115,10 +115,10 @@ RejectRequestHeader (
 } // namespace
 
 /**
-    Validates an HTTP header and selects the page or raw-photo route.
+    Validates an HTTP header and selects the page or binary media route.
 
     Checks request-line and header syntax, method/body framing and the accepted local Host/Origin
-    before choosing the embedded page or binary photo upload route. The complete header is mutated in
+    before choosing the embedded page or bounded binary media route. The complete header is mutated in
     place to isolate tokens, so callers must supply exactly length bytes followed by NUL. Parsing
     returns a route/status description; network replies and storage mutations are handled by later
     layers.
@@ -159,6 +159,7 @@ HttpRequest::ParseRequestHeader (
     const char* nextNextNextP = nullptr;
     size_t digit;
     const char** slot = nullptr;
+    bool video;
 
     // Check framing and control bytes before tokenizing the untrusted request buffer.
     if (length >= kHeaderCapacity || length < HTTP_HEADER_TERMINATOR_BYTES || header[length] != '\0' ||
@@ -320,8 +321,9 @@ HttpRequest::ParseRequestHeader (
         return {Route::Page, HTTP_STATUS_OK};
     }
 
-    // Only the full-panel binary photo endpoint accepts a request body.
-    if (std::strcmp(path, "/api/frame")) {
+    // Raw photos use a complete frame; the video coordinator accepts bounded protocol messages.
+    video = std::strcmp(path, "/api/video") == 0;
+    if (!video && std::strcmp(path, "/api/frame")) {
         return RejectRequestHeader(HTTP_STATUS_NOT_FOUND);
     }
     if (std::strcmp(header, "POST")) {
@@ -330,14 +332,26 @@ HttpRequest::ParseRequestHeader (
     if (!lengthSeen) {
         return RejectRequestHeader(HTTP_STATUS_LENGTH_REQUIRED);
     }
-    if (bodyLength > kFrameBytes) {
-        return RejectRequestHeader(HTTP_STATUS_CONTENT_TOO_LARGE);
-    }
-    if (bodyLength != kFrameBytes) {
-        return RejectRequestHeader(HTTP_STATUS_BAD_REQUEST);
+    if (video) {
+        if (bodyLength > HTTP_UPLOAD_REQUEST_BYTES) {
+            return RejectRequestHeader(HTTP_STATUS_CONTENT_TOO_LARGE);
+        }
+        if (bodyLength < HTTP_UPLOAD_ENVELOPE_BYTES) {
+            return RejectRequestHeader(HTTP_STATUS_BAD_REQUEST);
+        }
+    } else {
+        if (bodyLength > kFrameBytes) {
+            return RejectRequestHeader(HTTP_STATUS_CONTENT_TOO_LARGE);
+        }
+        if (bodyLength != kFrameBytes) {
+            return RejectRequestHeader(HTTP_STATUS_BAD_REQUEST);
+        }
     }
     if (!contentType || !CompareHttpTokenIgnoringCase(contentType, "application/octet-stream")) {
         return RejectRequestHeader(HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE);
+    }
+    if (video) {
+        return {Route::Video, HTTP_STATUS_OK, bodyLength};
     }
     return {Route::Frame, HTTP_STATUS_OK, bodyLength};
 } // ParseRequestHeader

@@ -1,5 +1,6 @@
 #include <cstdint>
 #include "http/include/webServer.hpp"
+#include "http/include/HttpMediaUploadClass.hpp"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hub75.hpp"
@@ -12,7 +13,7 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "http-photo-upload"
+#define WIFI_STATE_MACHINE_REV "browser-video-upload"
 
 /**
     Prepares and submits display frames while advancing photo and network services.
@@ -29,6 +30,7 @@
     @param library Saved-photo/video selection, slideshow and persistent settings.
     @param player Verified saved-media playback scheduler.
     @param video Bounded raw-video upload and verification service.
+    @param http Foreground browser video upload coordinator.
     @param graphics Shared CPU graphics source buffer.
 */
 static void
@@ -40,6 +42,7 @@ RenderLoop (
     MediaLibrary& library,
     MediaPlayer& player,
     TcpVideoUpload& video,
+    HttpMediaUpload& http,
     CpuGraphics& graphics
     )
 {
@@ -47,6 +50,7 @@ RenderLoop (
     bool animationMovingForward;
     bool storageStarted;
     bool reloadVideo;
+    bool reloadHttp;
     uint32_t lastFrameCount;
     absolute_time_t lastFpsTime;
     uint32_t framesPerSecond;
@@ -76,6 +80,7 @@ RenderLoop (
         // Close HTTP while the old radio context is still alive, before a reconnect can deinitialize it.
         if (httpStarted && !wifiNetwork.IsNetworkReady()) {
             WebServer::Stop();
+            http.Update(false);
             httpStarted = false;
             nextHttpBindTime = get_absolute_time();
         }
@@ -106,6 +111,7 @@ RenderLoop (
         // Finish deferred upload or verification work and schedule any saved-media reload.
         video.Update();
         reloadVideo = video.TakeReloadRequest();
+        reloadHttp = http.TakeReloadRequest();
 
         if (!upload.TryBeginRender()) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
@@ -113,7 +119,7 @@ RenderLoop (
         }
 
         // Adopt a completed library upload only after the display transaction releases ownership.
-        if (reloadVideo) {
+        if (reloadVideo || reloadHttp) {
             savedVideoId = video.TakeSavedLibraryId();
             if (savedVideoId) {
                 library.NotifyVideoSaved(savedVideoId);
@@ -125,7 +131,7 @@ RenderLoop (
         }
 
         // Save each raw photo revision once, before connection overlays modify the source pixels.
-        if (!reloadVideo && upload.GetUploadedFrameData() && !upload.IsStoredFrame() &&
+        if (!reloadVideo && !reloadHttp && upload.GetUploadedFrameData() && !upload.IsStoredFrame() &&
             upload.GetFrameRevision() != attemptedPhotoRevision) {
             attemptedPhotoRevision = upload.GetFrameRevision();
             player.Stop();
@@ -195,8 +201,12 @@ main (
     WifiNetwork wifiNetwork(&upload, &video);
     MediaPlayer player(memory, upload);
     static MediaLibrary library(memory, upload, player);
+    static HttpMediaUpload http(memory, upload);
     CpuGraphics graphics(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, frameBuffer);
     bool restored;
+
+    http.SetMediaLibrary(&library);
+    WebServer::SetMediaUpload(&http);
 
     // Start clocks, serial output and panel scanning before performing storage or Wi-Fi work.
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
@@ -255,5 +265,5 @@ main (
         }
         upload.EndRender();
     }
-    RenderLoop(displayHelpers, upload, wifiNetwork, memory, library, player, video, graphics);
+    RenderLoop(displayHelpers, upload, wifiNetwork, memory, library, player, video, http, graphics);
 } // main

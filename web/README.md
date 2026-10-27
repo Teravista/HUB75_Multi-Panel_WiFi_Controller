@@ -1,4 +1,4 @@
-# Photo web interface
+# Local media web interface
 
 The firmware embeds `index.html` in flash and serves it at `http://<Pico-IP>/`
 on port 80. The page has no external assets or service dependencies. Choose an
@@ -24,3 +24,26 @@ request bodies are rejected. Open the page directly at the Pico's address.
 The foreground starts HTTP after the existing network/TCP services are ready,
 retries failed binds, and closes the listener before radio reinitialization.
 `cmake/EmbedWebPage.cmake` regenerates the compiled page when its HTML changes.
+
+## Video upload
+
+Choose a browser-decodable video, optionally enter its saved name, and set FPS
+(1–60), maximum source duration (0.1–600 seconds), format and loop/ping-pong mode.
+An empty name uses the source filename without its extension. RGB565 is the
+default; RGB888 and indexed baseline JPEG are available. JPEG quality defaults to
+85 and accepts 1–95. Audio is not transferred.
+
+The browser samples frames from the start of the source and uses the same
+centered full-panel crop as photos. It prepares frame records and their CRCs
+before sending bounded HTTP messages. Small prepared clips use browser RAM;
+larger clips spill into a temporary IndexedDB database. Browser storage capacity
+can limit long clips; shorter duration, lower FPS or JPEG reduces staging size.
+Temporary records are disposed after completion, failure or cancellation.
+
+Reception and SD verification are separate phases. The page reports a saved clip
+only after the Pico confirms durable publication and returns its library ID.
+A successfully saved video is selected for playback. Cancel releases an unfinished
+transaction while retaining earlier saved media. The frame rate stored with a
+video is its requested rate; playback remains subject to SD and decoding throughput.
+
+See [video upload](../docs/VIDEO-UPLOAD.md) for the bounded browser protocol.

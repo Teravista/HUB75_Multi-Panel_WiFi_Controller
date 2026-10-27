@@ -70,7 +70,7 @@ add_custom_command(
             -P "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedWebPage.cmake"
     DEPENDS "${WEB_PAGE_SOURCE}" "${CMAKE_CURRENT_LIST_DIR}/cmake/EmbedWebPage.cmake"
             "${CMAKE_CURRENT_LIST_DIR}/cmake/webPage.hpp.in"
-    COMMENT "Embedding photo upload page"
+    COMMENT "Embedding media upload page"
     VERBATIM
 )
 
@@ -133,6 +133,7 @@ target_compile_definitions(hub75 PRIVATE HUB75_VERBOSE_LOGS=$<BOOL:${HUB75_VERBO
 target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
     ${WEB_PAGE_HEADER}
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/HttpMediaUploadClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/http/webServer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/http/httpRequest.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp

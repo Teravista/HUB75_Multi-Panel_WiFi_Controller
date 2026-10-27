@@ -19,6 +19,7 @@ struct MediaMetadata {
     MediaType type = MediaType::Photo;
     PixelFormat pixelFormat = PixelFormat::RGB888;
     bool pingPong = false;
+    uint8_t jpegQuality = 0; // Zero means the encoder setting is unknown.
     uint64_t encodedBytes = 0; // Indexed JPEG payload; zero for raw pixels.
     uint16_t width = 0;
     uint16_t height = 0;
@@ -54,6 +55,7 @@ namespace MediaMetadataCodec {
 constexpr size_t HeaderBytes = 32;
 constexpr uint8_t Version = 1;
 constexpr uint8_t JpegVersion = 2;
+constexpr uint8_t JpegQualityVersion = 3;
 constexpr uint8_t PingPongFlag = 1;
 
 // Writes a 16-bit unsigned value in little-endian byte order.

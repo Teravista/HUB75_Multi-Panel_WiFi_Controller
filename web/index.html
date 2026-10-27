@@ -11,6 +11,12 @@ label{display:block;margin:20px 0 10px}input,button{font:inherit;width:100%;box-
 button{margin-top:20px;padding:14px;background:#38bdf8;color:#082f49;border:0;border-radius:10px;font-weight:700}
 button:disabled{opacity:.4}canvas{display:block;width:128px;height:256px;max-width:100%;margin:24px auto;background:#000;border:1px solid #64748b}
 p{line-height:1.5;color:#cbd5e1}#status{min-height:3em}*[hidden]{display:none!important}
+section{border-top:1px solid #374151;margin-top:32px;padding-top:12px}
+.options{display:grid;grid-template-columns:1fr 1fr;gap:16px}.options label{margin-top:12px}
+input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:border-box;padding:10px;background:#1f2937;color:#f9fafb;border:1px solid #64748b;border-radius:8px}
+.check{display:flex;align-items:center;gap:10px}.check input{width:auto}
+.secondary{background:#374151;color:#f9fafb}progress{width:100%;height:12px}
+#video-source{display:block;width:128px;height:256px;object-fit:cover;margin:24px auto;background:#000}
 </style>
 </head>
 <body>
@@ -21,6 +27,20 @@ p{line-height:1.5;color:#cbd5e1}#status{min-height:3em}*[hidden]{display:none!im
 <canvas id="preview" width="128" height="256" aria-label="Photo preview" hidden></canvas>
 <button id="upload" type="button" disabled>Save and show photo</button>
 <p id="status" role="status" aria-live="polite">Choose a photo.</p>
+<section>
+<h2>Upload a video</h2>
+<label for="video-file">Video</label><input id="video-file" type="file" accept="video/*">
+<label for="video-name">Video name</label><input id="video-name" type="text" maxlength="63" placeholder="Use filename">
+<div class="options"><div><label for="video-fps">FPS</label><input id="video-fps" type="number" min="1" max="60" step="1" value="20"></div>
+<div><label for="video-seconds">Maximum seconds</label><input id="video-seconds" type="number" min="0.1" max="600" step="0.1" value="10"></div>
+<div><label for="video-format">Format</label><select id="video-format"><option value="rgb565">RGB565</option><option value="jpeg">JPEG</option><option value="rgb888">RGB888</option></select></div>
+<div><label for="jpeg-quality">JPEG quality</label><input id="jpeg-quality" type="number" min="1" max="95" step="1" value="85" disabled></div></div>
+<label class="check" for="video-pingpong"><input id="video-pingpong" type="checkbox">Ping-pong</label>
+<video id="video-source" controls muted playsinline preload="metadata" hidden></video>
+<progress id="video-progress" max="100" value="0" aria-label="Video preparation and upload progress"></progress>
+<button id="video-send" type="button" disabled>Upload video</button><button id="video-cancel" class="secondary" type="button" disabled>Cancel</button>
+<p id="video-status" role="status" aria-live="polite">Choose a video.</p>
+</section>
 <script>
 'use strict';
 const WIDTH = 128;
@@ -45,8 +65,8 @@ let selectionRevision = 0;
     a slow image. An active upload locks both controls until its request finishes.
 */
 function updatePhotoControls() {
-    fileInput.disabled = uploading;
-    uploadButton.disabled = !prepared || preparing || uploading;
+    fileInput.disabled = uploading || videoBusy;
+    uploadButton.disabled = !prepared || preparing || uploading || videoBusy;
 }
 
 /**
@@ -165,7 +185,7 @@ async function preparePhotoPreview() {
     @return Promise<void> - Completes after displaying reception confirmation or an upload error.
 */
 async function uploadPhoto() {
-    if (!prepared || preparing || uploading) {
+    if (!prepared || preparing || uploading || videoBusy) {
         return;
     }
     const controller = new AbortController();
@@ -173,6 +193,7 @@ async function uploadPhoto() {
 
     uploading = true;
     updatePhotoControls();
+    updateVideoControls();
     statusText.textContent = 'Uploading photo…';
     try {
         const rgba = context.getImageData(0, 0, WIDTH, HEIGHT).data;
@@ -192,12 +213,973 @@ async function uploadPhoto() {
     } finally {
         clearTimeout(timeout);
         uploading = false;
-        updatePhotoControls();
+        updateVideoControls();
     }
 }
 
 fileInput.addEventListener('change', preparePhotoPreview);
 uploadButton.addEventListener('click', uploadPhoto);
+
+const videoFile = document.getElementById('video-file');
+const videoSource = document.getElementById('video-source');
+const videoCanvas = document.createElement('canvas');
+videoCanvas.width = WIDTH;
+videoCanvas.height = HEIGHT;
+const videoCtx = videoCanvas.getContext('2d', {willReadFrequently: true});
+const videoFps = document.getElementById('video-fps');
+const videoSeconds = document.getElementById('video-seconds');
+const videoFormat = document.getElementById('video-format');
+const jpegQuality = document.getElementById('jpeg-quality');
+const videoPingpong = document.getElementById('video-pingpong');
+const videoName = document.getElementById('video-name');
+const videoSend = document.getElementById('video-send');
+const videoCancel = document.getElementById('video-cancel');
+const videoProgress = document.getElementById('video-progress');
+const videoStatus = document.getElementById('video-status');
+let videoBusy = false;
+let videoAbort = null;
+let previewUrl = '';
+/**
+    Provides RGB pixel conversion, indexed JPEG records and checked upload envelopes.
+
+    Encoders use explicit little-endian fields shared with the firmware protocol.
+    Frame records are independent so the Pico can verify and seek them without
+    retaining a complete video in RAM.
+*/
+const VideoCodec = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let bit = 0; bit < 8; bit++) {
+      if (c & 1) {
+        c = (c >>> 1) ^ 0xedb88320;
+      } else {
+        c = c >>> 1;
+      }
+    }
+    table[i] = c >>> 0;
+  }
+
+  /**
+      Updates the browser's running CRC32 with a byte span.
+
+      @param bytes Input byte array or byte count to format, as required by this operation.
+      @param previous Previously finalized CRC32, or zero to begin a new checksum.
+
+      @return value - Finalized unsigned CRC32 of these bytes, optionally continuing the prior
+                      checksum.
+  */
+  function calculateCrc32(bytes, previous = 0) {
+    let c = (previous ^ 0xffffffff) >>> 0;
+    for (const b of bytes) {
+      c = table[(c ^ b) & 255] ^ (c >>> 8);
+    }
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  /**
+      Encodes canvas pixels in the selected raw transfer format.
+
+      Drops the already-composited alpha channel. RGB565 uses little-endian
+      R5G6B5 words, while RGB888 preserves the browser red/green/blue byte order.
+
+      @param rgba Source canvas pixels in RGBA byte order.
+      @param format Stored pixel format selected for the prepared media.
+
+      @return value - RGB888 or little-endian RGB565 bytes converted from canvas RGBA pixels.
+  */
+  function encodeFramePixels(rgba, format) {
+    let pixelBytes;
+    if (format === 'rgb565') {
+      pixelBytes = 2;
+    } else {
+      pixelBytes = 3;
+    }
+    const out = new Uint8Array(rgba.length / 4 * pixelBytes);
+    for (let s = 0, d = 0; s < rgba.length; s += 4) {
+      if (format === 'rgb565') {
+        const p = ((rgba[s] >> 3) << 11) | ((rgba[s + 1] >> 2) << 5) | (rgba[s + 2] >> 3);
+        out[d++] = p & 255;
+        out[d++] = p >>> 8;
+      } else {
+        out[d++] = rgba[s];
+        out[d++] = rgba[s + 1];
+        out[d++] = rgba[s + 2];
+      }
+    }
+
+    return out;
+  }
+
+  /**
+      Wraps a browser upload message with its operation and session fields.
+
+      @param op Protocol operation identifier.
+      @param id Saved media library identifier; valid IDs are nonzero.
+      @param offset Byte offset within the prepared payload or requested upload.
+      @param body Binary request payload.
+
+      @return value - Binary upload request header followed by its optional body.
+  */
+  function buildUploadDescriptor(op, id = 0, offset = 0, body = new Uint8Array()) {
+    const out = new Uint8Array(9 + body.length);
+    const v = new DataView(out.buffer);
+    out[0] = op;
+    v.setUint32(1, id, true);
+    v.setUint32(5, offset, true);
+    out.set(body, 9);
+    return out;
+  }
+
+  /**
+      Builds a checked seek-index entry for each compressed frame.
+
+      Offsets skip the complete index and each preceding eight-byte frame record
+      header. The entry checksum covers offset, length and frame ordinal so the
+      Pico can validate a seek without scanning all earlier image records.
+
+      @param lengths Encoded byte length of each independently compressed JPEG frame.
+
+      @return value - JPEG frame index containing the offset and length of each encoded frame.
+  */
+  function encodeJpegFrameIndex(lengths) {
+    const out = new Uint8Array(lengths.length * 12);
+
+    // Write the fixed binary fields explicitly; the controller expects little-endian values.
+    const v = new DataView(out.buffer);
+    let offset = out.length;
+    lengths.forEach((length, i) => {
+      const entry = new Uint8Array(12);
+      const e = new DataView(entry.buffer);
+      e.setUint32(0, offset, true);
+      e.setUint32(4, length, true);
+      e.setUint32(8, i, true);
+      v.setUint32(i * 12, offset, true);
+      v.setUint32(i * 12 + 4, length, true);
+      v.setUint32(i * 12 + 8, calculateCrc32(entry), true);
+      offset += 8 + length;
+    });
+    return out;
+  }
+
+  /**
+      Validates the browser's JPEG encoding against the Pico decoder's supported format.
+
+      Checks framing and walks marker lengths up to the baseline frame header.
+      Progressive or mismatched dimensions are rejected before upload; the Pico
+      decoder and stored checksums validate the actual encoded frame content.
+
+      @param frame Raw RGB888 frame or encoded JPEG frame being processed.
+      @param width Image width in pixels.
+      @param height Image height in pixels.
+
+      @return true - The frame is a supported baseline JPEG with the requested dimensions.
+      @return false - The frame markers, encoding or dimensions are unsupported or malformed.
+  */
+  function validateBaselineJpeg(frame, width = WIDTH, height = HEIGHT) {
+    if (frame.length < 4 || frame[0] !== 255 || frame[1] !== 216 || frame[frame.length - 2] !== 255 ||
+        frame[frame.length - 1] !== 217) {
+      return false;
+    }
+    let i = 2;
+    while (i + 4 <= frame.length) {
+      if (frame[i++] !== 255) {
+        return false;
+      }
+      while (frame[i] === 255) {
+        i++;
+      }
+      const marker = frame[i++];
+      if (marker === 0xda || marker === 0xd9) {
+        return false;
+      }
+      if (i + 2 > frame.length) {
+        return false;
+      }
+      const length = (frame[i] << 8) | frame[i + 1];
+      if (length < 2 || i + length > frame.length) {
+        return false;
+      }
+      if (marker === 0xc0) {
+        return length >= 8 && frame[i + 2] === 8 && ((frame[i + 3] << 8) | frame[i + 4]) === height &&
+            ((frame[i + 5] << 8) | frame[i + 6]) === width && frame[i + 7] === 3;
+      }
+      if (marker >= 0xc1 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+        return false;
+      }
+      i += length;
+    }
+
+    return false;
+  }
+
+  /**
+      Encodes a full-panel video descriptor and its payload checksum.
+
+      Raw pixels use descriptor version 1; JPEG uses version 2 when quality is
+      unknown or version 3 when its encoder setting is stored. The final four
+      bytes contain the payload CRC and are outside the 32-byte descriptor.
+
+      @param frames Number of prepared frames.
+      @param fps Requested integer video frames per second.
+      @param format Raw RGB888, raw RGB565 or indexed JPEG.
+      @param pingpong Whether playback reverses at the clip endpoints.
+      @param bytes Complete encoded payload size.
+      @param checksum Finalized payload CRC32.
+      @param quality JPEG encoder quality, or zero when unknown.
+
+      @return Uint8Array - The 32-byte metadata descriptor followed by its CRC field.
+  */
+  function encodeMediaDescriptor(frames, fps, format, pingpong, bytes, checksum, quality = 0) {
+    const formats = {rgb888: 1, rgb565: 2, jpeg: 3};
+    if (!formats[format] || !Number.isInteger(frames) || frames < 1 ||
+        !Number.isInteger(fps) || fps < 1 || fps > 60 ||
+        !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 0xffffffff) {
+      throw new Error('Invalid video metadata.');
+    }
+    let savedQuality = 0;
+    let version = 1;
+    let flags = 0;
+    if (format === 'jpeg') {
+      savedQuality = quality;
+      version = 2;
+      if (savedQuality) {
+        version = 3;
+      }
+    }
+    if (!Number.isInteger(savedQuality) || savedQuality < 0 || savedQuality > 95) {
+      throw new Error('Invalid JPEG quality.');
+    }
+    if (pingpong) {
+      flags = 1;
+    }
+    const out = new Uint8Array(36);
+    const view = new DataView(out.buffer);
+    out.set([72, 55, 53, 77, version, 2, formats[format], (savedQuality << 1) | flags]);
+    view.setUint16(8, WIDTH, true);
+    view.setUint16(10, HEIGHT, true);
+    view.setUint32(12, frames, true);
+    view.setUint32(16, fps, true);
+    view.setUint32(20, 1, true);
+    view.setUint32(24, bytes, true);
+    view.setUint32(28, 0, true);
+    view.setUint32(32, checksum, true);
+    return out;
+  }
+  return {calculateCrc32, encodeFramePixels, encodeMediaDescriptor, buildUploadDescriptor,
+          encodeJpegFrameIndex, validateBaselineJpeg};
+})();
+
+/**
+    Stops video preparation when the user has canceled it.
+
+    @param signal Abort signal used to cancel preparation, waits or uploads.
+*/
+function throwIfUploadCanceled(signal) {
+  if (signal.aborted) {
+    throw new Error('canceled');
+  }
+}
+
+/**
+    Waits for a video event with cancellation, error, and timeout handling.
+
+    Installs listeners before starting the action so an immediate event is not
+    missed. Completion, failure and cancellation all remove those listeners and
+    the deadline; an already canceled signal prevents the action from starting.
+
+    @param video Browser video element used as the source frame.
+    @param event Video event name to wait for.
+    @param action Callback that starts the asynchronous operation being awaited.
+    @param signal Abort signal used to cancel preparation, waits or uploads.
+
+    @return value - Promise resolved when the requested video event occurs; rejected on error,
+                    cancellation or timeout.
+*/
+function waitForVideoEvent(video, event, action, signal) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    /**
+        Completes the pending wait and removes its event handlers and deadline.
+
+        @param error Original browser storage or network error to report.
+    */
+    const finish = error => {
+      clearTimeout(timer);
+      video.removeEventListener(event, done);
+      video.removeEventListener('error', failed);
+      signal.removeEventListener('abort', aborted);
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    /**
+        Completes the pending video event wait successfully.
+    */
+    const done = () => finish();
+    /**
+        Rejects the pending wait when the browser cannot decode the video.
+    */
+    const failed = () => finish(new Error('This browser could not decode the video. Try an H.264 MP4.'));
+    /**
+        Cancels the pending video event wait.
+    */
+    const aborted = () => finish(new Error('canceled'));
+    video.addEventListener(event, done, {once: true});
+    video.addEventListener('error', failed, {once: true});
+    signal.addEventListener('abort', aborted, {once: true});
+    timer = setTimeout(() => finish(new Error('Video decoding timed out. Try a different MP4.')), 30000);
+    if (signal.aborted) {
+      aborted();
+    } else {
+      try {
+        action();
+      } catch (e) {
+        finish(e);
+      }
+    }
+  });
+}
+
+/**
+    Stages encoded video frames in the browser while keeping upload reads bounded.
+
+    Small clips use blobs in RAM. Larger clips spill to a temporary IndexedDB
+    database, which is disposed after upload or cancellation. The payload exposes
+    the same bounded slice interface in both modes, including indexed JPEG data.
+*/
+class VideoFrameStore {
+  /**
+      Initializes bounded video preparation storage and its memory limit.
+
+      @param signal Abort signal used to cancel preparation, waits or uploads.
+      @param limit Maximum frame bytes retained in RAM before spilling to IndexedDB.
+  */
+  constructor(signal, limit = 128 * 1024 * 1024) {
+    this.signal = signal;
+    this.limit = limit;
+    this.records = [];
+    this.starts = [];
+    this.size = 0;
+    this.db = null;
+    this.name = null;
+    this.cache = null;
+  }
+
+  /**
+      Explains unavailable browser staging storage and its recovery options.
+
+      @param error Original browser storage or network error to report.
+
+      @return value - Error explaining why browser temporary frame storage failed.
+  */
+  storageError(error) {
+    let message;
+    if (error && error.name === 'QuotaExceededError') {
+      message =
+          'Not enough temporary browser storage. Free space, reduce duration/FPS, or select JPEG.';
+    } else {
+      message =
+          'Temporary browser storage is unavailable. Enable site storage, reduce duration/FPS, or select JPEG.';
+    }
+    return new Error(message);
+  }
+
+  /**
+      Moves prepared chunks from RAM into temporary browser database storage.
+
+      Opens a unique per-job database and copies existing blobs before releasing
+      their RAM references. Failed storage operations terminate preparation; the
+      owning job closes and disposes the database during cleanup.
+
+      @return Promise<void> - Completes after existing records have moved to browser storage.
+  */
+  async spill() {
+    if (this.db) {
+      return;
+    }
+    throwIfUploadCanceled(this.signal);
+    if (typeof indexedDB === 'undefined') {
+      throw this.storageError();
+    }
+    this.name = `hub75-video-temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      this.db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open(this.name, 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('frames');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      for (let i = 0; i < this.records.length; i++) {
+        throwIfUploadCanceled(this.signal);
+        await this.transaction('readwrite', store => store.put(this.records[i], i));
+        this.records[i] = null;
+      }
+      this.records = [];
+    } catch (error) {
+      if (this.signal.aborted) {
+        throw new Error('canceled');
+      }
+      throw this.storageError(error);
+    }
+  }
+
+  /**
+      Runs a bounded operation against the temporary browser staging database.
+
+      Captures the individual request result but waits for transaction completion
+      before reporting success. Aborts carry the final storage failure, including
+      quota exhaustion, so partially completed writes cannot look successful.
+
+      @param mode IndexedDB transaction mode: readonly or readwrite.
+      @param action Callback that starts the asynchronous operation being awaited.
+
+      @return value - Promise for completion of the requested temporary-storage transaction.
+  */
+  transaction(mode, action) {
+    return new Promise((resolve, reject) => {
+      let transaction;
+      let result;
+      try {
+        transaction = this.db.transaction('frames', mode);
+        const request = action(transaction.objectStore('frames'));
+        request.onsuccess = () => {
+          result = request.result;
+        };
+        transaction.oncomplete = () => resolve(result);
+        transaction.onabort = () => reject(transaction.error);
+        transaction.onerror = () => { return; };  // Abort carries the final failure, including quota errors.
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  /**
+      Adds a prepared chunk while enforcing staging storage limits.
+
+      Crossing the RAM threshold moves existing records into IndexedDB. The byte
+      offset table advances only after the new blob is retained successfully,
+      and cancellation is checked before and after asynchronous storage work.
+
+      @param record Encoded frame record to append to temporary storage.
+
+      @return Promise - Resolves when this asynchronous operation completes; rejects if the
+                        operation fails or is canceled.
+  */
+  async append(record) {
+    throwIfUploadCanceled(this.signal);
+    if (!this.db && this.size + record.size > this.limit) {
+      await this.spill();
+    }
+    try {
+      if (this.db) {
+        await this.transaction('readwrite', store => store.put(record, this.starts.length));
+      } else {
+        this.records.push(record);
+      }
+    } catch (error) {
+      throw this.storageError(error);
+    }
+
+    this.starts.push(this.size);
+    this.size += record.size;
+    throwIfUploadCanceled(this.signal);
+  }
+
+  /**
+      Reads one staged frame record by index.
+
+      RAM records are borrowed directly. Database reads cache the most recently
+      requested blob because consecutive upload chunks usually share a frame.
+      Missing data terminates the job rather than uploading an incomplete record.
+
+      @param index Zero-based staged frame index.
+
+      @return value - Promise resolving to: encoded frame record at the requested zero-based
+                      index.
+  */
+  async record(index) {
+    throwIfUploadCanceled(this.signal);
+    if (!this.db) {
+      return this.records[index];
+    }
+    if (this.cache && this.cache.index === index) {
+      return this.cache.blob;
+    }
+    let blob;
+    try {
+      blob = await this.transaction('readonly', store => store.get(index));
+    } catch (error) {
+      throw this.storageError(error);
+    }
+
+    throwIfUploadCanceled(this.signal);
+    if (!blob) {
+      throw new Error('A prepared video frame is missing. Prepare the clip again.');
+    }
+    this.cache = {index, blob};
+    return blob;
+  }
+
+  /**
+      Exposes the staged video payload for bounded upload reads.
+
+      A RAM-backed job borrows the frame blobs through a composite Blob. A database
+      job maps each requested byte range across its optional index and stored frame
+      records, caching the current record to avoid repeated reads between chunks.
+
+      @param index Optional JPEG seek-index bytes prepended to staged frame records.
+
+      @return value - Prepared payload combining the frame index and all stored frame records.
+  */
+  payload(index = new Uint8Array()) {
+    const owner = this;
+    if (!this.db) {
+      return new Blob([index, ...this.records]);
+    }
+    return {
+      size: index.length + this.size,
+      /**
+          Returns a bounded slice of the staged video payload.
+
+          @param start Inclusive first byte offset of the payload slice.
+          @param end Exclusive final byte offset of the payload slice.
+
+          @return value - Payload slice covering the requested byte range.
+      */
+      slice(start, end) {
+        return {
+          /**
+              Reads the selected staged payload range into a byte buffer.
+
+              @return value - Promise resolving to: arrayBuffer containing all bytes represented by this
+                              prepared payload.
+          */
+          async arrayBuffer() {
+            throwIfUploadCanceled(owner.signal);
+            end = Math.min(end, index.length + owner.size);
+            const out = new Uint8Array(Math.max(0, end - start));
+            let cursor = start;
+            if (cursor < index.length) {
+              const stop = Math.min(end, index.length);
+              out.set(index.subarray(cursor, stop));
+              cursor = stop;
+            }
+            let low = 0;
+            let high = owner.starts.length;
+            while (low < high) {
+              const mid = (low + high) >>> 1;
+              if (owner.starts[mid] <= cursor - index.length) {
+                low = mid + 1;
+              } else {
+                high = mid;
+              }
+            }
+
+            let frame = Math.max(0, low - 1);
+            while (cursor < end) {
+              const blob = await owner.record(frame);
+              const offset = cursor - index.length - owner.starts[frame];
+              const count = Math.min(end - cursor, blob.size - offset);
+              if (count <= 0) {
+                throw new Error('Invalid prepared video offset.');
+              }
+              out.set(new Uint8Array(await blob.slice(offset, offset + count).arrayBuffer()), cursor - start);
+              cursor += count;
+              frame++;
+            }
+
+            throwIfUploadCanceled(owner.signal);
+            return out.buffer;
+          }
+        };
+      }
+    };
+  }
+
+  /**
+      Releases temporary chunks and browser database resources.
+
+      Closes the connection before deleting its uniquely named staging database.
+      Blocked deletion or storage errors resolve cleanup rather than keeping the
+      controls locked after the upload itself has ended.
+
+      @return Promise<void> - Completes after releasing the job's temporary storage references.
+  */
+  async dispose() {
+    this.records = [];
+    this.starts = [];
+    this.cache = null;
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+    if (this.name) {
+      const name = this.name;
+      this.name = null;
+      // No other tab opens this job's database; close our connection before deletion.
+      await new Promise(resolve => {
+        try {
+          const request = indexedDB.deleteDatabase(name);
+          request.onsuccess = request.onerror = request.onblocked = resolve;
+        } catch (_) {
+          resolve();
+        }
+      });
+    }
+  }
+}
+
+/**
+    Reads the browser's video encoding and playback options.
+
+    Checks the requested rate, duration and JPEG encoder range before decoding.
+    Source duration is applied separately during preparation, where a shorter
+    source produces fewer frames than the selected maximum permits.
+
+    @return object - Validated FPS, duration, pixel format, JPEG quality and loop mode.
+*/
+function readVideoUploadOptions() {
+    const fps = Number(videoFps.value);
+    const seconds = Number(videoSeconds.value);
+    const quality = Number(jpegQuality.value);
+    const format = videoFormat.value;
+    if (!Number.isInteger(fps) || fps < 1 || fps > 60) {
+        throw new Error('Choose an FPS from 1 to 60.');
+    }
+    if (!Number.isFinite(seconds) || seconds < 0.1 || seconds > 600) {
+        throw new Error('Choose a duration from 0.1 to 600 seconds.');
+    }
+    if (!['rgb565', 'rgb888', 'jpeg'].includes(format)) {
+        throw new Error('Choose a supported format.');
+    }
+    if (format === 'jpeg' && (!Number.isInteger(quality) || quality < 1 || quality > 95)) {
+        throw new Error('Choose JPEG quality from 1 to 95.');
+    }
+    return {fps, seconds, quality, format, pingpong: videoPingpong.checked};
+}
+
+/**
+    Redraws a decoded video frame using the same centered crop as photo uploads.
+
+    @param video Decoded browser video element containing the current source frame.
+*/
+function drawVideoFrame(video) {
+    const crop = calculatePhotoCrop(video.videoWidth, video.videoHeight);
+    videoCtx.fillStyle = '#000';
+    videoCtx.fillRect(0, 0, WIDTH, HEIGHT);
+    videoCtx.drawImage(video, crop.x, crop.y, crop.width, crop.height);
+}
+
+/**
+    Prepares raw or independently compressed frames from the start of a local video.
+
+    Browser decoding supplies sampled frames at the requested FPS up to the selected
+    duration or source end. Frames are staged before transfer so payload size and CRC
+    are known. Indexed JPEG includes checked record headers and a seek index.
+    Source URLs and temporary browser storage are released when preparation fails.
+
+    @param file Selected local video file.
+    @param options Validated video encoding and timing settings.
+    @param signal Cancellation signal shared by preparation and transfer.
+
+    @return Promise<object> - Payload, frame count, metadata header and storage cleanup callback.
+*/
+async function prepareBrowserVideo(file, options, signal) {
+    const video = document.createElement('video');
+    const url = URL.createObjectURL(file);
+    const records = new VideoFrameStore(signal);
+    const lengths = [];
+    let checksum = 0;
+    let prepared = false;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    try {
+        await waitForVideoEvent(video, 'loadeddata', () => {
+            video.src = url;
+            video.load();
+        }, signal);
+        if (!Number.isFinite(video.duration) || video.duration <= 0 || !video.videoWidth || !video.videoHeight) {
+            throw new Error('Could not read this video. Try an H.264 MP4.');
+        }
+        const duration = Math.min(video.duration, options.seconds);
+        const frames = Math.max(1, Math.ceil(duration * options.fps - 1e-8));
+        let rawPixelBytes = 3;
+        if (options.format === 'rgb565') {
+            rawPixelBytes = 2;
+        }
+        if (options.format !== 'jpeg' && frames * WIDTH * HEIGHT * rawPixelBytes > records.limit) {
+            await records.spill();
+        }
+        for (let i = 0; i < frames; i++) {
+            throwIfUploadCanceled(signal);
+            const target = i / options.fps;
+            if (i || Math.abs(video.currentTime - target) > 0.0001) {
+                await waitForVideoEvent(video, 'seeked', () => { video.currentTime = target; }, signal);
+            }
+            drawVideoFrame(video);
+            let frame;
+            if (options.format === 'jpeg') {
+                const blob = await new Promise(resolve => videoCanvas.toBlob(resolve, 'image/jpeg', options.quality / 100));
+                throwIfUploadCanceled(signal);
+                if (!blob || blob.type !== 'image/jpeg') {
+                    throw new Error('JPEG encoding is unavailable. Select RGB565.');
+                }
+                frame = new Uint8Array(await blob.arrayBuffer());
+                if (frame.length > 128 * 1024 || !VideoCodec.validateBaselineJpeg(frame)) {
+                    throw new Error('The browser produced an unsupported JPEG. Select RGB565.');
+                }
+                const header = new Uint8Array(8);
+                const view = new DataView(header.buffer);
+                view.setUint32(0, frame.length, true);
+                view.setUint32(4, VideoCodec.calculateCrc32(frame), true);
+                await records.append(new Blob([header, frame]));
+                lengths.push(frame.length);
+            } else {
+                frame = VideoCodec.encodeFramePixels(videoCtx.getImageData(0, 0, WIDTH, HEIGHT).data, options.format);
+                await records.append(new Blob([frame]));
+                checksum = VideoCodec.calculateCrc32(frame, checksum);
+            }
+            videoProgress.value = (i + 1) / frames * 100;
+            videoStatus.textContent = `Preparing frame ${i + 1} of ${frames}…`;
+            if (i % 8 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+        }
+        let payload;
+        if (options.format === 'jpeg') {
+            const index = VideoCodec.encodeJpegFrameIndex(lengths);
+            payload = records.payload(index);
+            checksum = VideoCodec.calculateCrc32(index);
+            for (let i = 0; i < frames; i++) {
+                throwIfUploadCanceled(signal);
+                checksum = VideoCodec.calculateCrc32(new Uint8Array(await (await records.record(i)).arrayBuffer()), checksum);
+            }
+        } else {
+            payload = records.payload();
+        }
+        const header = VideoCodec.encodeMediaDescriptor(frames, options.fps, options.format,
+            options.pingpong, payload.size, checksum, options.quality);
+        prepared = true;
+        return {payload, frames, header, dispose: records.dispose.bind(records)};
+    } finally {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+        URL.revokeObjectURL(url);
+        if (!prepared) {
+            await records.dispose();
+        }
+    }
+}
+
+/**
+    Adds a bounded ASCII name and duration limit to the video start descriptor.
+
+    The zero-filled name field always retains a terminator. Non-ASCII characters
+    are replaced consistently with controller naming, and the selected duration
+    is recorded independently of the actual saved frame count.
+
+    @param header Video metadata and payload CRC bytes.
+    @param name User override or source filename without its extension.
+    @param seconds Selected maximum source duration in seconds.
+
+    @return Uint8Array - Named video start body with explicit zero-terminated name storage.
+*/
+function videoLibraryHeader(header, name, seconds) {
+    const out = new Uint8Array(104);
+    out.set(header);
+    const ascii = name.replace(/[^\x20-\x7e]/g, '_').slice(0, 63);
+    for (let i = 0; i < ascii.length; i++) {
+        out[36 + i] = ascii.charCodeAt(i);
+    }
+    new DataView(out.buffer).setUint32(100, Math.round(seconds * 1000), true);
+    return out;
+}
+
+/**
+    Sends one bounded video protocol message and checks the Pico's JSON response.
+
+    A per-request timeout releases the browser when a socket stops responding.
+    The caller retains the acknowledged session and byte offset for the next chunk;
+    cancellation remains shared with video preparation.
+
+    @param operation Upload start, chunk, status or cancellation operation.
+    @param id Active upload session ID, or zero for a new upload.
+    @param offset Confirmed payload byte position.
+    @param body Optional protocol body bytes.
+    @param signal Cancellation signal for the pending HTTP request.
+
+    @return Promise<object> - Parsed acknowledgement containing session, progress and state.
+*/
+async function videoRequest(operation, id, offset, body, signal) {
+    const request = new AbortController();
+    const abort = request.abort.bind(request);
+    const timer = setTimeout(abort, 30000);
+    signal.addEventListener('abort', abort, {once: true});
+    try {
+        throwIfUploadCanceled(signal);
+        const response = await fetch('/api/video', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/octet-stream'},
+            body: VideoCodec.buildUploadDescriptor(operation, id, offset, body),
+            signal: request.signal,
+            cache: 'no-store'
+        });
+        if (!response.ok) {
+            throw new Error(`Video request failed (HTTP ${response.status}).`);
+        }
+        const acknowledgement = await response.json();
+        if (acknowledgement.error) {
+            throw new Error(acknowledgement.error);
+        }
+        return acknowledgement;
+    } finally {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+    }
+}
+
+/**
+    Updates photo and video inputs while preparation or transfer owns the page.
+*/
+function updateVideoControls() {
+    const busy = videoBusy || uploading;
+    for (const control of [videoFile, videoFps, videoSeconds, videoFormat, jpegQuality, videoPingpong, videoName]) {
+        control.disabled = busy;
+    }
+    jpegQuality.disabled = busy || videoFormat.value !== 'jpeg';
+    videoSend.disabled = busy || !videoFile.files.length;
+    videoCancel.disabled = !videoBusy;
+    updatePhotoControls();
+}
+
+/**
+    Prepares, transfers and waits for verified publication of the selected video.
+
+    Each HTTP message carries at most 6144 payload bytes. The confirmed byte offset
+    advances only after a matching acknowledgement, and verification is polled as a
+    separate state. Cancellation or failure attempts to release the Pico's session
+    before disposing temporary browser records and unlocking the page.
+
+    @return Promise<void> - Completes after reporting a saved clip or an upload error.
+*/
+async function uploadVideo() {
+    if (videoBusy || uploading || !videoFile.files.length) {
+        return;
+    }
+    let clip = null;
+    let session = 0;
+    videoBusy = true;
+    videoAbort = new AbortController();
+    updateVideoControls();
+    try {
+        const options = readVideoUploadOptions();
+        const file = videoFile.files[0];
+        const name = videoName.value.trim() || file.name.replace(/\.[^.]+$/, '');
+        clip = await prepareBrowserVideo(file, options, videoAbort.signal);
+        let acknowledgement = await videoRequest(6, 0, 0,
+            videoLibraryHeader(clip.header, name, options.seconds), videoAbort.signal);
+        session = acknowledgement.id;
+        if (!Number.isInteger(session) || session <= 0 || acknowledgement.state !== 'receiving' ||
+            acknowledgement.offset !== 0 || acknowledgement.total !== clip.payload.size) {
+            throw new Error('Unexpected upload start response.');
+        }
+        for (let offset = 0; offset < clip.payload.size;) {
+            throwIfUploadCanceled(videoAbort.signal);
+            const end = Math.min(offset + 6144, clip.payload.size);
+            const bytes = new Uint8Array(await clip.payload.slice(offset, end).arrayBuffer());
+            acknowledgement = await videoRequest(2, session, offset, bytes, videoAbort.signal);
+            if (acknowledgement.id !== session || acknowledgement.offset !== end) {
+                throw new Error('Unexpected upload progress response.');
+            }
+            offset = end;
+            videoProgress.value = offset / clip.payload.size * 100;
+            videoStatus.textContent = `Uploading ${Math.floor(videoProgress.value)}%`;
+        }
+        while (acknowledgement.state === 'verifying') {
+            throwIfUploadCanceled(videoAbort.signal);
+            videoStatus.textContent = 'Verifying SD copy…';
+            await new Promise(resolve => setTimeout(resolve, 250));
+            acknowledgement = await videoRequest(3, session, 0, new Uint8Array(), videoAbort.signal);
+        }
+        if (acknowledgement.id !== session || acknowledgement.state !== 'saved' || !acknowledgement.videoId) {
+            throw new Error('The Pico did not confirm a saved video.');
+        }
+        session = 0;
+        videoStatus.textContent = `Saved and verified: ${clip.frames} frames. ` + acknowledgement.warning;
+    } catch (error) {
+        videoStatus.textContent = 'Video upload failed: ' + error.message;
+    } finally {
+        if (session) {
+            try {
+                await videoRequest(4, session, 0, new Uint8Array(), new AbortController().signal);
+            } catch (error) {
+                // The Pico also releases an inactive receive session when the client cannot reach it.
+            }
+        }
+        if (clip) {
+            await clip.dispose();
+        }
+        videoBusy = false;
+        videoAbort = null;
+        updateVideoControls();
+    }
+}
+
+/**
+    Cancels the active browser video preparation or upload request.
+*/
+function cancelVideoUpload() {
+    if (videoAbort) {
+        videoAbort.abort();
+    }
+}
+
+/**
+    Releases the native source-video preview URL when its file is replaced.
+*/
+function disposeVideoPreview() {
+    videoSource.pause();
+    videoSource.removeAttribute('src');
+    videoSource.load();
+    if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+        previewUrl = '';
+    }
+}
+
+/**
+    Shows the selected source video with the centered crop used during encoding.
+
+    Replaces and releases the preceding object URL before attaching the new source.
+    The native preview is cropped through CSS; upload preparation decodes its own
+    source from the beginning and applies the matching canvas crop.
+*/
+function prepareVideoPreview() {
+    disposeVideoPreview();
+    if (videoFile.files.length) {
+        previewUrl = URL.createObjectURL(videoFile.files[0]);
+        videoSource.src = previewUrl;
+        videoSource.hidden = false;
+        videoSource.load();
+    } else {
+        videoSource.hidden = true;
+    }
+    updateVideoControls();
+}
+
+videoFile.addEventListener('change', prepareVideoPreview);
+videoSend.addEventListener('click', uploadVideo);
+videoCancel.addEventListener('click', cancelVideoUpload);
+videoFormat.addEventListener('change', updateVideoControls);
+window.addEventListener('pagehide', disposeVideoPreview);
+updateVideoControls();
+
 </script>
 </body>
 </html>
