@@ -2,7 +2,7 @@
 class FrameBufferController;
 class HttpMediaUpload;
 
-// Foreground lifecycle calls require an initialized radio; stop before radio teardown.
+// Core 1 owns listener lifecycle and transport; Core 0 processes storage requests.
 namespace WebServer {
 // Starts the media HTTP listener on port 80.
 bool Start(FrameBufferController& upload);
@@ -12,6 +12,12 @@ void SetMediaUpload(HttpMediaUpload* upload);
 
 // Advances foreground media work, client deadlines and pending responses.
 void Update(void);
+
+// Processes queued HTTP requests that need foreground storage access.
+void UpdateStorage(void);
+
+// Maintains HTTP client deadlines and pending responses.
+void UpdateTransport(void);
 
 // Closes HTTP clients and stops the listener.
 void Stop(void);

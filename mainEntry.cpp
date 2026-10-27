@@ -7,25 +7,100 @@
 #include "config/defines.h"
 #include "display/include/displayHelpers.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
-#include "network/wifiNetwork.hpp"
+#include "network/include/WifiConnectionClass.hpp"
+#include "network/include/networkCore.hpp"
 #include "sd/include/MemoryManagerClass.hpp"
 #include "media/include/MediaLibraryClass.hpp"
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "browser-video-upload"
+#define WIFI_STATE_MACHINE_REV "network-core-services"
+
+struct NetworkStorageContext {
+    MemoryManager* memory;
+    MediaLibrary* library;
+    MediaPlayer* player;
+    TcpVideoUpload* video;
+    HttpMediaUpload* http;
+    bool* servicesPaused;
+};
 
 /**
-    Prepares and submits display frames while advancing photo and network services.
+    Yields the network worker while waiting for a foreground acknowledgement.
+*/
+static void
+YieldNetworkWorker (
+    void
+    )
+{
+    sleep_ms(UPLOAD_POLL_DELAY_1MS);
+} // YieldNetworkWorker
 
-    Wi-Fi work stays on the existing foreground loop. Rendering claims the CPU
-    frame so callbacks cannot replace pixels while persistence reads them. Each
+/**
+    Handles a network lifecycle request at a safe foreground boundary.
+
+    Listener changes pause foreground transport users until Core 1 finishes the change.
+    Radio restart also cancels unfinished storage work and releases the SD session.
+    The session is reopened immediately after the radio initialization attempt, before
+    Wi-Fi association can block, so saved playback can advance during the join wait.
+
+    @param opaque Foreground-owned storage and media context.
+    @param command Requested listener or radio lifecycle boundary.
+*/
+static void
+HandleNetworkStorageRequest (
+    void* opaque,
+    NetworkServices::Command command
+    )
+{
+    NetworkStorageContext* context = nullptr;
+    context = static_cast<NetworkStorageContext*>(opaque);
+
+    switch (command) {
+    case NetworkServices::Command::PauseServices:
+        *context->servicesPaused = true;
+        break;
+    case NetworkServices::Command::ResumeServices:
+        *context->servicesPaused = false;
+        break;
+    case NetworkServices::Command::SuspendRadio:
+        // Listener shutdown has queued cancellation; finish it before releasing SD.
+        *context->servicesPaused = true;
+        context->video->UpdateStorage();
+        context->http->Update(false);
+        context->player->Stop();
+        context->memory->Shutdown();
+        break;
+    case NetworkServices::Command::RadioReady:
+    case NetworkServices::Command::RadioFailed:
+        // Mount and schedule restoration on Core 0 before the worker starts association.
+        if (context->memory->Initialize()) {
+            context->library->Initialize();
+            if (!context->library->WantsMedia()) {
+                context->player->RequestReload();
+            }
+        } else {
+            printf("[memory] saves unavailable: %s\n", context->memory->GetLastError());
+        }
+        *context->servicesPaused = false;
+        break;
+    case NetworkServices::Command::None:
+        break;
+    }
+} // HandleNetworkStorageRequest
+
+/**
+    Prepares display frames and advances foreground storage and media services.
+
+    Core 1 handles Wi-Fi and transport work. This loop acknowledges its lifecycle
+    requests before accessing storage. Rendering claims the CPU frame so callbacks
+    cannot replace pixels while persistence reads them. Each
     completed upload is saved once before drawing the Wi-Fi status overlay.
     The scanner continues showing its last submitted buffer during SD work.
 
     @param displayHelpers Logical-to-physical panel mapping and status overlay.
     @param upload Shared framebuffer and raw photo receiver.
-    @param wifiNetwork Existing local-network state controller.
+    @param network Cross-core network status and lifecycle command mailbox.
     @param memory SD image-storage boundary.
     @param library Saved-photo/video selection, slideshow and persistent settings.
     @param player Verified saved-media playback scheduler.
@@ -37,7 +112,7 @@ static void
 RenderLoop (
     DisplayHelpers& displayHelpers,
     FrameBufferController& upload,
-    WifiNetwork& wifiNetwork,
+    NetworkServices& network,
     MemoryManager& memory,
     MediaLibrary& library,
     MediaPlayer& player,
@@ -48,7 +123,10 @@ RenderLoop (
 {
     size_t frameIndex;
     bool animationMovingForward;
-    bool storageStarted;
+    bool servicesPaused;
+    NetworkServices::Status networkStatus;
+    NetworkServices::Handler handler;
+    NetworkStorageContext context;
     bool reloadVideo;
     bool reloadHttp;
     uint32_t lastFrameCount;
@@ -61,14 +139,14 @@ RenderLoop (
     const unsigned char* uploadedFrame = nullptr;
     uint32_t attemptedPhotoRevision;
     uint32_t savedVideoId;
-    bool httpStarted;
-    absolute_time_t nextHttpBindTime;
 
     frameIndex = FIRST_FRAME_INDEX;
     animationMovingForward = true;
-    storageStarted = false;
-    httpStarted = false;
-    nextHttpBindTime = get_absolute_time();
+    servicesPaused = false;
+    reloadVideo = false;
+    reloadHttp = false;
+    context = {&memory, &library, &player, &video, &http, &servicesPaused};
+    handler = {&context, HandleNetworkStorageRequest};
     attemptedPhotoRevision = 0;
     lastFrameCount = 0;
     lastFpsTime = get_absolute_time();
@@ -77,41 +155,19 @@ RenderLoop (
 
     for (;;) {
 
-        // Close HTTP while the old radio context is still alive, before a reconnect can deinitialize it.
-        if (httpStarted && !wifiNetwork.IsNetworkReady()) {
-            WebServer::Stop();
-            http.Update(false);
-            httpStarted = false;
-            nextHttpBindTime = get_absolute_time();
-        }
-        wifiNetwork.UpdateNetworkStateMachine();
-
-        // Bind independently after the existing TCP services become ready; retry a failed bind later.
-        if (wifiNetwork.IsNetworkReady()) {
-            if (!httpStarted && absolute_time_diff_us(get_absolute_time(), nextHttpBindTime) <= 0) {
-                httpStarted = WebServer::Start(upload);
-                nextHttpBindTime = make_timeout_time_ms(TCP_BIND_RETRY_INTERVAL_MS);
-            }
-            if (httpStarted) {
-                WebServer::Update();
-            }
-        }
-        if (!storageStarted && wifiNetwork.IsRadioInitialized()) {
-            storageStarted = true;
-            if (memory.Initialize()) {
-                library.Initialize();
-                if (!library.WantsMedia()) {
-                    player.RequestReload();
-                }
-            } else {
-                printf("[memory] saves unavailable: %s\n", memory.GetLastError());
-            }
+        // Acknowledge lifecycle changes before touching storage or transport mailboxes.
+        network.ProcessRequests(handler);
+        networkStatus = network.ReadStatus();
+        if (servicesPaused) {
+            sleep_ms(UPLOAD_POLL_DELAY_1MS);
+            continue;
         }
 
-        // Finish deferred upload or verification work and schedule any saved-media reload.
-        video.Update();
-        reloadVideo = video.TakeReloadRequest();
-        reloadHttp = http.TakeReloadRequest();
+        // Storage runs only here; transport callbacks and reply pumping run on Core 1.
+        video.UpdateStorage();
+        WebServer::UpdateStorage();
+        reloadVideo = video.TakeReloadRequest() || reloadVideo;
+        reloadHttp = http.TakeReloadRequest() || reloadHttp;
 
         if (!upload.TryBeginRender()) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
@@ -145,6 +201,9 @@ RenderLoop (
             player.Update(to_ms_since_boot(get_absolute_time()));
         }
 
+        reloadVideo = false;
+        reloadHttp = false;
+
         // Draw the fallback only when no verified or newly uploaded frame is available.
         uploadedFrame = upload.GetUploadedFrameData();
         if (!uploadedFrame) {
@@ -152,7 +211,7 @@ RenderLoop (
                 graphics, displayHelpers.GetImageDataForFrame(frameIndex));
             frameIndex = displayHelpers.GetNextAnimationFrameIndex(frameIndex, animationMovingForward);
         }
-        displayHelpers.DrawWifiStatusIcon(graphics, wifiNetwork.IsNetworkReady());
+        displayHelpers.DrawWifiStatusIcon(graphics, networkStatus.ready);
 
         // Measure completed panel scans independently of saved-video frame selection.
         currentFrameCount = hub75_frame_count;
@@ -165,7 +224,7 @@ RenderLoop (
         }
         if (uptimeMs - lastStatusMs >= STATUS_PRINT_INTERVAL_10S) {
             printf("[status] t=%us fps=%u net=%s ip=%s\n", uptimeMs / MILLISECONDS_PER_SECOND_U,
-                   framesPerSecond, wifiNetwork.GetNetStateName(), wifiNetwork.GetWifiIpText());
+                   framesPerSecond, networkStatus.state, networkStatus.ip);
             lastStatusMs = uptimeMs;
         }
 
@@ -184,7 +243,8 @@ RenderLoop (
     The flashed frame is queued first so display scanning has visible content
     during SD probing. A verified saved photo or first video frame replaces it; missing or damaged
     storage leaves the flashed image available. Startup temporarily releases SD
-    resources for the initial radio claim and re-enables them from RenderLoop.
+    resources for the initial radio claim; the foreground lifecycle handler reopens
+    storage before the network core begins association.
 
     @return value - The controller normally remains in RenderLoop indefinitely.
 */
@@ -198,7 +258,8 @@ main (
     FrameBufferController upload(&displayHelpers, frameBuffer, true);
     MemoryManager memory;
     static TcpVideoUpload video(memory, upload, true);
-    WifiNetwork wifiNetwork(&upload, &video);
+    WifiConnection wifiNetwork(&upload, &video);
+    NetworkServices network(wifiNetwork, YieldNetworkWorker, &video);
     MediaPlayer player(memory, upload);
     static MediaLibrary library(memory, upload, player);
     static HttpMediaUpload http(memory, upload);
@@ -215,7 +276,6 @@ main (
     sleep_ms(STARTUP_DELAY_5S);
 #endif
     printf("\n[boot] hub75 starting (%s)\n", WIFI_STATE_MACHINE_REV);
-    wifiNetwork.InitializeNetworkTiming();
     create_hub75_driver(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, PANEL_TYPE, INVERTED_STB);
     start_hub75_driver();
     setBasisBrightness(DISPLAY_BASE_BRIGHTNESS);
@@ -265,5 +325,6 @@ main (
         }
         upload.EndRender();
     }
-    RenderLoop(displayHelpers, upload, wifiNetwork, memory, library, player, video, http, graphics);
+    StartNetworkCore(network);
+    RenderLoop(displayHelpers, upload, network, memory, library, player, video, http, graphics);
 } // main

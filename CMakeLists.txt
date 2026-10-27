@@ -110,7 +110,9 @@ target_compile_definitions(hub75 PRIVATE
     # SM_CLOCKDIV_FACTOR=1.0f     # to prevent flicker or ghosting it might be worth a try to reduce state machine speed
     # BIT_DEPTH=10                # numner (count) of bit-planes used for BCM (Binary Code Modulation) - valid values for BIT_DEPTH are 8 or 10
     CPU_FRAME_RGB565=1
-    HUB75_MULTICORE=false      # force single-core path (core0) to avoid multicore startup races
+    HUB75_MULTICORE=false      # Keep HUB75 on Core 0; application networking owns Core 1.
+    PICO_CORE1_STACK_SIZE=0x1000
+    PICO_STACK_SIZE=0x1000
     CYW43_PIO_CLOCK_DIV_INT=4  # compensate cyw43 wireless SPI PIO clock divider for the 250MHz overclocked sys clock (default div=2 assumes ~125MHz sys clock; div=4 keeps the wireless SPI PIO near the same safe ~62.5MHz)
 )
 
@@ -154,7 +156,9 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaLibraryClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/JsonWriterClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/TcpVideoUploadClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/network/wifiNetwork.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/network/WifiConnectionClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/network/NetworkServicesClass.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/network/networkCorePico.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/storageCrc32.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp
