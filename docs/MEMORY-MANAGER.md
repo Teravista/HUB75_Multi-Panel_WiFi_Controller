@@ -195,3 +195,11 @@ to infer elapsed read time. Storage work runs in foreground code.
 `HUB75_VERBOSE_LOGS` defaults to OFF. It controls optional SD-library diagnostics and
 the five-second startup pause used to attach a serial console. Enable it through CMake
 when detailed card-mode negotiation logs are needed.
+
+## Runtime status
+
+`GetRamUsage()` returns controller SRAM accounting independently of SD availability.
+Its record separates total bytes, static data, allocated heap and reserved stacks;
+the availability flag identifies a valid measurement. `GetActivityName()` returns
+`idle`, `receiving` or `verifying` without reading the card. Summary and serial status
+use these snapshots alongside the SD lifecycle and retry fields.

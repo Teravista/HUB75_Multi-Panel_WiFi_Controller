@@ -18,15 +18,16 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 .secondary{background:#374151;color:#f9fafb}progress{width:100%;height:12px}
 #video-source{display:block;width:128px;height:256px;object-fit:cover;margin:24px auto;background:#000}
 .preview-editor{position:relative;width:256px;max-width:100%;aspect-ratio:1/2;margin:24px auto;outline:1px solid #64748b}.preview-editor canvas{width:100%;height:100%;margin:0;border:0}.content-outline{position:absolute;border:1px solid #ef4444;box-sizing:border-box;pointer-events:none}.preview-editor[data-draggable=true] canvas{cursor:grab;touch-action:none}.drag-hint{font-size:.8rem;text-align:center}.tabs{display:flex;gap:8px;margin:0 0 24px}.tabs button{flex:1;width:auto;margin:0;padding:12px 6px;background:#1f2937;color:#cbd5e1;border:1px solid #475569}.tabs button[aria-selected=true]{background:#38bdf8;color:#082f49}.summary-box,.photo-card{padding:16px;border:1px solid #475569;border-radius:12px;background:#1f2937}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.photo-card{padding:12px;min-width:0}.photo-card h3{font-size:1rem;overflow-wrap:anywhere}.photo-card p{font-size:.8rem}.photo-card canvas{width:64px;height:128px;margin:8px auto;image-rendering:pixelated}.photo-card button{padding:10px;margin-top:8px}.photo-card.showing{border-color:#38bdf8}.library-actions{display:flex;align-items:center;gap:10px}.library-actions button{padding:10px}.summary-box p{overflow-wrap:anywhere}
+.mode-line{display:flex;align-items:center;flex-wrap:wrap;gap:12px}#active-fps{font-size:.8rem;color:#cbd5e1;font-variant-numeric:tabular-nums}#summary-status{min-height:1.5em}
 </style>
 </head>
 <body>
 <h1>HUB75</h1>
 <nav class="tabs" role="tablist" aria-label="Media sections"><button id="tab-summary" type="button" role="tab" aria-controls="panel-summary" aria-selected="true">Summary</button><button id="tab-photos" type="button" role="tab" aria-controls="panel-photos" aria-selected="false" tabindex="-1">Photos</button><button id="tab-videos" type="button" role="tab" aria-controls="panel-videos" aria-selected="false" tabindex="-1">Videos</button></nav>
 <div id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
-<div class="summary-box"><p>Active mode on panel</p><strong id="active-mode">Checking…</strong><p id="active-mode-detail"></p></div>
-<section><h2>Display settings</h2><label for="playback-max-fps">Maximum video FPS</label><input id="playback-max-fps" type="number" min="1" max="60" step="1" placeholder="Use video FPS"><label for="panel-brightness">Brightness %</label><input id="panel-brightness" type="number" min="0" max="100" step="1" value="80"><button id="display-settings-save" type="button">Apply settings</button></section>
-<section><h2>Storage</h2><p id="storage-usage">Checking…</p><p id="storage-capacity"></p></section><button id="summary-refresh" class="secondary" type="button">Refresh summary</button><p id="summary-status" role="status" aria-live="polite"></p></div>
+<div class="summary-box"><p>Active mode on panel</p><div class="mode-line"><strong id="active-mode">Checking…</strong><span id="active-fps" hidden></span></div><p id="active-mode-detail"></p></div>
+<section><h2>Display settings</h2><label for="playback-max-fps">Maximum video FPS</label><input id="playback-max-fps" type="number" min="1" max="60" step="1" placeholder="Use video FPS"><label for="panel-brightness">Brightness %</label><input id="panel-brightness" type="number" min="0" max="100" step="1" value="80"><button id="display-settings-save" type="button" disabled>Apply settings</button></section>
+<section><h2>Memory usage</h2><p>Pico RAM: <strong id="ram-usage">Checking…</strong></p><progress id="ram-meter" max="100" value="0" hidden aria-label="RAM usage"></progress><p id="ram-detail"></p><p id="sd-state" role="status" aria-live="polite">Checking SD card…</p><p id="storage-usage">Checking…</p><p id="storage-capacity"></p></section><button id="summary-refresh" class="secondary" type="button">Refresh summary</button><p id="summary-status" role="status" aria-live="polite"></p></div>
 <div id="panel-photos" role="tabpanel" aria-labelledby="tab-photos" hidden>
 <h2>Upload a photo</h2>
 <label for="photo">Photo</label>
@@ -1692,6 +1693,14 @@ const libraryPages = {
     video: {history: [0], nextAfter: 0, hasMore: false, ticket: 0, busy: false}
 };
 let galleryBusy = false;
+let activeMediaTab = 'summary';
+let summaryBusy = false;
+let summaryLoaded = false;
+let lastStorageRefreshMs = 0;
+let settingsLoaded = false;
+let settingsDirty = false;
+let settingsSaving = false;
+let settingsEditRevision = 0;
 
 /**
     Sends an empty-body library or control command through the shared request queue.
@@ -1729,13 +1738,22 @@ function formatStorageBytes(bytes) {
 }
 
 /**
-    Renders a cached display-mode response without clearing the current summary first.
+    Renders the last confirmed playback state while preserving unsaved settings edits.
 
-    @param status Validated display status returned by the controller.
+    Updates mode, frame-rate and memory labels in place. A settings reply initializes the
+    controls, but later background replies cannot replace dirty or focused input values.
+
+    @param status Latest validated controller status response.
 */
 function renderPlaybackStatus(status) {
-    const labels = {builtin: 'Built-in', photo: 'Photo', slideshow: 'Slideshow', video: 'Video'};
-    document.getElementById('active-mode').textContent = labels[status.mode] || 'Unknown';
+    const labels = {builtin: 'Built-in', photo: 'Single photo', slideshow: 'Slideshow', video: 'Video'};
+    if (!Object.prototype.hasOwnProperty.call(labels, status.mode)) {
+        throw new Error('Invalid playback status.');
+    }
+    const mode = document.getElementById('active-mode');
+    if (mode.textContent !== labels[status.mode]) {
+        mode.textContent = labels[status.mode];
+    }
     let detail = status.displayedName || '';
     if (status.mode === 'video') {
         if (status.pingPong) {
@@ -1744,39 +1762,62 @@ function renderPlaybackStatus(status) {
             detail += ' · Loop';
         }
     }
-    document.getElementById('active-mode-detail').textContent = detail;
-    if (status.displaySettings) {
-        const fps = document.getElementById('playback-max-fps');
-        fps.value = '';
-        if (status.displaySettings.maxFps) {
-            fps.value = status.displaySettings.maxFps;
-        }
-        document.getElementById('panel-brightness').value = status.displaySettings.brightness;
+    const detailElement = document.getElementById('active-mode-detail');
+    if (detailElement.textContent !== detail) {
+        detailElement.textContent = detail;
     }
+    renderFrameRates(status);
+    renderMemoryStatus(status);
+    const settings = status.displaySettings;
+    if (settings && Number.isInteger(settings.maxFps) && settings.maxFps >= 0 && settings.maxFps <= 60 &&
+        Number.isInteger(settings.brightness) && settings.brightness >= 0 && settings.brightness <= 100) {
+        settingsLoaded = true;
+        const fps = document.getElementById('playback-max-fps');
+        const brightness = document.getElementById('panel-brightness');
+        if (!settingsDirty && document.activeElement !== fps && document.activeElement !== brightness) {
+            fps.value = '';
+            if (settings.maxFps) {
+                fps.value = String(settings.maxFps);
+            }
+            brightness.value = String(settings.brightness);
+        }
+    }
+    updateSettingsButton();
 }
 
 /**
-    Refreshes active display mode and managed storage totals on demand.
+    Refreshes Summary values in place without disabling inputs or polling library pages.
 
-    Requests are serialized with other page actions. Failed reads leave previously
-    displayed values visible and report the failure separately from those values.
+    Reads cached playback/FPS/RAM state on every refresh. Managed SD totals are measured
+    on an explicit refresh or at most once per 30 seconds, outside an active upload or
+    library action. Failed requests retain confirmed values and show a separate warning.
 
-    @return Promise<void> - Completes after updating the summary or showing an error.
+    @param includeStorage True requests a fresh managed-storage measurement when idle.
+
+    @return Promise<void> - Completes after refreshing available fields or showing a warning.
 */
-async function refreshSummary() {
+async function refreshSummary(includeStorage = true) {
+    if (summaryBusy) {
+        return;
+    }
+    summaryBusy = true;
     const message = document.getElementById('summary-status');
     try {
         renderPlaybackStatus(await libraryRequest(15));
-        const result = await libraryRequest(23);
-        if (result.storage && result.storage.available) {
-            document.getElementById('storage-usage').textContent = 'Managed files: ' + formatStorageBytes(result.storage.fileBytes);
-            document.getElementById('storage-capacity').textContent = 'Allocated: ' + formatStorageBytes(result.storage.allocatedBytes) + ' / ' + formatStorageBytes(result.storage.totalBytes);
-        } else {
-            document.getElementById('storage-usage').textContent = 'Storage unavailable';
+        summaryLoaded = true;
+        if ((includeStorage || Date.now() - lastStorageRefreshMs >= 30000) && !uploading && !videoBusy &&
+            !galleryBusy && !libraryPages.photo.busy && !libraryPages.video.busy) {
+            renderMemoryStatus(await libraryRequest(23));
+            lastStorageRefreshMs = Date.now();
         }
         message.textContent = '';
     } catch (error) {
+        if (!summaryLoaded) {
+            document.getElementById('active-mode').textContent = 'Status unavailable';
+        }
         message.textContent = 'Could not refresh summary: ' + error.message;
+    } finally {
+        summaryBusy = false;
     }
 }
 
@@ -1786,6 +1827,7 @@ async function refreshSummary() {
     @param name Summary, photos or videos tab identifier.
 */
 function selectMediaTab(name) {
+    activeMediaTab = name;
     for (const candidate of ['summary', 'photos', 'videos']) {
         const active = candidate === name;
         const button = document.getElementById('tab-' + candidate);
@@ -2040,14 +2082,20 @@ async function applySlideshow() {
 }
 
 /**
-    Saves the panel brightness and optional playback FPS cap.
+    Saves brightness and the optional FPS cap without overwriting edits made during the request.
 
-    @return Promise<void> - Completes after applying saved controls or showing an error.
+    Captures the input revision before sending the settings command. Only a reply for that
+    same revision clears the dirty flag; newer typing remains visible for the next save.
+
+    @return Promise<void> - Completes after saving confirmed values or displaying the failure.
 */
 async function applyDisplaySettings() {
-    if (uploading || videoBusy) {
+    if (!settingsLoaded || settingsSaving || uploading || videoBusy || galleryBusy) {
         return;
     }
+    settingsSaving = true;
+    updateSettingsButton();
+    const sentRevision = settingsEditRevision;
     try {
         const fpsText = document.getElementById('playback-max-fps').value.trim();
         let fps = 0;
@@ -2058,10 +2106,21 @@ async function applyDisplaySettings() {
         if (!Number.isInteger(fps) || fps < 0 || fps > 60 || !Number.isInteger(brightness) || brightness < 0 || brightness > 100) {
             throw new Error('Choose FPS 1–60 or leave blank, and brightness 0–100.');
         }
-        renderPlaybackStatus(await libraryRequest(21, fps, brightness));
-        document.getElementById('summary-status').textContent = 'Settings saved.';
+        const reply = await libraryRequest(21, fps, brightness);
+        if (settingsEditRevision === sentRevision) {
+            settingsDirty = false;
+        }
+        renderPlaybackStatus(reply);
+        if (settingsDirty) {
+            document.getElementById('summary-status').textContent = 'Settings saved; newer edits are unsaved.';
+        } else {
+            document.getElementById('summary-status').textContent = 'Settings saved.';
+        }
     } catch (error) {
         document.getElementById('summary-status').textContent = error.message;
+    } finally {
+        settingsSaving = false;
+        updateSettingsButton();
     }
 }
 
@@ -2091,11 +2150,15 @@ for (const kind of ['photo', 'video']) {
     document.getElementById(kind + '-previous').addEventListener('click', () => changeLibraryPage(kind, false));
     document.getElementById(kind + '-next').addEventListener('click', () => changeLibraryPage(kind, true));
 }
-document.getElementById('summary-refresh').addEventListener('click', refreshSummary);
+document.getElementById('summary-refresh').addEventListener('click', () => refreshSummary(true));
 document.getElementById('display-settings-save').addEventListener('click', applyDisplaySettings);
 document.getElementById('slideshow-save').addEventListener('click', applySlideshow);
 updateVideoControls();
 selectMediaTab('summary');
+setTimeout(pollSummary, 2000);
+for (const id of ['playback-max-fps', 'panel-brightness']) {
+    document.getElementById(id).addEventListener('input', markSettingsEdited);
+}
 
 
 
@@ -2412,6 +2475,134 @@ async function resumeVideoUpload() {
         return;
     }
     await runPreparedVideo(videoJob, new AbortController(), true);
+}
+
+
+/**
+    Updates RAM accounting, SD availability and optional measured storage totals.
+
+    RAM and lifecycle fields come from the cached status response. Filesystem totals are
+    refreshed separately and remain visible when a status reply omits them. No displayed
+    values are cleared merely because another request is pending.
+
+    @param status Latest status or managed-storage response.
+*/
+function renderMemoryStatus(status) {
+    const ram = status.ram;
+    if (ram?.available && Number.isSafeInteger(ram.totalBytes) && ram.totalBytes > 0 &&
+        Number.isSafeInteger(ram.usedBytes) && ram.usedBytes >= 0 && ram.usedBytes <= ram.totalBytes &&
+        ram.freeBytes === ram.totalBytes - ram.usedBytes) {
+        const percent = ram.usedBytes / ram.totalBytes * 100;
+        document.getElementById('ram-usage').textContent = formatStorageBytes(ram.usedBytes) + ' / ' +
+            formatStorageBytes(ram.totalBytes) + ' (' + percent.toFixed(1) + '%)';
+        const meter = document.getElementById('ram-meter');
+        meter.hidden = false;
+        meter.value = percent;
+        document.getElementById('ram-detail').textContent = formatStorageBytes(ram.freeBytes) +
+            ' free · Static ' + formatStorageBytes(ram.staticBytes) + ' · Heap ' +
+            formatStorageBytes(ram.heapBytes) + ' · Reserved stacks ' + formatStorageBytes(ram.stackReservedBytes);
+    } else {
+        document.getElementById('ram-usage').textContent = 'Unavailable';
+        document.getElementById('ram-meter').hidden = true;
+        document.getElementById('ram-detail').textContent = 'RAM measurement is unavailable.';
+    }
+    if (typeof status.storageState === 'string') {
+        const labels = {ready: 'SD ready', mounting: 'Connecting to SD…', recovering: 'SD recovering', unavailable: 'SD unavailable'};
+        let text = labels[status.storageState] || 'SD unavailable';
+        if (status.storageState === 'unavailable' && Number.isInteger(status.storageRetryMs) && status.storageRetryMs > 0) {
+            text += ' · Retry in ' + Math.ceil(status.storageRetryMs / 1000) + ' s';
+        }
+        const state = document.getElementById('sd-state');
+        state.textContent = text;
+        state.title = status.storageError || '';
+    }
+    if (status.storage) {
+        const storage = status.storage;
+        if (storage.available && [storage.totalBytes, storage.fileBytes, storage.allocatedBytes].every(
+            value => Number.isSafeInteger(value) && value >= 0) &&
+            storage.fileBytes <= storage.allocatedBytes && storage.allocatedBytes <= storage.totalBytes) {
+            document.getElementById('storage-usage').textContent = 'Managed files: ' + formatStorageBytes(storage.fileBytes);
+            document.getElementById('storage-capacity').textContent = 'Allocated: ' +
+                formatStorageBytes(storage.allocatedBytes) + ' / ' + formatStorageBytes(storage.totalBytes);
+        } else {
+            document.getElementById('storage-usage').textContent = 'Storage unavailable';
+            document.getElementById('storage-capacity').textContent = '';
+        }
+    } else if (status.storageReady === false) {
+        document.getElementById('storage-usage').textContent = 'Storage unavailable';
+            document.getElementById('storage-capacity').textContent = '';
+    }
+}
+
+/**
+    Enables saving only after valid settings are loaded and no foreground action owns them.
+*/
+function updateSettingsButton() {
+    document.getElementById('display-settings-save').disabled = !settingsLoaded || settingsSaving ||
+        uploading || videoBusy || galleryBusy;
+}
+
+/**
+    Marks the editable display settings as newer than the last confirmed reply.
+*/
+function markSettingsEdited() {
+    settingsDirty = true;
+    settingsEditRevision++;
+    updateSettingsButton();
+}
+
+/**
+    Polls only the visible Summary tab after the previous refresh has completed.
+
+    @return Promise<void> - Schedules the next poll after updating or skipping a hidden tab.
+*/
+async function pollSummary() {
+    if (activeMediaTab === 'summary' && !document.hidden) {
+        await refreshSummary(false);
+    }
+    setTimeout(pollSummary, 2000);
+}
+
+/**
+    Updates the rolling display and video FPS indicator for the active mode.
+
+    @param snapshot Latest controller status or library JSON response.
+*/
+function renderFrameRates(snapshot) {
+  const activeFps = document.getElementById('active-fps');
+  const fps = snapshot.fps;
+  if (!fps || typeof fps.available !== 'boolean') {
+    activeFps.hidden = true;
+    activeFps.textContent = '';
+    return;
+  }
+  if (!fps.available) {
+    activeFps.hidden = false;
+    if (activeFps.textContent !== 'Measuring FPS…') {
+      activeFps.textContent = 'Measuring FPS…';
+    }
+    return;
+  }
+  if (!Number.isInteger(fps.windowMillis) || fps.windowMillis <= 0 || fps.windowMillis > 30000 ||
+      ![fps.displayTenths, fps.videoTenths].every(n => Number.isInteger(n) && n >= 0 && n <= 0xffffffff)) {
+    activeFps.hidden = true;
+    activeFps.textContent = '';
+    return;
+  }
+  const seconds = Math.max(1, Math.round(fps.windowMillis / 1000));
+  activeFps.hidden = false;
+  let videoRateText;
+  if (snapshot.mode === 'video') {
+    videoRateText = `Video ${(fps.videoTenths / 10).toFixed(1)} / `;
+  } else {
+    videoRateText = '';
+  }
+  const text = `${seconds} s avg · ${videoRateText}Display ${(fps.displayTenths / 10).toFixed(1)} FPS`;
+  if (activeFps.textContent !== text) {
+    activeFps.textContent = text;
+  }
+  activeFps.title =
+      'Actual frame rates averaged over the latest 30 seconds; a shorter window is used just after startup.';
 }
 </script>
 </body>

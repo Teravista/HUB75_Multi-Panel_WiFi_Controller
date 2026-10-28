@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 // Bounded one-client HTTP transport; both upload paths share FrameBufferController.
 #include "http/include/webServer.hpp"
 #include "http/include/HttpMediaUploadClass.hpp"
@@ -849,7 +850,7 @@ WebServer::Start (
     tcp_arg(listener, nullptr);
     tcp_accept(listener, AcceptHttpClient);
     cyw43_arch_lwip_end();
-    std::printf("[web] HTTP listening on port 80\n");
+    HUB75_DEBUG("[web] HTTP listening on port 80\n");
     return true;
 } // Start
 

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include "config/include/storageConfig.hpp"
 #include "config/defines.h"
+#include "core/include/serialLog.hpp"
 #include "media/include/mediaMetadata.hpp"
 #include "media/include/mediaTransfer.hpp"
 
@@ -24,10 +25,39 @@
 */
 class MemoryManager {
 public:
+    /**
+        Carries RAM accounting used by controller status and web memory reports.
+
+        Capacity, static allocations, heap use and reserved stacks are kept separately so
+        consumers can derive consistent used/free totals from one snapshot. The availability flag
+        distinguishes a valid measurement from unsupported runtime accounting; the record does not
+        inspect or own the allocations it describes.
+    */
+    struct RamUsage {
+        bool available = false;
+        uint64_t totalBytes = 0;
+        uint64_t staticBytes = 0;
+        uint64_t heapBytes = 0;
+        uint64_t stackReservedBytes = 0;
+
+        // Returns total RAM used by static data, heap, and reserved stacks.
+        uint64_t UsedBytes(void) const;
+
+        // Returns RAM remaining after accounted allocations and stack reservations.
+        uint64_t FreeBytes(void) const;
+
+    };
+
     enum class State { Unavailable, Mounting, Ready, Recovering };
     enum class Event { None, Unavailable, Ready };
     static constexpr uint32_t RetryIntervalMs = 15000;
     static constexpr uint32_t HealthIntervalMs = 15000;
+
+    // Returns current controller RAM capacity and usage figures.
+    RamUsage GetRamUsage(void) const;
+
+    // Returns the readable name of the current storage activity.
+    const char* GetActivityName(void) const;
 
     // Advances SD health checks, failure recovery, and periodic mount retries.
     Event Update(uint32_t nowMs);
@@ -261,6 +291,8 @@ public:
     bool ReadLibraryPreview(uint32_t id, bool video, uint8_t* pixels, size_t capacity);
 
 private:
+    SerialLog::RepeatGate errorLog_;
+
     /**
         Samples a saved image into a small RGB565 preview without touching the CPU framebuffer.
 
@@ -518,7 +550,7 @@ private:
     bool ready_ = false;
     const char* error_ = "storage not initialized";
 
-    // Records a storage error and schedules recovery after failed SD I/O.
+    // Records a storage error and requests recovery for failed SD I/O.
     bool ReportStorageFailure(const char* message, int filesystemResult = 0);
 
 };

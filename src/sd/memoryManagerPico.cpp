@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 #include "sd/include/memoryManagerPlatform.hpp"
 #include "config/include/storageConfig.hpp"
 #include "hw_config.h"
@@ -10,6 +11,56 @@
 #define SD_SPI_TRANSFER_TIMEOUT_MS 100
 
 #define SD_PERIPHERAL_CLOCK_THRESHOLD_HZ 24'000'000
+
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+#include <malloc.h>
+#include "hardware/regs/addressmap.h"
+extern "C" {
+extern char __end__;
+extern char __HeapLimit;
+extern char __StackTop;
+}
+#endif
+
+/**
+    Measures static, heap, and stack reservations for RAM status reporting.
+
+    Builds a reference RAM snapshot from linker section boundaries, heap allocation figures and
+    reserved core-stack space. Static memory and configured stacks are accounted separately so the
+    web Summary can estimate used/free capacity. This is allocation accounting, not a measurement
+    of each stack's live high-water mark.
+
+    @return usage - RAM capacity and allocation counters in bytes; available is false when
+                    runtime figures cannot be obtained.
+*/
+MemoryManager::RamUsage
+GetMemoryRuntimeRamUsage (
+    void
+    )
+{
+#if (defined(PICO_ON_DEVICE) && PICO_ON_DEVICE)
+    struct mallinfo heap;
+    MemoryManager::RamUsage usage;
+#endif
+
+    // Measure live heap allocations separately from static data and reserved core stacks.
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    // Newlib snapshots heap accounting under its allocator lock. No allocation
+    // or interrupt pause is needed to read this reference figure.
+    heap = mallinfo();
+    usage = {};
+    usage.available = true;
+    usage.totalBytes = uintptr_t(&__StackTop) - SRAM_BASE;
+    usage.staticBytes = uintptr_t(&__end__) - SRAM_BASE;
+    usage.heapBytes = heap.uordblks;
+    // Scratch RAM is reserved for the two core stacks in the current linker layout.
+    usage.stackReservedBytes = uintptr_t(&__StackTop) - uintptr_t(&__HeapLimit);
+    usage.available = usage.UsedBytes() <= usage.totalBytes;
+    return usage;
+#else
+    return {}; // Desktop storage-platform tests have no Pico RAM to measure.
+#endif
+} // GetMemoryRuntimeRamUsage
 
 namespace {
 spi_t storageSpi{};

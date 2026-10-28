@@ -241,18 +241,17 @@ MemoryManager::CompareSavedImageBytes (
 } // CompareSavedImageBytes
 
 /**
-    Records a storage error and schedules recovery after failed SD I/O.
+    Records a storage error and requests recovery for failed SD I/O.
 
-    Disk, readiness, timeout and invalid-session errors invalidate the mounted session.
-    The next foreground update discards its handles and schedules a fresh mount. Invalid
-    arguments or corrupt content remain operation failures without declaring the card
-    unavailable. Retains a separate availability error so ordinary busy requests cannot
-    hide the cause while the card is unavailable.
+    Preserve the diagnostic for API callers, and invalidate the session only for serious
+    filesystem I/O failures. Expected busy/unavailable conditions do not print repeatedly;
+    changed errors are reported immediately and identical errors have a 15-second quiet period.
 
-    @param message Explanation of the failed storage operation.
-    @param filesystemResult FatFs status; zero indicates a validation or input failure.
+    @param message Human-readable result or error message.
+    @param filesystemResult FatFs result code; zero means no filesystem error.
 
-    @return false - The operation failed; diagnostics and availability state are updated.
+    @return false - Always reports failure after storing the diagnostic and invalidating storage
+                    when required.
 */
 bool
 MemoryManager::ReportStorageFailure (
@@ -268,7 +267,10 @@ MemoryManager::ReportStorageFailure (
             state_ = State::Recovering;
         }
     }
-    std::printf("[memory] %s (FatFs=%d)\n", message, filesystemResult);
+    if (!SerialLog::RoutineStorageError(message, filesystemResult) &&
+        errorLog_.Allow(message, filesystemResult, to_ms_since_boot(get_absolute_time()))) {
+        std::printf("[sd] error: %s (code=%d)\n", message, filesystemResult);
+    }
     return false;
 } // ReportStorageFailure
 
@@ -623,7 +625,7 @@ MemoryManager::RunReadWriteCheck (
     if (!available) {
         return ReportStorageFailure("no unused self-test filename");
     }
-    std::printf("[memory] self-test: save/read %u-byte image\n", unsigned(bytes));
+    HUB75_DEBUG("[memory] self-test: save/read %u-byte image\n", unsigned(bytes));
     if (!SaveImage(name, pixels, bytes)) {
         return false;
     }
@@ -647,7 +649,7 @@ MemoryManager::RunReadWriteCheck (
     }
 
     error_ = "none";
-    std::printf("[memory] self-test PASS: saved and read %u bytes; test file removed\n", unsigned(bytes));
+    HUB75_DEBUG("[memory] self-test PASS: saved and read %u bytes; test file removed\n", unsigned(bytes));
     return true;
 } // RunReadWriteCheck
 
@@ -1773,6 +1775,8 @@ MemoryManager::VerifyMediaSaveStep (
     char stagingPath[LIBRARY_PATH_BYTES];
     char finalPath[LIBRARY_PATH_BYTES];
     bool jpegFinished;
+    const char* savedType = nullptr;
+    uint32_t savedId;
 
     complete = false;
     StorageGuard guard;
@@ -1846,10 +1850,18 @@ MemoryManager::VerifyMediaSaveStep (
                 return ReportStorageFailure("library publication rename failed", result);
             }
         }
+        savedType = "video";
+        savedId = storage_.save.videoId;
+        if (storage_.save.metadata.type == MediaType::Photo) {
+            savedType = "photo";
+            savedId = storage_.save.libraryId;
+        }
+        std::printf("[save] %s id=%lu format=%s frames=%lu verified\n", savedType,
+                    static_cast<unsigned long>(savedId), storage_.save.metadata.FormatName(),
+                    static_cast<unsigned long>(storage_.save.metadata.frameCount));
         storage_.save = {};
         storage_.rejectedSlot = SAVED_PHOTO_NO_SLOT;
         complete = true;
-        std::puts("[memory] video saved and verified");
     }
     error_ = "none";
     return true;
@@ -4755,3 +4767,73 @@ MemoryManager::DiscardSession (
     ReleaseMemoryStorageHardware();
     ready_ = false;
 } // DiscardSession
+
+
+/**
+    Returns current controller RAM capacity and usage figures.
+
+    Read-only reference figures. RAM includes live heap allocations and stack reservations.
+
+    @return usage - RAM capacity and allocation counters in bytes; available is false when
+                    runtime figures cannot be obtained.
+*/
+MemoryManager::RamUsage
+MemoryManager::GetRamUsage (
+    void
+    ) const
+{
+    return GetMemoryRuntimeRamUsage();
+} // GetRamUsage
+
+
+/**
+    Returns total RAM used by static data, heap, and reserved stacks.
+
+    @return value - RAM occupied by static data, heap and reserved stacks, in bytes.
+*/
+uint64_t
+MemoryManager::RamUsage::UsedBytes (
+    void
+    ) const
+{
+    return staticBytes + heapBytes + stackReservedBytes;
+} // UsedBytes
+
+
+/**
+    Returns RAM remaining after accounted allocations and stack reservations.
+
+    @return value - RAM remaining after the accounted allocations and stack reservations, in
+                    bytes.
+*/
+uint64_t
+MemoryManager::RamUsage::FreeBytes (
+    void
+    ) const
+{
+    return totalBytes - UsedBytes();
+} // FreeBytes
+
+
+/**
+    Returns the readable name of the current storage activity.
+
+    @return "receiving" - A media upload is receiving payload bytes.
+    @return "verifying" - Saved payload bytes are being checked.
+    @return "idle" - No media save is in progress.
+*/
+const char*
+MemoryManager::GetActivityName (
+    void
+    ) const
+{
+    if (storage_.save.phase == SavePhase::Writing) {
+        return "receiving";
+    } else {
+        if (storage_.save.phase == SavePhase::Verifying) {
+            return "verifying";
+        } else {
+            return "idle";
+        }
+    }
+} // GetActivityName

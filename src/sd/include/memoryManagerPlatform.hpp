@@ -1,4 +1,9 @@
 #pragma once
+#include "sd/include/MemoryManagerClass.hpp"
+
+// Measures static, heap, and stack reservations for RAM status reporting.
+MemoryManager::RamUsage GetMemoryRuntimeRamUsage(void);
+
 
 // Initializes the SD SPI device and prepares its hardware resources.
 bool InitializeMemoryStorageHardware(void);

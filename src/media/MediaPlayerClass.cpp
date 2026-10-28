@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 #include "media/include/MediaPlayerClass.hpp"
 #include <cstdio>
 
@@ -106,10 +107,11 @@ MediaPlayer::Restore (
             epochMs_ = nowMs;
             stepOffset_ = 0;
             lastFrame_ = 0;
-            std::printf("[playback] restored frames=%lu fps=%lu/%lu\n",
+            std::printf("[playback] video_id=%lu frames=%lu fps=%lu/%lu format=%s\n",
+                        static_cast<unsigned long>(libraryVideoId_),
                         static_cast<unsigned long>(metadata_.frameCount),
                         static_cast<unsigned long>(metadata_.fpsNumerator),
-                        static_cast<unsigned long>(metadata_.fpsDenominator));
+                        static_cast<unsigned long>(metadata_.fpsDenominator), metadata_.FormatName());
             return true;
         }
     }
@@ -365,6 +367,7 @@ MediaPlayer::ShowLibraryPhoto (
         return false;
     }
     upload_.PublishStoredFrame(metadata_);
+    std::printf("[playback] photo id=%lu format=%s\n", static_cast<unsigned long>(id), metadata_.FormatName());
     return true;
 } // ShowLibraryPhoto
 
@@ -405,3 +408,46 @@ MediaPlayer::DecodedFormat (
     return PixelFormat::RGB888;
 #endif
 } // DecodedFormat
+
+
+/**
+    Returns the number of distinct video frames submitted to the panel.
+
+    The monotonic foreground counter includes submitted revisions across clip reloads. Held
+    frames and Wi-Fi overlay redraws do not increase it.
+
+    @return value - Cumulative video submission count, wrapping at the uint32_t limit.
+*/
+uint32_t
+MediaPlayer::GetVideoFramesPresented (
+    void
+    ) const
+{
+    return presentedVideoFrames_;
+} // GetVideoFramesPresented
+
+/**
+    Records a newly submitted verified video revision once.
+
+    Call under render ownership after submitting pixels to HUB75. Only an active stored-video
+    revision is counted; repeatedly submitting the same frame or drawing an overlay leaves the
+    video counter unchanged. The panel scanner maintains its own independent scan counter.
+*/
+void
+MediaPlayer::RecordFramePresented (
+    void
+    )
+{
+    FrameBufferController::Token revision;
+
+    if (!active_ || !upload_.GetUploadedFrameData() || !upload_.IsStoredFrame() ||
+        upload_.GetFrameMetadata().type != MediaType::Video) {
+        return;
+    }
+    revision = upload_.GetFrameRevision();
+    if (revision == lastPresentedRevision_) {
+        return;
+    }
+    lastPresentedRevision_ = revision;
+    ++presentedVideoFrames_;
+} // RecordFramePresented

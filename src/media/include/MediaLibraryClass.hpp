@@ -1,4 +1,5 @@
 #pragma once
+#include "display/include/FrameRateTrackerClass.hpp"
 #include "media/include/JsonWriterClass.hpp"
 #include "sd/include/MemoryManagerClass.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
@@ -102,13 +103,24 @@ public:
     // Returns a saved media preview as a JSON pixel response.
     bool Thumbnail(uint32_t id, char* json, size_t capacity, bool video = false);
 
-    // Formats the current display selection and saved controls as JSON.
+    // Formats the active selection, settings, and frame rates as JSON.
     bool PlaybackStatus(char* json, size_t capacity) const;
 
-    // Formats managed SD storage capacity and consumption as JSON.
+    // Formats RAM and managed SD storage usage as JSON.
     bool MemoryStatus(char* json, size_t capacity);
 
+    // Records display and video counters for summary FPS reporting.
+    void SampleFrameRates(uint32_t nowMs, uint32_t displayFrames);
+
 private:
+    FrameRateTracker frameRates_;
+
+    // Adds RAM capacity and usage fields to a JSON response.
+    static void AppendRamUsageJson(JsonWriter& out, const MemoryManager::RamUsage& ram);
+
+    // Adds rolling display and video FPS fields to a JSON response.
+    static void AppendFrameRatesJson(JsonWriter& out, const FrameRateTracker::Average& fps);
+
     // Adds SD availability and retry information to a JSON response.
     static void AppendStorageStateJson(JsonWriter& out, const MemoryManager& memory);
 

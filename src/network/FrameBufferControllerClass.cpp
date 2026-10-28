@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include <cstring>
 #include "display/include/displayHelpers.hpp"
@@ -494,7 +495,7 @@ FrameBufferController::StartFrameUploadServer (
     tcp_arg(listener, this);
     tcp_accept(listener, OnTcpAccept);
     cyw43_arch_lwip_end();
-    std::printf("[upload] TCP listening on port %u\n", port);
+    HUB75_DEBUG("[upload] TCP listening on port %u\n", port);
     return true;
 } // StartFrameUploadServer
 

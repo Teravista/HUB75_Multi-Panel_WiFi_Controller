@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 #include <cstdint>
 #include "http/include/webServer.hpp"
 #include "http/include/HttpMediaUploadClass.hpp"
@@ -14,7 +15,9 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define WIFI_STATE_MACHINE_REV "independent-storage-recovery"
+#define SERIAL_STATUS_LINE_BYTES 256
+
+#define WIFI_STATE_MACHINE_REV "runtime-status"
 
 struct NetworkPauseContext {
     bool* servicesPaused;
@@ -100,12 +103,13 @@ RenderLoop (
     bool reloadVideo;
     bool reloadHttp;
     uint32_t lastFrameCount;
-    absolute_time_t lastFpsTime;
-    uint32_t framesPerSecond;
     uint32_t lastStatusMs;
     uint32_t uptimeMs;
     uint32_t currentFrameCount;
-    uint32_t elapsedMs;
+    uint32_t lastVideoFrameCount;
+    uint32_t videoFrameCount;
+    SerialLog::Status status;
+    char statusLine[SERIAL_STATUS_LINE_BYTES];
     const unsigned char* uploadedFrame = nullptr;
     uint32_t attemptedPhotoRevision;
     uint32_t savedVideoId;
@@ -120,16 +124,46 @@ RenderLoop (
     context = {&servicesPaused};
     handler = {&context, HandleNetworkPauseRequest};
     attemptedPhotoRevision = 0;
-    lastFrameCount = 0;
-    lastFpsTime = get_absolute_time();
-    framesPerSecond = 0;
+    lastFrameCount = uint32_t(hub75_frame_count);
+    lastVideoFrameCount = player.GetVideoFramesPresented();
     lastStatusMs = to_ms_since_boot(get_absolute_time());
 
     for (;;) {
 
-        // Acknowledge lifecycle changes before touching storage or transport mailboxes.
+        // Sample and report even while upload ownership or listener handoffs pause rendering.
+        uptimeMs = to_ms_since_boot(get_absolute_time());
+        currentFrameCount = uint32_t(hub75_frame_count);
+        library.SampleFrameRates(uptimeMs, currentFrameCount);
         network.ProcessRequests(handler);
         networkStatus = network.ReadStatus();
+        if (uint32_t(uptimeMs - lastStatusMs) >= STATUS_PRINT_INTERVAL_10S) {
+            videoFrameCount = player.GetVideoFramesPresented();
+            status = {};
+            status.uptimeSeconds = uptimeMs / MILLISECONDS_PER_SECOND_U;
+            status.displayTenths = uint32_t(uint64_t(uint32_t(currentFrameCount - lastFrameCount)) *
+                FPS_TENTHS_PER_MILLISECOND_SCALE / uint32_t(uptimeMs - lastStatusMs));
+            status.videoTenths = uint32_t(uint64_t(uint32_t(videoFrameCount - lastVideoFrameCount)) *
+                FPS_TENTHS_PER_MILLISECOND_SCALE / uint32_t(uptimeMs - lastStatusMs));
+            status.video = player.IsPlayingVideo();
+            status.targetNumerator = player.GetEffectiveFpsNumerator();
+            status.targetDenominator = player.GetEffectiveFpsDenominator();
+            if (memory.IsMediaSaveActive()) {
+                status.mode = "upload";
+            } else {
+                status.mode = library.ActiveMode();
+            }
+            status.network = networkStatus.state;
+            status.ip = networkStatus.ip;
+            status.storage = memory.GetStateName();
+            status.sdRetryMs = memory.GetRetryInMs(uptimeMs);
+            status.job = memory.GetActivityName();
+            if (SerialLog::FormatStatus(statusLine, sizeof(statusLine), status)) {
+                std::puts(statusLine);
+            }
+            lastFrameCount = currentFrameCount;
+            lastVideoFrameCount = videoFrameCount;
+            lastStatusMs = uptimeMs;
+        }
         if (servicesPaused) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
             continue;
@@ -211,24 +245,10 @@ RenderLoop (
         }
         displayHelpers.DrawWifiStatusIcon(graphics, networkStatus.ready);
 
-        // Measure completed panel scans independently of saved-video frame selection.
-        currentFrameCount = hub75_frame_count;
-        uptimeMs = to_ms_since_boot(get_absolute_time());
-        elapsedMs = uptimeMs - to_ms_since_boot(lastFpsTime);
-        if (elapsedMs >= FPS_UPDATE_INTERVAL_1S) {
-            framesPerSecond = ((currentFrameCount - lastFrameCount) * FPS_UPDATE_INTERVAL_1S) / elapsedMs;
-            lastFrameCount = currentFrameCount;
-            lastFpsTime = get_absolute_time();
-        }
-        if (uptimeMs - lastStatusMs >= STATUS_PRINT_INTERVAL_10S) {
-            printf("[status] t=%us fps=%u net=%s ip=%s sd=%s\n", uptimeMs / MILLISECONDS_PER_SECOND_U,
-                   framesPerSecond, networkStatus.state, networkStatus.ip, memory.GetStateName());
-            lastStatusMs = uptimeMs;
-        }
-
         // Submit only when the driver can accept a complete frame, then release render ownership.
         if (hub75_ready_for_update()) {
             update(&graphics);
+            player.RecordFramePresented();
         }
         upload.EndRender();
         sleep_ms(ANIMATION_FRAME_DELAY_MS);
@@ -277,7 +297,7 @@ main (
     start_hub75_driver();
     setBasisBrightness(DISPLAY_BASE_BRIGHTNESS);
     setIntensity(DISPLAY_INTENSITY);
-    printf("[boot] hub75 driver up\n");
+    HUB75_DEBUG("[boot] hub75 driver up\n");
 
     // Queue visible fallback content while the saved-media slot is inspected.
     displayHelpers.RenderLogicalImageToGraphics(
@@ -297,15 +317,13 @@ main (
             }
             upload.EndRender();
         }
-        if (restored) {
-            printf("[memory] saved photo restored\n");
-        } else {
-            printf("[memory] using flashed image: %s\n", memory.GetLastError());
+        if (!restored) {
+            std::puts("[playback] built-in (saved media unavailable)");
         }
 
         // SD retains its SPI/DMA resources while Core 1 initializes or reconnects the radio.
     } else {
-        printf("[memory] using flashed image: %s\n", memory.GetLastError());
+        std::puts("[playback] built-in (SD unavailable)");
     }
 
     // Submit restored content before entering the foreground service loop.
@@ -317,6 +335,7 @@ main (
         displayHelpers.DrawWifiStatusIcon(graphics, false);
         if (hub75_ready_for_update()) {
             update(&graphics);
+            player.RecordFramePresented();
         }
         upload.EndRender();
     }
