@@ -102,3 +102,19 @@ The same settings, libraries and upload sessions are available through the
 [HTTP controller API](../docs/HTTP-API.md). Native controllers send numeric query
 parameters and prepared binary media; source-file decoding and crop/fit/zoom remain
 client-side operations. Browser clients retain the local-origin request checks.
+
+## Summary updates
+
+Summary displays separate display/video FPS averages for the latest 30 seconds,
+plus RAM accounting, managed SD usage and card state. A photo shows display FPS;
+a video also shows the rate of distinct submitted frames. The startup averaging
+window grows to 30 seconds.
+
+While Summary is visible, cached status refreshes every two seconds. Managed SD
+totals are measured on manual refresh and at most once per 30 seconds when storage
+is idle. Photos and Videos load on tab selection, explicit Refresh, page navigation
+or a saved-library action; Summary polling does not fetch their pages or previews.
+
+Refreshes keep the last confirmed values visible. A connection failure adds a
+separate warning. Input fields remain editable, and brightness/FPS edits survive
+background replies and edits made while a preceding settings save is pending.

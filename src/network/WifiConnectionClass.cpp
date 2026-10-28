@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 #include "network/include/WifiConnectionClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 #include "http/include/webServer.hpp"
@@ -21,11 +22,6 @@
 #define WIFI_RADIO_RESTART_SETTLE_MS 200
 #define WIFI_REACHABILITY_GRACE_MS 30000
 
-#if HUB75_VERBOSE_LOGS
-#define HUB75_DEBUG(...) std::printf(__VA_ARGS__)
-#else
-#define HUB75_DEBUG(...) ((void)0)
-#endif
 
 #define ARP_HARDWARE_LENGTH_OFFSET 18
 #define ARP_HARDWARE_TYPE_HIGH_OFFSET 14

@@ -34,3 +34,16 @@ such as `60000/1001`. The global cap uses the lower of its configured value and 
 saved rate; zero preserves the saved rate. Panel scan refresh and distinct video-frame
 submission are separate counters. SD reads, decoding and rendering limit achievable new
 frames, so a requested rate is not a throughput guarantee.
+
+The Summary shows a rolling average over the latest 30 seconds, using the available
+shorter window at startup. `FrameRateTracker` samples cumulative completed scans and
+distinct submitted video revisions independently. Reusing a held frame or redrawing
+the Wi-Fi overlay does not increase video FPS. Counters remain cumulative across
+clip reloads; clock and counter rollover use unsigned differences.
+
+## RAM figures
+
+Summary reports static allocations, live heap allocations and reserved core stacks
+separately. Used RAM is their sum; free RAM is total controller SRAM minus that sum.
+The figures include CPU/driver buffers and runtime allocations. Reserved stacks count
+their full configured space, rather than measuring each stack's current usage.

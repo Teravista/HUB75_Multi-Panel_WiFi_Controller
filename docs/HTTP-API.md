@@ -21,12 +21,12 @@ use GET, selections/settings use POST, deletion uses DELETE.
 
 | Method | Path after `/api` | Result / parameters |
 | --- | --- | --- |
-| GET | `/status` or `/state` | Active mode/name, displayed IDs, loop mode, SD state and display settings |
+| GET | `/status` or `/state` | Active mode/name, displayed IDs, loop mode, SD state, rolling FPS, RAM and display settings |
 | GET | `/settings` | Same live status, including `displaySettings.maxFps` and `brightness` |
 | POST | `/settings?maxFps=30&brightness=80` | Set both; maxFps 0–60, brightness 0–100 |
 | POST | `/brightness?value=80` | Change brightness only; preserves the FPS cap |
 | POST | `/max-fps?value=30` | Change cap only; preserves brightness; 0 uses saved video FPS |
-| GET | `/memory` | Freshly measured managed SD `storage` usage and SD state |
+| GET | `/memory` | RAM accounting, freshly measured managed SD `storage` usage and SD state |
 | GET | `/photos?after=0` | Up to ten photo records with individual name/format/quality/dimensions/placement/bytes |
 | GET | `/videos?after=0` | Up to ten video records with name/format/quality/FPS/frames/duration/maxSecondsMillis/ping-pong/bytes |
 | GET | `/photos/{id}/thumbnail` | JSON `{width,height,pixels,error}` |
@@ -67,6 +67,17 @@ saved selections are retained; incomplete temporary files are never library item
 Recovery never formats media. Driver waits are bounded, but mount/read failures can
 still briefly pause frame preparation while the independent display scanner keeps
 showing its last frame.
+
+Status/settings replies include `fps.available`, `fps.windowMillis`,
+`fps.displayTenths` and `fps.videoTenths`. Divide rate values by ten to obtain FPS.
+The window covers up to 30000 milliseconds, with a shorter valid startup window.
+`effectiveFpsNumerator` and `effectiveFpsDenominator` describe the capped target.
+Display scans and distinct submitted video revisions are measured separately.
+
+Status/settings and `/memory` include a `ram` object with `available`, `totalBytes`,
+`usedBytes`, `freeBytes`, `staticBytes`, `heapBytes` and `stackReservedBytes`. Used
+bytes equal static data plus allocated heap plus reserved stacks. RAM status and
+FPS history do not access SD; `/memory` additionally measures managed file usage.
 
 ## Quick examples
 

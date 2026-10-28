@@ -64,3 +64,21 @@ Core 1.
 
 See [display buffers](DISPLAY.md), [storage](MEMORY-MANAGER.md) and
 [upload protocols](VIDEO-UPLOAD.md).
+
+## Serial status
+
+One status line is emitted every ten seconds, including while an upload holds the
+CPU frame. It combines completed scan FPS, measured/target video FPS, active mode,
+network state/IP and SD state. Upload activity and a pending SD retry appear when
+applicable. Scan and video rates cover the actual time since the preceding report.
+
+```text
+[status] t=125s display_fps=62.6 video_fps=29.9/30.0 mode=video net=ready ip=192.168.1.48 sd=ready
+[status] t=135s display_fps=62.6 video_fps=- mode=builtin net=no-wifi ip=- sd=unavailable retry=7s
+```
+
+Boot, network/SD transitions, selected playback, upload completion and failures are
+reported as events. Expected busy/unavailable storage queries are quiet; identical
+storage failures are limited to one report per 15 seconds, while changed failures
+are reported immediately. `HUB75_VERBOSE_LOGS=1` enables extra startup/listener and
+storage diagnostics, including the optional serial startup delay.

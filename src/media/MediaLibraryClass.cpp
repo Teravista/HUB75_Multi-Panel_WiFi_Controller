@@ -1568,17 +1568,19 @@ MediaLibrary::Thumbnail (
 } // Thumbnail
 
 /**
-    Formats the current display selection and saved controls as JSON.
+    Formats the active selection, settings, and frame rates as JSON.
 
-    Returns the published display mode and cached selected name without accessing SD
-    files. Deferred selections remain distinct from the frame currently on the panel.
-    The caller may query this snapshot while a media upload owns storage.
+    Combines the actual player mode, cached displayed name, selected settings and rolling frame
+    rates into one bounded Summary response. SD lifecycle and RAM data are snapshots; this path
+    does not list the directory or load previews. The JSON writer's final state determines whether
+    the caller can publish the response.
 
-    @param json Caller-owned output buffer.
-    @param capacity Output capacity including its text terminator.
+    @param json Output buffer for the generated JSON text.
+    @param capacity Number of elements available in the destination buffer, including any text
+                    terminator.
 
-    @return true - The complete status fits in the output buffer.
-    @return false - The response would exceed the output capacity.
+    @return true - The complete JSON status fits in the destination buffer.
+    @return false - JSON formatting exceeded the available buffer.
 */
 bool
 MediaLibrary::PlaybackStatus (
@@ -1587,48 +1589,83 @@ MediaLibrary::PlaybackStatus (
     ) const
 {
     JsonWriter out;
+    bool video;
+    MediaMetadata metadata;
     uint32_t displayedPhoto;
-    const char* ready = nullptr;
-    const char* pingPong = nullptr;
+    const char* pingPongText = nullptr;
+    const char* storageReadyText = nullptr;
+    uint32_t effectiveNumerator;
+    uint32_t effectiveDenominator;
 
     out = {json, capacity};
-    displayedPhoto = displayed_;
-    if (player_.IsPlayingVideo()) {
+    video = player_.IsPlayingVideo();
+    metadata = player_.GetPlaybackMetadata();
+    displayedPhoto = {};
+    if (video) {
         displayedPhoto = 0;
+    } else {
+        displayedPhoto = displayed_;
     }
-    ready = "false";
+    pingPongText = {};
+    if (video && metadata.pingPong) {
+        pingPongText = "true";
+    } else {
+        pingPongText = "false";
+    }
+    storageReadyText = {};
     if (memory_.IsReady()) {
-        ready = "true";
+        storageReadyText = "true";
+    } else {
+        storageReadyText = "false";
     }
-    pingPong = "false";
-    if (player_.IsPlayingVideo() && player_.GetPlaybackMetadata().pingPong) {
-        pingPong = "true";
+    out.AppendFormattedText(
+        "{\"mode\":\"%s\",\"displayed\":%lu,\"displayedVideo\":%lu,\"intervalSeconds\":%lu,\"pingPong\":%"
+        "s,\"storageReady\":%s,",
+        ActiveMode(), static_cast<unsigned long>(displayedPhoto),
+        static_cast<unsigned long>(player_.GetLibraryVideoId()),
+        static_cast<unsigned long>(settings_.intervalSeconds), pingPongText, storageReadyText);
+    effectiveNumerator = {};
+    if (video) {
+        effectiveNumerator = player_.GetEffectiveFpsNumerator();
+    } else {
+        effectiveNumerator = 0;
     }
-    out.AppendFormattedText("{\"mode\":\"%s\",\"displayed\":%lu,\"displayedVideo\":%lu,\"intervalSeconds\":%lu,\"pingPong\":%s,\"storageReady\":%s,",
-                            ActiveMode(), static_cast<unsigned long>(displayedPhoto),
-                            static_cast<unsigned long>(player_.GetLibraryVideoId()),
-                            static_cast<unsigned long>(settings_.intervalSeconds), pingPong, ready);
-    AppendStorageStateJson(out, memory_);
-    out.AppendFormattedText("\"displaySettings\":{\"maxFps\":%lu,\"brightness\":%lu},\"displayedName\":",
-                            static_cast<unsigned long>(settings_.maxFps), static_cast<unsigned long>(settings_.brightness));
+    effectiveDenominator = {};
+    if (video) {
+        effectiveDenominator = player_.GetEffectiveFpsDenominator();
+    } else {
+        effectiveDenominator = 1;
+    }
+    out.AppendFormattedText(
+        "\"displaySettings\":{\"maxFps\":%lu,\"brightness\":%lu},\"effectiveFpsNumerator\":%lu,"
+        "\"effectiveFpsDenominator\":%lu,",
+        static_cast<unsigned long>(settings_.maxFps), static_cast<unsigned long>(settings_.brightness),
+        static_cast<unsigned long>(effectiveNumerator), static_cast<unsigned long>(effectiveDenominator));
+    out.AppendFormattedText("\"displayedName\":");
     out.AppendEscapedString(displayedName_);
+    out.AppendFormattedText(",");
+    AppendStorageStateJson(out, memory_);
+    AppendFrameRatesJson(out, frameRates_.Read());
+    AppendRamUsageJson(out, memory_.GetRamUsage());
     out.AppendFormattedText(",\"error\":\"\"}");
     return out.good;
 } // PlaybackStatus
 
 
 /**
-    Formats managed SD storage capacity and consumption as JSON.
+    Formats RAM and managed SD storage usage as JSON.
 
-    The filesystem query runs in foreground code and counts controller-managed files,
-    including staged data and retained settings. An unavailable or busy card reports
-    available false without presenting a partial usage total as a complete result.
+    Asks MemoryManager to total controller-managed SD files and combines the result with RAM and
+    storage-lifecycle snapshots. Directory inspection is synchronous and can fail while storage is
+    busy or unavailable; the response then reports storage usage as unavailable while still
+    returning the other status fields.
 
-    @param json Caller-owned output buffer.
-    @param capacity Output capacity including its text terminator.
+    @param json Output buffer for the generated JSON text.
+    @param capacity Number of elements available in the destination buffer, including any text
+                    terminator.
 
-    @return true - The complete response fits in the output buffer.
-    @return false - The response would exceed the output capacity.
+    @return true - The complete JSON status fits in the destination buffer.
+    @return false - JSON formatting exceeded the available buffer.
 */
 bool
 MediaLibrary::MemoryStatus (
@@ -1637,23 +1674,28 @@ MediaLibrary::MemoryStatus (
     )
 {
     MemoryManager::StorageUsage storage;
-    bool measured;
-    const char* available = nullptr;
+    bool available;
     JsonWriter out;
+    const char* availableText = nullptr;
 
     storage = {};
-    measured = memory_.GetStorageUsage(storage);
-    available = "false";
-    if (measured) {
-        available = "true";
-    }
+    available = memory_.GetStorageUsage(storage);
     out = {json, capacity};
-    out.AppendFormattedText("{\"storage\":{\"available\":%s,\"totalBytes\":%llu,\"fileBytes\":%llu,\"allocatedBytes\":%llu},",
-                            available, static_cast<unsigned long long>(storage.totalBytes),
-                            static_cast<unsigned long long>(storage.fileBytes),
-                            static_cast<unsigned long long>(storage.allocatedBytes));
+    out.AppendFormattedText("{");
     AppendStorageStateJson(out, memory_);
-    out.AppendFormattedText("\"error\":\"\"}");
+    AppendRamUsageJson(out, memory_.GetRamUsage());
+    availableText = {};
+    if (available) {
+        availableText = "true";
+    } else {
+        availableText = "false";
+    }
+    out.AppendFormattedText(
+        ",\"storage\":{\"available\":%s,\"totalBytes\":%llu,\"fileBytes\":%llu,\"allocatedBytes\":%llu},"
+        "\"error\":\"\"}",
+        availableText, static_cast<unsigned long long>(storage.totalBytes),
+        static_cast<unsigned long long>(storage.fileBytes),
+        static_cast<unsigned long long>(storage.allocatedBytes));
     return out.good;
 } // MemoryStatus
 
@@ -1677,3 +1719,94 @@ MediaLibrary::AppendStorageStateJson (
     out.AppendEscapedString(memory.GetStorageError());
     out.AppendFormattedText(",");
 } // AppendStorageStateJson
+
+
+/**
+    Adds RAM capacity and usage fields to a JSON response.
+
+    Adds a consistent RAM object from the supplied runtime snapshot, including its availability
+    flag and separate static, heap and reserved-stack totals. Used/free values are calculated only
+    when measurement is available. This helper formats existing data and does not perform storage
+    or network operations.
+
+    @param out JSON writer receiving the appended fields.
+    @param ram Snapshot of controller RAM capacity and allocations.
+*/
+void
+MediaLibrary::AppendRamUsageJson (
+    JsonWriter& out,
+    const MemoryManager::RamUsage& ram
+    )
+{
+    const char* availableText = nullptr;
+    uint64_t usedBytes;
+    uint64_t freeBytes;
+
+    availableText = {};
+    if (ram.available) {
+        availableText = "true";
+    } else {
+        availableText = "false";
+    }
+    usedBytes = {};
+    if (ram.available) {
+        usedBytes = ram.UsedBytes();
+    } else {
+        usedBytes = 0;
+    }
+    freeBytes = {};
+    if (ram.available) {
+        freeBytes = ram.FreeBytes();
+    } else {
+        freeBytes = 0;
+    }
+    out.AppendFormattedText(
+        "\"ram\":{\"available\":%s,\"totalBytes\":%llu,\"usedBytes\":%llu,\"freeBytes\":%llu,"
+        "\"staticBytes\":%llu,\"heapBytes\":%llu,\"stackReservedBytes\":%llu}",
+        availableText, static_cast<unsigned long long>(ram.totalBytes),
+        static_cast<unsigned long long>(usedBytes),
+        static_cast<unsigned long long>(freeBytes), static_cast<unsigned long long>(ram.staticBytes),
+        static_cast<unsigned long long>(ram.heapBytes),
+        static_cast<unsigned long long>(ram.stackReservedBytes));
+} // AppendRamUsageJson
+
+/**
+    Adds rolling display and video FPS fields to a JSON response.
+
+    @param out JSON writer receiving the appended fields.
+    @param fps Rolling display and video frame-rate measurements.
+*/
+void
+MediaLibrary::AppendFrameRatesJson (
+    JsonWriter& out,
+    const FrameRateTracker::Average& fps
+    )
+{
+    const char* availableText = nullptr;
+
+    availableText = {};
+    if (fps.available) {
+        availableText = "true";
+    } else {
+        availableText = "false";
+    }
+    out.AppendFormattedText(
+        "\"fps\":{\"available\":%s,\"windowMillis\":%lu,\"displayTenths\":%lu,\"videoTenths\":%lu},",
+        availableText, static_cast<unsigned long>(fps.windowMs),
+        static_cast<unsigned long>(fps.displayTenths), static_cast<unsigned long>(fps.videoTenths));
+} // AppendFrameRatesJson
+
+/**
+    Records display and video counters for summary FPS reporting.
+
+    @param nowMs Current monotonic time since boot, in milliseconds.
+    @param displayFrames Cumulative number of completed display scans.
+*/
+void
+MediaLibrary::SampleFrameRates (
+    uint32_t nowMs,
+    uint32_t displayFrames
+    )
+{
+    frameRates_.Sample(nowMs, displayFrames, player_.GetVideoFramesPresented());
+} // SampleFrameRates

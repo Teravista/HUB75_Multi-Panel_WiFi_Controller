@@ -55,7 +55,16 @@ public:
     // Opens and displays one checked library photo.
     bool ShowLibraryPhoto(uint32_t id);
 
+    // Returns the number of distinct video frames submitted to the panel.
+    uint32_t GetVideoFramesPresented(void) const;
+
+    // Records a newly submitted verified video revision once.
+    void RecordFramePresented(void);
+
 private:
+    uint32_t presentedVideoFrames_ = 0;
+    FrameBufferController::Token lastPresentedRevision_ = 0;
+
     // Selects the decoded pixel format used by the CPU framebuffer.
     static PixelFormat DecodedFormat(void);
 

@@ -146,6 +146,7 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
         ${CMAKE_CURRENT_LIST_DIR}/mainEntry.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/display/cpuFrame.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/FrameRateTrackerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/display/displayHelpers.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameBufferControllerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameReceiverClass.cpp
@@ -162,6 +163,7 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/network/NetworkServicesClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/networkCorePico.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/core/Core1SchedulerClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/core/serialLog.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/JpegInputPipeClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/jpegWorkerPico.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/sd/PlaybackPrefetchClass.cpp

@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 #include "http/include/HttpMediaUploadClass.hpp"
 #include "media/include/MediaLibraryClass.hpp"
 #include "pico/cyw43_arch.h"
@@ -66,6 +67,11 @@ HttpMediaUpload::Finish (
     const char* error
     )
 {
+    if (external_ && state == State::Error) {
+        std::printf("[upload] http failed: %s\n", error);
+    } else if (external_ && state == State::Canceled) {
+        std::puts("[upload] http canceled");
+    }
     if (state == State::Saved && library_) {
         if (photoUpload_) {
             if (!library_->NotifyPhotoSaved(photoId_)) {
@@ -74,6 +80,9 @@ HttpMediaUpload::Finish (
         } else if (videoId_ && !library_->NotifyVideoSaved(videoId_)) {
             warning_ = "Video saved; selection settings could not be saved.";
         }
+    }
+    if (*warning_) {
+        std::printf("[warn] %s\n", warning_);
     }
     if (external_) {
         memory_.AbortMediaSave();
@@ -304,6 +313,9 @@ HttpMediaUpload::Update (
                 Finish(State::Error, memory_.GetLastError());
             } else {
                 state_ = State::Receiving;
+            std::printf("[upload] http session=%lu frames=%lu format=%s\n",
+                        static_cast<unsigned long>(session_), static_cast<unsigned long>(metadata.frameCount),
+                        metadata.FormatName());
                 progress_ = GetUploadTimeMs();
             }
         } else if (!session_ || id != session_) {

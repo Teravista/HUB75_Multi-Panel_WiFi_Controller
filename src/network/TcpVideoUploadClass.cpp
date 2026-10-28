@@ -1,3 +1,4 @@
+#include "core/include/serialLog.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
@@ -384,7 +385,7 @@ TcpVideoUpload::Start (
     tcp_arg(listener_, this);
     tcp_accept(listener_, Accept);
     cyw43_arch_lwip_end();
-    std::printf("[video] TCP listening on port %u\n", MediaTransfer::Port);
+    HUB75_DEBUG("[video] TCP listening on port %u\n", MediaTransfer::Port);
     return true;
 } // Start
 
@@ -474,6 +475,9 @@ TcpVideoUpload::FinishJob (
     const char* message
     )
 {
+    if (external_ && std::strncmp(message, "ERR ", MEDIA_MAGIC_BYTES) == 0) {
+        std::printf("[upload] tcp video failed: %.*s\n", int(std::strcspn(message, "\r\n")), message);
+    }
     if (external_) {
         memory_.AbortMediaSave();
         upload_.EndExternalMedia();
@@ -553,6 +557,7 @@ TcpVideoUpload::UpdateStorage (
 
     if (!enabled_) {
         if (external_) {
+            std::puts("[upload] tcp video canceled");
             memory_.AbortMediaSave();
             upload_.EndExternalMedia();
             external_ = false;
@@ -578,6 +583,7 @@ TcpVideoUpload::UpdateStorage (
     // Cancellation releases storage outside callbacks, even after the radio stops.
     if (phase == Phase::Canceled) {
         if (external_) {
+            std::puts("[upload] tcp video canceled");
             memory_.AbortMediaSave();
             upload_.EndExternalMedia();
             external_ = false;
@@ -665,6 +671,10 @@ TcpVideoUpload::UpdateStorage (
             return;
         }
         metadata_.PayloadBytes(total_);
+        std::printf("[upload] tcp video frames=%lu fps=%lu/%lu format=%s\n",
+                    static_cast<unsigned long>(metadata_.frameCount),
+                    static_cast<unsigned long>(metadata_.fpsNumerator),
+                    static_cast<unsigned long>(metadata_.fpsDenominator), metadata_.FormatName());
         cyw43_arch_lwip_begin();
         if (phase_ != Phase::Canceled) {
             phase_ = Phase::Body;
