@@ -1,7 +1,7 @@
 #include "core/include/serialLog.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include <cstring>
-#include "display/include/displayHelpers.hpp"
+#include "display/include/PanelRendererClass.hpp"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 #include <cstdio>
@@ -49,10 +49,10 @@ FrameBufferController::DetachPhotoClientCallbacks (
                               released.
 */
 FrameBufferController::FrameBufferController (
-    DisplayHelpers* helpers,
+    PanelRenderer* helpers,
     unsigned char* buffer,
     bool holdCompletedFrame
-    ) : m_displayHelpers(helpers), m_frameBuffer(buffer),
+    ) : m_panelRenderer(helpers), m_frameBuffer(buffer),
       m_receiver(SOURCE_FRAME_SIZE_BYTES, this, StorePixel, holdCompletedFrame)
 {
     return;
@@ -93,10 +93,10 @@ FrameBufferController::ReadFramePixels (
         index = (offset + i) / IMAGE_BYTES_PER_PIXEL;
         x = 0;
         y = 0;
-        m_displayHelpers->ConvertLogicalToPhysicalCoordinates(int(index % LOGICAL_IMAGE_WIDTH),
+        m_panelRenderer->ConvertLogicalToPhysicalCoordinates(int(index % LOGICAL_IMAGE_WIDTH),
                                                               int(index / LOGICAL_IMAGE_WIDTH), x, y);
         source = (y * MATRIX_PANEL_WIDTH + x) * CpuFrame::PixelBytes;
-        pixel = CpuFrame::Load(m_frameBuffer + source);
+        pixel = CpuFrame::LoadRgbPixelAsRgb888(m_frameBuffer + source);
         pixels[i + IMAGE_BLUE_BYTE_OFFSET] = uint8_t(pixel);
         pixels[i + IMAGE_GREEN_BYTE_OFFSET] = uint8_t(pixel >> RGB888_GREEN_SHIFT);
         pixels[i + IMAGE_RED_BYTE_OFFSET] = uint8_t(pixel >> RGB888_RED_SHIFT);
@@ -148,10 +148,10 @@ FrameBufferController::DecodeAndStorePixel (
     logicalY = static_cast<int>(pixelIndex / LOGICAL_IMAGE_WIDTH);
     physicalX = 0;
     physicalY = 0;
-    m_displayHelpers->ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, physicalX, physicalY);
+    m_panelRenderer->ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, physicalX, physicalY);
     destIndex = (physicalY * MATRIX_PANEL_WIDTH + physicalX) * CpuFrame::PixelBytes;
     // Preserve existing physical wiring correction for both transports.
-    CpuFrame::Store(m_frameBuffer + destIndex, pixelBytes[IMAGE_RED_BYTE_OFFSET],
+    CpuFrame::StoreRgbPixel(m_frameBuffer + destIndex, pixelBytes[IMAGE_RED_BYTE_OFFSET],
                             pixelBytes[IMAGE_GREEN_BYTE_OFFSET], pixelBytes[IMAGE_BLUE_BYTE_OFFSET]);
 } // DecodeAndStorePixel
 
@@ -827,7 +827,7 @@ FrameBufferController::ClearStoredFrame (
 template <PixelFormat Format>
 bool
 FrameBufferController::MapStoredPixels (
-    DisplayHelpers& helpers,
+    PanelRenderer& helpers,
     uint8_t* buffer,
     const uint8_t* bytes,
     size_t count,
@@ -919,7 +919,7 @@ FrameBufferController::MapStoredPixels (
                                                         (blue >> RGB565_RED_BLUE_REPLICATE_SHIFT));
                 rgb = decoded;
             }
-            CpuFrame::Store(buffer + dest, rgb[IMAGE_RED_BYTE_OFFSET], rgb[IMAGE_GREEN_BYTE_OFFSET],
+            CpuFrame::StoreRgbPixel(buffer + dest, rgb[IMAGE_RED_BYTE_OFFSET], rgb[IMAGE_GREEN_BYTE_OFFSET],
                                     rgb[IMAGE_BLUE_BYTE_OFFSET]);
             dest += stride;
             bytes += PixelBytes;
@@ -960,11 +960,11 @@ FrameBufferController::WriteStoredFramePixels (
     )
 {
     if (format == PixelFormat::RGB888) {
-        return MapStoredPixels<PixelFormat::RGB888>(*m_displayHelpers, m_frameBuffer, bytes, count, offset,
+        return MapStoredPixels<PixelFormat::RGB888>(*m_panelRenderer, m_frameBuffer, bytes, count, offset,
                                                     width, height, left, top);
     }
     if (format == PixelFormat::RGB565) {
-        return MapStoredPixels<PixelFormat::RGB565>(*m_displayHelpers, m_frameBuffer, bytes, count, offset,
+        return MapStoredPixels<PixelFormat::RGB565>(*m_panelRenderer, m_frameBuffer, bytes, count, offset,
                                                     width, height, left, top);
     }
     return false;

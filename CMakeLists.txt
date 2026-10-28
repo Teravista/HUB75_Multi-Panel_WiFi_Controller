@@ -147,7 +147,8 @@ target_sources(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/mainEntry.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/display/cpuFrame.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/display/FrameRateTrackerClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/display/displayHelpers.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/display/PanelRendererClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/RenderPipelineClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameBufferControllerClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameReceiverClass.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/media/PhotoPersistenceClass.cpp

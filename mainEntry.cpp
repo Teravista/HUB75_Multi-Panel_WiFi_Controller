@@ -1,12 +1,13 @@
 #include "core/include/serialLog.hpp"
 #include <cstdint>
+#include "display/include/RenderPipelineClass.hpp"
 #include "http/include/webServer.hpp"
 #include "http/include/HttpMediaUploadClass.hpp"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hub75.hpp"
 #include "config/defines.h"
-#include "display/include/displayHelpers.hpp"
+#include "display/include/PanelRendererClass.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "network/include/WifiConnectionClass.hpp"
 #include "network/include/networkCore.hpp"
@@ -17,10 +18,36 @@
 
 #define SERIAL_STATUS_LINE_BYTES 256
 
-#define WIFI_STATE_MACHINE_REV "runtime-status"
+#define WIFI_STATE_MACHINE_REV "render-pipeline"
 
 struct NetworkPauseContext {
     bool* servicesPaused;
+    RenderPipeline* pipeline;
+};
+
+/**
+    Borrows foreground state for synchronous preparation and display submission.
+
+    The render loop owns every referenced object and keeps this record alive while a prepared
+    frame waits for the scanner. Callbacks do not own storage, buffers or network state, and do
+    not outlive the loop iteration that invokes them.
+*/
+struct RenderContext {
+    PanelRenderer* renderer;
+    FrameBufferController* upload;
+    MemoryManager* memory;
+    MediaLibrary* library;
+    MediaPlayer* player;
+    TcpVideoUpload* video;
+    CpuGraphics* graphics;
+    NetworkServices::Status* networkStatus;
+    size_t* frameIndex;
+    bool* animationMovingForward;
+    bool* reloadVideo;
+    bool* reloadHttp;
+    uint32_t* attemptedPhotoRevision;
+    const unsigned char** uploadedFrame;
+    FrameBufferController::Token* displayedRevision;
 };
 
 /**
@@ -52,12 +79,103 @@ HandleNetworkPauseRequest (
 {
     NetworkPauseContext* context = nullptr;
     context = static_cast<NetworkPauseContext*>(opaque);
+    context->pipeline->Reset();
     if (command == NetworkServices::Command::PauseServices) {
         *context->servicesPaused = true;
     } else if (command == NetworkServices::Command::ResumeServices) {
         *context->servicesPaused = false;
     }
 } // HandleNetworkPauseRequest
+
+/**
+    Prepares the next saved or built-in frame under exclusive CPU-frame ownership.
+
+    Adopts completed uploads and persists a new live photo before drawing overlays. Saved-media
+    selection and frame timing advance through the existing library/player APIs. If no usable
+    frame exists, the built-in image is mapped into the same caller-owned CPU buffer. Preparation
+    is synchronous; RenderPipeline retains ownership until submission or cancellation.
+
+    @param opaque Borrowed foreground rendering context.
+*/
+static void
+PrepareDisplayFrame (
+    void* opaque
+    )
+{
+    RenderContext* render = nullptr;
+    uint32_t savedVideoId;
+
+    render = static_cast<RenderContext*>(opaque);
+
+    // Adopt a completed library upload only after the display transaction releases ownership.
+    if ((*render->reloadVideo) || (*render->reloadHttp)) {
+        savedVideoId = render->video->TakeSavedLibraryId();
+        if (savedVideoId) {
+            render->library->NotifyVideoSaved(savedVideoId);
+        } else if (render->library->WantsMedia()) {
+            render->library->RequestReload();
+        } else {
+            render->player->RequestReload();
+        }
+    }
+
+    // Save each raw photo revision once, before connection overlays modify the source pixels.
+    if (!(*render->reloadVideo) && !(*render->reloadHttp) && render->upload->GetUploadedFrameData() && !render->upload->IsStoredFrame() &&
+        render->upload->GetFrameRevision() != (*render->attemptedPhotoRevision)) {
+        (*render->attemptedPhotoRevision) = render->upload->GetFrameRevision();
+        render->player->Stop();
+        if (!render->library->ImportLivePhoto()) {
+            printf("[memory] photo save failed: %s; keeping live photo\n", render->memory->GetLastError());
+        }
+    }
+    if (render->library->WantsMedia()) {
+        render->library->Update(to_ms_since_boot(get_absolute_time()));
+    } else {
+        render->player->Update(to_ms_since_boot(get_absolute_time()));
+    }
+
+    (*render->reloadVideo) = false;
+    (*render->reloadHttp) = false;
+
+    // Draw the fallback only when no verified or newly uploaded frame is available.
+    (*render->uploadedFrame) = render->upload->GetUploadedFrameData();
+    if (!(*render->uploadedFrame)) {
+        render->renderer->RenderLogicalImageToGraphics(
+            *render->graphics, render->renderer->GetImageDataForFrame((*render->frameIndex)));
+        (*render->frameIndex) = render->renderer->GetNextAnimationFrameIndex((*render->frameIndex), (*render->animationMovingForward));
+    }
+} // PrepareDisplayFrame
+
+/**
+    Draws the status overlay and submits a prepared frame to the display driver.
+
+    Runs only after the scanner accepts another frame. A changed source revision refreshes the
+    small saved background beneath the IP label; overlay-only redraws restore that background.
+    The completed submission advances the distinct video-frame counter before the pipeline
+    releases CPU-frame ownership.
+
+    @param opaque Borrowed foreground rendering context.
+    @param scannerWaitUs Elapsed scanner wait in microseconds, supplied by the pipeline.
+*/
+static void
+SubmitDisplayFrame (
+    void* opaque,
+    uint64_t scannerWaitUs
+    )
+{
+    RenderContext* render = nullptr;
+    bool freshFrame;
+
+    (void)scannerWaitUs;
+    render = static_cast<RenderContext*>(opaque);
+    freshFrame = *render->uploadedFrame == nullptr ||
+        render->upload->GetFrameRevision() != *render->displayedRevision;
+    render->renderer->DrawWifiStatusIcon(*render->graphics, render->networkStatus->ready,
+        render->networkStatus->ip, freshFrame);
+    update(render->graphics);
+    *render->displayedRevision = render->upload->GetFrameRevision();
+    render->player->RecordFramePresented();
+} // SubmitDisplayFrame
 
 /**
     Prepares display frames and advances foreground storage and media services.
@@ -67,8 +185,10 @@ HandleNetworkPauseRequest (
     cannot replace pixels while persistence reads them. Each
     completed upload is saved once before drawing the Wi-Fi status overlay.
     The scanner continues showing its last submitted buffer during SD work.
+    Prepared CPU pixels remain owned across scanner waits; a bounded timeout releases the frame
+    without resetting display hardware or preventing foreground maintenance.
 
-    @param displayHelpers Logical-to-physical panel mapping and status overlay.
+    @param renderer Logical-to-physical panel mapping and status overlay.
     @param upload Shared framebuffer and raw photo receiver.
     @param network Cross-core network status and lifecycle command mailbox.
     @param memory SD image-storage boundary.
@@ -80,7 +200,7 @@ HandleNetworkPauseRequest (
 */
 static void
 RenderLoop (
-    DisplayHelpers& displayHelpers,
+    PanelRenderer& renderer,
     FrameBufferController& upload,
     NetworkServices& network,
     MemoryManager& memory,
@@ -112,7 +232,10 @@ RenderLoop (
     char statusLine[SERIAL_STATUS_LINE_BYTES];
     const unsigned char* uploadedFrame = nullptr;
     uint32_t attemptedPhotoRevision;
-    uint32_t savedVideoId;
+    FrameBufferController::Token displayedRevision;
+    RenderPipeline::Result submission;
+    RenderContext render;
+    RenderPipeline pipeline(upload);
 
     frameIndex = FIRST_FRAME_INDEX;
     animationMovingForward = true;
@@ -121,9 +244,13 @@ RenderLoop (
     storageRestored = false;
     reloadVideo = false;
     reloadHttp = false;
-    context = {&servicesPaused};
+    context = {&servicesPaused, &pipeline};
     handler = {&context, HandleNetworkPauseRequest};
     attemptedPhotoRevision = 0;
+    displayedRevision = 0;
+    render = {&renderer, &upload, &memory, &library, &player, &video, &graphics,
+              &networkStatus, &frameIndex, &animationMovingForward, &reloadVideo, &reloadHttp,
+              &attemptedPhotoRevision, &uploadedFrame, &displayedRevision};
     lastFrameCount = uint32_t(hub75_frame_count);
     lastVideoFrameCount = player.GetVideoFramesPresented();
     lastStatusMs = to_ms_since_boot(get_absolute_time());
@@ -171,6 +298,9 @@ RenderLoop (
 
         // Recover storage independently, and discard old-card selections before accepting new jobs.
         storageEvent = memory.Update(to_ms_since_boot(get_absolute_time()));
+        if (storageEvent != MemoryManager::Event::None) {
+            pipeline.Reset();
+        }
         if (storageEvent == MemoryManager::Event::Unavailable) {
             storageLost = true;
             storageRestored = false;
@@ -201,56 +331,16 @@ RenderLoop (
         reloadVideo = video.TakeReloadRequest() || reloadVideo;
         reloadHttp = http.TakeReloadRequest() || reloadHttp;
 
-        if (!upload.TryBeginRender()) {
+        // Prepare once, retaining ownership until the independent scanner can accept the frame.
+        pipeline.TryPrepare(hub75_ready_for_update(), {&render, PrepareDisplayFrame});
+        submission = pipeline.TrySubmit(hub75_ready_for_update(), {&render, SubmitDisplayFrame});
+        if (submission == RenderPipeline::Result::Stalled) {
+            std::puts("[display] scanner wait timed out; frame ownership released");
+        }
+        if (submission != RenderPipeline::Result::Submitted) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
             continue;
         }
-
-        // Adopt a completed library upload only after the display transaction releases ownership.
-        if (reloadVideo || reloadHttp) {
-            savedVideoId = video.TakeSavedLibraryId();
-            if (savedVideoId) {
-                library.NotifyVideoSaved(savedVideoId);
-            } else if (library.WantsMedia()) {
-                library.RequestReload();
-            } else {
-                player.RequestReload();
-            }
-        }
-
-        // Save each raw photo revision once, before connection overlays modify the source pixels.
-        if (!reloadVideo && !reloadHttp && upload.GetUploadedFrameData() && !upload.IsStoredFrame() &&
-            upload.GetFrameRevision() != attemptedPhotoRevision) {
-            attemptedPhotoRevision = upload.GetFrameRevision();
-            player.Stop();
-            if (!library.ImportLivePhoto()) {
-                printf("[memory] photo save failed: %s; keeping live photo\n", memory.GetLastError());
-            }
-        }
-        if (library.WantsMedia()) {
-            library.Update(to_ms_since_boot(get_absolute_time()));
-        } else {
-            player.Update(to_ms_since_boot(get_absolute_time()));
-        }
-
-        reloadVideo = false;
-        reloadHttp = false;
-
-        // Draw the fallback only when no verified or newly uploaded frame is available.
-        uploadedFrame = upload.GetUploadedFrameData();
-        if (!uploadedFrame) {
-            displayHelpers.RenderLogicalImageToGraphics(
-                graphics, displayHelpers.GetImageDataForFrame(frameIndex));
-            frameIndex = displayHelpers.GetNextAnimationFrameIndex(frameIndex, animationMovingForward);
-        }
-        displayHelpers.DrawWifiStatusIcon(graphics, networkStatus.ready);
-
-        // Submit only when the driver can accept a complete frame, then release render ownership.
-        if (hub75_ready_for_update()) {
-            update(&graphics);
-            player.RecordFramePresented();
-        }
-        upload.EndRender();
         sleep_ms(ANIMATION_FRAME_DELAY_MS);
     }
 } // RenderLoop
@@ -271,8 +361,8 @@ main (
     )
 {
     alignas(DMA_BUFFER_ALIGNMENT) static unsigned char frameBuffer[FRAME_BUFFER_SIZE_BYTES];
-    DisplayHelpers displayHelpers;
-    FrameBufferController upload(&displayHelpers, frameBuffer, true);
+    PanelRenderer renderer;
+    FrameBufferController upload(&renderer, frameBuffer, true);
     MemoryManager memory;
     static TcpVideoUpload video(memory, upload, true);
     WifiConnection wifiNetwork(&upload, &video);
@@ -300,9 +390,9 @@ main (
     HUB75_DEBUG("[boot] hub75 driver up\n");
 
     // Queue visible fallback content while the saved-media slot is inspected.
-    displayHelpers.RenderLogicalImageToGraphics(
-        graphics, displayHelpers.GetImageDataForFrame(FIRST_FRAME_INDEX));
-    displayHelpers.DrawWifiStatusIcon(graphics, false);
+    renderer.RenderLogicalImageToGraphics(
+        graphics, renderer.GetImageDataForFrame(FIRST_FRAME_INDEX));
+    renderer.DrawWifiStatusIcon(graphics, false, nullptr, true);
     update(&graphics);
 
     // Restore a checked saved frame, retaining the fallback when storage or decoding fails.
@@ -329,10 +419,10 @@ main (
     // Submit restored content before entering the foreground service loop.
     if (upload.TryBeginRender()) {
         if (!restored) {
-            displayHelpers.RenderLogicalImageToGraphics(
-                graphics, displayHelpers.GetImageDataForFrame(FIRST_FRAME_INDEX));
+            renderer.RenderLogicalImageToGraphics(
+                graphics, renderer.GetImageDataForFrame(FIRST_FRAME_INDEX));
         }
-        displayHelpers.DrawWifiStatusIcon(graphics, false);
+        renderer.DrawWifiStatusIcon(graphics, false, nullptr, true);
         if (hub75_ready_for_update()) {
             update(&graphics);
             player.RecordFramePresented();
@@ -340,5 +430,5 @@ main (
         upload.EndRender();
     }
     StartNetworkCore(network);
-    RenderLoop(displayHelpers, upload, network, memory, library, player, video, http, graphics);
+    RenderLoop(renderer, upload, network, memory, library, player, video, http, graphics);
 } // main
