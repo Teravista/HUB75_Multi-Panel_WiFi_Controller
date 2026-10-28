@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "web-upload",
+      "displayName": "Pico 2 W with browser uploads (size optimized)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/web-upload",
+      "cacheVariables": {
+        "PICO_BOARD": "pico2_w",
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "CMAKE_C_FLAGS_MINSIZEREL": "-Os -DNDEBUG",
+        "CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -DNDEBUG"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "web-upload", "configurePreset": "web-upload", "jobs": 4 }
+  ]
+}

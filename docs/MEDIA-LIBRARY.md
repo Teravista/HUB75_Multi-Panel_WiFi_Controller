@@ -91,8 +91,9 @@ bounded, escape names and return failure when a complete page or preview cannot 
 
 Video uploads create independent SD items with an ID, name, format, frame count,
 rational FPS and loop/ping-pong mode. A supplied upload-duration limit is retained in
-milliseconds. The current TCP protocol supplies no name or duration override, so its
-items use `Uploaded video` and a zero duration-limit field.
+milliseconds. Named TCP uploads preserve the supplied title; legacy TCP clients use
+`Uploaded video`. TCP does not send the separate maximum-duration setting, so that
+field is zero and clip duration follows the saved frame count and FPS.
 
 `BeginLibraryVideo` starts a staging transaction. The existing append/readback
 verification API publishes it by rename only after complete success. `ListLibraryVideos`
@@ -133,3 +134,12 @@ reserved zero at 32 and CRC32 at 36. Older 24-byte `H75S` and 32-byte `H75G` rec
 load with no FPS cap and 80% brightness. Corrupt newest settings fall back to the
 previous valid record. Failed persistence does not apply live changes; repeated
 identical settings avoid another write. Upload ownership rejects competing changes.
+
+## Preview caching
+
+The browser caches 32 × 64 RGB565 previews by media type, ID and revision. An
+uncached preview reads through a separate file handle and the shared storage/decoder
+workspace. Its 4 KiB output does not replace the CPU framebuffer. Preview work can
+briefly delay new frame preparation while the panel keeps scanning. Legacy 16 × 32
+on-disk thumbnails remain readable. See [display buffers](DISPLAY.md) and
+[storage usage](MEMORY-MANAGER.md#runtime-status) for RAM and SD accounting.

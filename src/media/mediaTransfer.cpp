@@ -1,5 +1,5 @@
 #include "media/include/mediaTransfer.hpp"
-#include "config/include/storageConfig.hpp"
+#include "config/defines.h"
 
 /**
     Validates a placed raw or indexed JPEG video against frame-rate and FAT32 limits.

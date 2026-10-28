@@ -8,8 +8,8 @@ external assets. Three tabs separate the summary, photos and videos.
 The summary shows the active built-in, photo, slideshow or video mode and the selected
 item's name. Set brightness from 0–100 percent and an optional maximum video FPS from
 1–60; a blank FPS field preserves the video's saved rate. Settings are persisted before
-application. **Refresh summary** retrieves the current mode and SD usage without
-clearing already displayed values first.
+application. Summary refreshes cached status in the background while preserving
+confirmed values and unsaved edits. **Refresh summary** also measures managed SD usage.
 
 Storage reports logical managed-file bytes, their cluster-rounded allocation and the
 filesystem's usable data capacity. Managed totals include controller libraries,
@@ -118,3 +118,16 @@ or a saved-library action; Summary polling does not fetch their pages or preview
 Refreshes keep the last confirmed values visible. A connection failure adds a
 separate warning. Input fields remain editable, and brightness/FPS edits survive
 background replies and edits made while a preceding settings save is pending.
+
+## Build
+
+Configure the repository's `.env`, then use CMake and Ninja with the project's
+Pico SDK/toolchain configuration:
+
+```powershell
+cmake --preset web-upload
+cmake --build --preset web-upload
+```
+
+The preset selects Pico 2 W and a size-optimized build. Flash
+`build/web-upload/hub75.uf2`; HTML embedding runs automatically when the page changes.
