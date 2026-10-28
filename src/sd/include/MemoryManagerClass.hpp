@@ -11,7 +11,8 @@
 /**
     Provides the foreground SD storage boundary for saved photos and raw/indexed-JPEG videos.
 
-    It owns SPI, the filesystem, file handles, shared 24 KiB scratch and a 64 KiB
+    It coordinates SPI and private storage helpers holding the filesystem, file handles,
+    shared 24 KiB scratch and a 64 KiB
     active-playback cache. Mount retries and read-only health checks recover
     unavailable cards without restarting Wi-Fi. JPEG reads can feed an available Core 1 decoder through
     bounded input slots; all filesystem operations remain on Core 0.
@@ -228,7 +229,6 @@ public:
         uint32_t brightness = DefaultBrightness;
     };
 
-
     // Starts a named photo save with its own metadata and thumbnail.
     bool BeginLibraryPhoto(const MediaMetadata& metadata, uint32_t checksum, const char* name, const uint8_t* thumbnail, uint32_t& id);
 
@@ -293,250 +293,8 @@ public:
 private:
     SerialLog::RepeatGate errorLog_;
 
-    /**
-        Samples a saved image into a small RGB565 preview without touching the CPU framebuffer.
-
-        The reader supplies raw or decoded pixel fragments. Placement maps their logical
-        cell centers into the caller-owned preview, whose remaining pixels stay black.
-    */
-    struct PreviewSamplingContext {
-        uint8_t* pixels;
-        size_t pixelBytes;
-        uint16_t width;
-        uint16_t height;
-        uint16_t left;
-        uint16_t top;
-
-        // Samples decoded image fragments into the small RGB565 library preview.
-        static bool SamplePreviewPixels(void* opaque, const uint8_t* bytes, size_t count, size_t offset);
-
-    };
-
-    // Adds managed library files to logical and allocated storage totals.
-    static int MeasureLibraryStorageUsage(StorageUsage& usage, uint64_t clusterBytes);
-
-    static constexpr size_t HeaderBytes = PHOTO_HEADER_BYTES;
-    static constexpr size_t LegacyLastHeaderBytes = SAVED_PHOTO_HEADER_BYTES;
-    static constexpr size_t LastHeaderBytes = METADATA_PHOTO_HEADER_BYTES;
-    static constexpr size_t ChunkBytes = IoChunkBytes;
-    static constexpr size_t MaximumNameLength = STORAGE_MAXIMUM_NAME_LENGTH;
-    static_assert(ChunkBytes % SD_SECTOR_BYTES == 0 && ChunkBytes % IMAGE_BYTES_PER_PIXEL == 0,
-                  "Storage chunks must contain complete sectors and RGB pixels");
-
-    // Private static state keeps FatFs objects and the read buffer off the stack.
-    struct StorageState;
-    static StorageState storage_;
-
-    /**
-        Guards the class-owned filesystem and scratch buffer for one operation.
-
-        Acquisition reports a busy state immediately. Scope exit releases only
-        a successful claim, preserving the foreground callback lifetime boundary.
-    */
-    struct StorageGuard {
-        bool acquired;
-
-        // Attempts to claim the shared storage state without waiting.
-        StorageGuard(void);
-
-        // Releases the storage-operation guard when its scope ends.
-        ~StorageGuard(void);
-
-    };
-
-    struct CompareContext {
-        const uint8_t* expected;
-        size_t compared = 0;
-        bool mismatch = false;
-    };
-
-    // Validates a root filename and builds its SD filesystem path.
-    static bool BuildValidatedImagePath(const char* name, char* path);
-
-    // Updates the running CRC32 checksum with another byte span.
-    static uint32_t UpdateImageCrc32(uint32_t crc, const uint8_t* bytes, size_t length);
-
-    // Writes a 32-bit unsigned value in little-endian byte order.
-    static void WriteUnsigned32LittleEndian(uint8_t* p, uint32_t value);
-
-    // Reads a 32-bit unsigned value in little-endian byte order.
-    static uint32_t ReadUnsigned32LittleEndian(const uint8_t* p);
-
-    // Builds a photo storage header with dimensions and payload checksum.
-    static void BuildPhotoStorageHeader(uint8_t* header, uint32_t checksum);
-
-    // Compares readback pixels against the source used by the storage self-check.
-    static bool CompareSavedImageBytes(void* context, const uint8_t* bytes, size_t count, size_t offset);
-
-    enum class SlotState { Missing, Invalid, Valid, IoError };
-
-    struct SavedPhotoSlot {
-        SlotState state = SlotState::Missing;
-        uint32_t generation = 0;
-        MediaMetadata metadata;
-        size_t dataOffset = 0;
-        uint32_t checksum = 0;
-        uint32_t crcSeed = STORAGE_CRC32_INITIAL_U;
-        bool frameChecksums = false;
-        bool indexedJpeg = false;
-        int result = 0;
-        const char* error = "invalid saved photo";
-    };
-
-    // Builds a saved-photo header with its generation and checksum.
-    static void BuildSavedPhotoHeader(uint8_t* header, const MediaMetadata& metadata, uint32_t generation, uint32_t checksum);
-
-    // Validates a stored photo while streaming provisional pixel data.
-    static SavedPhotoSlot ReadAndValidatePhotoFile(const char* path, ImageSink sink, void* context);
-
-    // Reads and validates one retained photo, optionally delivering its pixels.
-    static SavedPhotoSlot ReadSavedPhotoSlot(unsigned index, ImageSink sink = nullptr, void* context = nullptr);
-
-    // Selects the newest valid generation with wrap-safe ordering.
-    static int FindNewestSavedPhoto(const SavedPhotoSlot* slots);
-
-    // Streams a new retained photo into the selected alternate slot.
-    static bool WriteSavedPhotoSlot(unsigned index, uint32_t generation, const MediaMetadata& metadata, ImageSource source, void* context, int& result);
-
-    enum class SavePhase { Idle, Writing, Verifying };
-
-    struct SaveSession {
-        SavePhase phase = SavePhase::Idle;
-        MediaMetadata metadata;
-        unsigned target = 0;
-        uint32_t generation = 0;
-        uint32_t expectedCrc = 0;
-        uint64_t total = 0;
-        uint64_t received = 0;
-        uint64_t verified = 0;
-        uint32_t frameBytes = 0;
-        uint32_t verifyFrameBytes = 0;
-        uint32_t jpegVerifiedFrames = 0;
-        uint32_t crc = STORAGE_CRC32_INITIAL_U;
-        uint32_t frameCrc = STORAGE_CRC32_INITIAL_U;
-        uint32_t verifyCrc = STORAGE_CRC32_INITIAL_U;
-        uint32_t verifyFrameCrc = STORAGE_CRC32_INITIAL_U;
-        size_t bufferedBytes = 0;
-        bool open = false;
-        uint32_t libraryId = 0;
-        uint32_t videoId = 0;
-        uint32_t maxSecondsMillis = 0;
-        size_t headerBytes = MediaTransfer::FileHeaderBytes;
-        char name[PhotoNameBytes]{};
-        uint8_t thumbnail[ThumbnailBytes]{};
-    };
-
-    struct PlaybackSession {
-        SavedPhotoSlot description;
-        int slot = SAVED_PHOTO_NO_SLOT;
-        uint32_t libraryVideoId = 0;
-        bool open = false;
-    };
-
-    struct FrameResult {
-        bool complete = false;
-        int result = 0;
-        const char* error = "media frame read failed";
-    };
-
-    // Returns the reserved path for one alternating media slot.
-    static const char* GetSavedMediaPath(unsigned index);
-
-    // Flushes buffered transaction bytes to the active save file.
-    static bool FlushMediaWrites(int& result);
-
-    // Queues video payload and checksum records through the shared buffer.
-    static bool QueueMediaWrite(const uint8_t* bytes, size_t count, int& result);
-
-    // Closes playback without acquiring a second storage guard.
-    static void CloseSavedMediaPlayback(bool safe = true);
-
-    // Discards an unpublished save without reacquiring storage ownership.
-    static int DiscardIncompleteMediaSave(bool safe);
-
-    // Builds the checked raw or indexed-JPEG video header for the current save.
-    static void BuildVideoStorageHeader(uint8_t* header);
-
-    // Inspects a photo, raw video or indexed JPEG video in a retained slot.
-    static SavedPhotoSlot InspectSavedMediaSlot(unsigned index, const char* path = nullptr, bool checkFirstFrame = true);
-
-    // Streams and checks a raw frame from the inspection or playback handle.
-    static FrameResult ReadAndVerifyRawVideoFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting, FrameReadTiming* timing = nullptr);
-
-    struct JpegIndexEntry {
-        uint32_t offset = 0;
-        uint32_t length = 0;
-    };
-
-    // Loads and checks a bounded index window for JPEG playback.
-    static bool LoadJpegIndexWindow(const SavedPhotoSlot& slot, uint32_t index, int& result);
-
-    // Validates an indexed JPEG record before completing provisional frame output.
-    static FrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, ImageSink sink, void* context, bool inspecting, bool verifying = false, FrameReadTiming* timing = nullptr, bool outputRGB565 = false);
-
     // Checks one bounded JPEG payload block or one complete encoded frame.
     bool VerifyJpegSaveStep(bool& finished);
-
-    static constexpr size_t LibraryHeaderBytes = 1536;
-    static constexpr size_t VideoLibraryHeaderBytes = 512;
-    static constexpr const char* GalleryPaths[] = {"0:/GSET_A.H75", "0:/GSET_B.H75"};
-
-    struct GalleryRecord {
-        bool valid = false;
-        uint32_t generation = 0;
-        int result = 0;
-        GallerySettings settings;
-    };
-
-    // Builds a managed video filename from its library ID and extension.
-    static void BuildVideoLibraryPath(uint32_t id, char* path, bool temporary = false);
-
-    // Builds a managed photo filename from its library ID and extension.
-    static void BuildPhotoLibraryPath(uint32_t id, char* path, bool temporary = false);
-
-    // Parses a managed library filename into its media ID and file type.
-    static bool ParseLibraryName(const char* name, uint32_t& id, bool& video, bool& temporary);
-
-    // Visits managed library entries without retaining the full directory.
-    template <class Visitor>
-    static int ScanLibraryDirectory(Visitor visit);
-
-    // Chooses the next unused ID for a named library item.
-    static uint32_t AllocateLibraryId(bool video, int& result);
-
-    // Selects a bounded ordered page of library IDs after the requested cursor.
-    template <class Item>
-    static int FindLibraryPage(bool video, Item* items, size_t capacity, size_t& count, uint32_t after, MemoryManager::LibraryPage& page);
-
-    // Selects a bounded ordered page of photo IDs after the requested cursor.
-    static int FindPhotoLibraryPage(MemoryManager::LibraryPhoto* items, size_t capacity, size_t& count, uint32_t after, MemoryManager::LibraryPage& page);
-
-    // Selects a bounded ordered page of video IDs after the requested cursor.
-    static int FindVideoLibraryPage(MemoryManager::LibraryVideo* items, size_t capacity, size_t& count, uint32_t after, MemoryManager::LibraryPage& page);
-
-    // Checks whether a published video is already present in the library.
-    static int FindExistingLibraryVideo(bool& existingVideo);
-
-    // Validates a named photo's header and reads its library metadata.
-    static SavedPhotoSlot InspectPhotoLibraryFile(uint32_t id, MemoryManager::LibraryPhoto* photo = nullptr, uint8_t* thumbnail = nullptr);
-
-    // Reads and validates one saved gallery settings record.
-    static GalleryRecord ReadAndValidateGalleryRecord(unsigned index);
-
-    // Selects the newest valid saved gallery settings record.
-    static int FindNewestValidGalleryRecord(const GalleryRecord* records);
-
-    // Validates a named video's header and reads its library metadata.
-    static SavedPhotoSlot InspectLibraryVideo(uint32_t id, MemoryManager::LibraryVideo* video = nullptr);
-
-    // Selects the path owned by the current save transaction.
-    static const char* BuildActiveSaveFilePath(char* path);
-
-    // Identifies filesystem failures that require SD session recovery.
-    static bool IsStorageIoError(int result);
-
-    // Builds the checked retained or named-library header after complete verification.
-    static void BuildLibraryPublicationHeader(uint8_t* header);
 
     // Releases failed-session resources before a fresh SD mount attempt.
     void DiscardSession(void);
@@ -549,7 +307,6 @@ private:
     const char* storageError_ = "not initialized";
     bool ready_ = false;
     const char* error_ = "storage not initialized";
-
     // Records a storage error and requests recovery for failed SD I/O.
     bool ReportStorageFailure(const char* message, int filesystemResult = 0);
 
