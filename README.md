@@ -4,6 +4,7 @@
 
 | Topic | Guide |
 | --- | --- |
+| HTTP routes, custom controllers and resumable uploads | [Controller API](docs/HTTP-API.md) |
 | Browser tabs, upload options, placement and previews | [Web interface](web/README.md) |
 | Saved collections, slideshow, settings and pagination | [Media library](docs/MEDIA-LIBRARY.md) |
 | Python uploads, transfer messages and failure handling | [Video uploads](docs/VIDEO-UPLOAD.md) |
@@ -83,12 +84,13 @@ address identify the local connection; browser and Python uploaders save content
 display and restoration after restart.
 
 ## Ways to Get Content Onto the Panel
-Three Python scripts handle content:
+Python tools prepare and upload content:
 - `imageToRGB888ArrayConverter.py` / `mp4ToRGB888ArrayConverter.py` - convert an image or video into a C header with a byte array, included via `defines.h` under the `USE_ANIMATION` flag. This becomes the default image/animation flashed into firmware.
-- `sendImageOverTCP.py` - uploads a new image to the running Pico over TCP, replacing what's on screen without reflashing.
+- `sendImageOverTCP.py` - uploads a full photo over TCP, or a compact fitted photo through HTTP.
+- `sendVideoOverTCP.py` - prepares and uploads SD-backed videos with format, FPS, duration, loop and name options.
 
-All three are configurable via defines at the top of the script or command-line
-arguments.
+Conversion/upload scripts expose defaults at the top and command-line overrides.
+See the [API guide](docs/HTTP-API.md) for HTTP routes and usage.
 
 # 2. Hardware / Wiring
 

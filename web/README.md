@@ -94,3 +94,11 @@ job expires after 15 seconds without upload activity, so a long outage can requi
 a new transfer. Verification after full reception is independent of that deadline.
 Resume does not survive a page reload or Pico restart. See
 [upload recovery](../docs/VIDEO-UPLOAD.md#retry-and-resume) for the protocol and limits.
+
+
+## Custom controllers
+
+The same settings, libraries and upload sessions are available through the
+[HTTP controller API](../docs/HTTP-API.md). Native controllers send numeric query
+parameters and prepared binary media; source-file decoding and crop/fit/zoom remain
+client-side operations. Browser clients retain the local-origin request checks.

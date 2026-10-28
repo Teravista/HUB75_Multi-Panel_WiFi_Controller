@@ -1,0 +1,6 @@
+#pragma once
+
+namespace HttpApiInfo {
+inline constexpr char Json[] =
+    R"json({"apiVersion":1,"basePath":"/api","panel":{"width":128,"height":256},"limits":{"maxFps":60,"maxSeconds":600,"pageSize":10,"chunkBytes":6144},"pixelFormats":["RGB565","RGB888","JPEG"],"routes":["GET /api/status","GET /api/state","GET /api/settings","POST /api/settings?maxFps=30&brightness=80","POST /api/brightness?value=80","POST /api/max-fps?value=30","GET /api/memory","GET /api/photos?after=0","GET /api/videos?after=0","GET /api/photos/{id}/thumbnail","GET /api/videos/{id}/thumbnail","POST /api/photos/{id}/show","POST /api/videos/{id}/show","DELETE /api/photos/{id}","DELETE /api/videos/{id}","GET /api/slideshow","POST /api/slideshow/start?intervalSeconds=60","POST /api/slideshow/stop","POST /api/uploads/photos","POST /api/uploads/videos","GET /api/uploads/{id}","PUT /api/uploads/{id}/chunk?offset=0","DELETE /api/uploads/{id}","POST /api/uploads/{id}/cancel","GET /api/uploads/resume?token=1"],"controlParameters":"Numeric URL query parameters; control requests have no body","uploadBody":"Prepared H75M metadata and binary pixels, not source MP4/PNG files; see docs/HTTP-API.md","errors":"Check response.error and upload state; existing application errors are JSON with HTTP 200","legacy":["POST /api/video","POST /api/frame"]})json";
+}

@@ -14,6 +14,8 @@ constexpr uint64_t MaximumFileBytes = 0xffffffffu;
 constexpr uint32_t MaximumFps = 60;
 constexpr uint32_t ReceiveIdleMs = 15000;
 constexpr char BulkRequestMagic[] = "H75V";
+constexpr char NamedBulkRequestMagic[] = "H75N";
+constexpr char NamedRequestMagic[] = "H75n";
 
 // Validates a placed raw or indexed JPEG video against frame-rate and FAT32 limits.
 bool IsSupportedVideo(const MediaMetadata& metadata, uint16_t width, uint16_t height);
