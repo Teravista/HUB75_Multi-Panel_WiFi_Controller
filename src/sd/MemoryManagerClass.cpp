@@ -789,6 +789,7 @@ MemoryManager::StartMediaVerification (
     if (result != FR_OK) {
         return ReportStorageFailure("video verification seek failed", result);
     }
+    MemoryStorage::managerState.jpegIndexCount = 0;
     MemoryStorage::managerState.save.phase = MemoryStorage::SavePhase::Verifying;
     error_ = "none";
     return true;
@@ -1078,55 +1079,94 @@ MemoryManager::CloseMediaPlayback (
 /**
     Checks one bounded JPEG payload block or one complete encoded frame.
 
-    First streams the complete saved payload to validate the transfer CRC. Later
-    calls validate one independently decodable frame at a time, including its index
-    and record checksums. This keeps the staging header invalid until every frame
-    has passed and leaves the previous retained generation untouched.
+    Checksums the index first, then reuses the existing checked index window while
+    reading record headers and encoded bytes in order. Each frame's entropy stream,
+    dimensions, CRC and end marker are validated without reconstructing pixels.
+    Those same bytes advance the whole-payload CRC, avoiding a second payload scan.
+    Playback is suspended while verification borrows its index cache. The caller
+    compares the final payload CRC before publishing the saved file.
 
-    @param finished True only after the payload CRC and every indexed frame pass.
+    @param finished Set true after the final indexed frame covers the exact payload.
 
-    @return true - This verification step passed; finished reports full completion.
-    @return false - Readback, payload checksum, indexing or JPEG decoding failed.
+    @return true - One bounded index block or complete JPEG frame passed verification.
+    @return false - File I/O, index bounds, continuity or JPEG validation failed.
 */
 bool
 MemoryManager::VerifyJpegSaveStep (
     bool& finished
     )
 {
+    uint64_t indexBytes;
     UINT bytes;
     UINT count;
     int result;
     MemoryStorage::SavedPhotoSlot slot;
-    MemoryStorage::SavedFrameResult frame;
+    MemoryStorage::JpegIndexEntry entry;
+    MemoryStorage::FrameResult frame;
+    uint8_t record[MediaTransfer::JpegRecordBytes];
+    uint32_t checksum;
 
     finished = false;
+    indexBytes = uint64_t(MemoryStorage::managerState.save.metadata.frameCount) * MediaTransfer::JpegIndexBytes;
 
-    // First verify the exact saved payload in bounded reads without decoding pixels.
-    if (MemoryStorage::managerState.save.verified < MemoryStorage::managerState.save.total) {
-        bytes = UINT(std::min(uint64_t(MemoryStorage::ChunkBytes), MemoryStorage::managerState.save.total - MemoryStorage::managerState.save.verified));
+    // Include every stored index byte in the ordered payload checksum once.
+    if (MemoryStorage::managerState.save.verified < indexBytes) {
+        bytes = UINT(std::min(uint64_t(MemoryStorage::ChunkBytes), indexBytes - MemoryStorage::managerState.save.verified));
         result = f_read(&MemoryStorage::managerState.mediaFile, MemoryStorage::managerState.readBuffer, bytes, &count);
         if (result != FR_OK || count != bytes) {
-            return ReportStorageFailure("JPEG payload verification read failed", result);
+            return ReportStorageFailure("JPEG index verification read failed", result);
         }
-        MemoryStorage::managerState.save.verifyCrc = MemoryStorage::UpdateImageCrc32(MemoryStorage::managerState.save.verifyCrc, MemoryStorage::managerState.readBuffer, bytes);
+        MemoryStorage::managerState.save.verifyCrc = MemoryStorage::UpdateImageCrc32(
+            MemoryStorage::managerState.save.verifyCrc, MemoryStorage::managerState.readBuffer, bytes);
         MemoryStorage::managerState.save.verified += bytes;
-        if (MemoryStorage::managerState.save.verified == MemoryStorage::managerState.save.total &&
-            ~MemoryStorage::managerState.save.verifyCrc != MemoryStorage::managerState.save.expectedCrc) {
-            return ReportStorageFailure("stored JPEG payload checksum mismatch");
-        }
         return true;
     }
 
-    // After payload CRC succeeds, check one indexed frame per call before allowing publication.
+    // Load a checked window from the save handle; no playback or inspection file is borrowed.
     slot.metadata = MemoryStorage::managerState.save.metadata;
     slot.dataOffset = MemoryStorage::managerState.save.headerBytes;
     slot.indexedJpeg = true;
-    frame = MemoryStorage::ReadAndVerifyJpegFrame(slot, MemoryStorage::managerState.save.jpegVerifiedFrames, nullptr, nullptr, false, true);
+    if (!MemoryStorage::LoadJpegIndexWindow(MemoryStorage::managerState.mediaFile, slot,
+                                          MemoryStorage::managerState.save.jpegVerifiedFrames, result)) {
+        return ReportStorageFailure("stored JPEG frame/index verification failed", result);
+    }
+    entry = MemoryStorage::managerState.jpegIndex[
+        MemoryStorage::managerState.save.jpegVerifiedFrames - MemoryStorage::managerState.jpegIndexFirst];
+    if (entry.offset != MemoryStorage::managerState.save.verified) {
+        return ReportStorageFailure("stored JPEG frame order mismatch");
+    }
+
+    // Cross-check the contiguous record header before feeding its bytes to either checksum.
+    result = FR_OK;
+    if (uint64_t(f_tell(&MemoryStorage::managerState.mediaFile)) != uint64_t(slot.dataOffset) + entry.offset) {
+        result = f_lseek(&MemoryStorage::managerState.mediaFile, slot.dataOffset + entry.offset);
+    }
+    if (result == FR_OK) {
+        result = f_read(&MemoryStorage::managerState.mediaFile, record, sizeof(record), &count);
+    }
+    if (result != FR_OK || count != sizeof(record)) {
+        return ReportStorageFailure("JPEG record verification read failed", result);
+    }
+    if (MemoryStorage::ReadUnsigned32LittleEndian(record) != entry.length) {
+        return ReportStorageFailure("stored JPEG record length mismatch");
+    }
+    checksum = MemoryStorage::ReadUnsigned32LittleEndian(record + FRAME_CHECKSUM_BYTES);
+    MemoryStorage::managerState.save.verifyCrc = MemoryStorage::UpdateImageCrc32(
+        MemoryStorage::managerState.save.verifyCrc, record, sizeof(record));
+
+    // Validate encoded bytes and update both CRCs through the same bounded input stream.
+    frame = MemoryStorage::DecodeEncodedJpegFrame(
+        MemoryStorage::managerState.mediaFile, slot.metadata, entry.length, checksum, nullptr, nullptr,
+        nullptr, false, &MemoryStorage::managerState.save.verifyCrc);
     if (!frame.complete) {
         return ReportStorageFailure(frame.error, frame.result);
     }
+    MemoryStorage::managerState.save.verified += sizeof(record) + entry.length;
     ++MemoryStorage::managerState.save.jpegVerifiedFrames;
     finished = MemoryStorage::managerState.save.jpegVerifiedFrames == MemoryStorage::managerState.save.metadata.frameCount;
+    if (finished && MemoryStorage::managerState.save.verified != MemoryStorage::managerState.save.total) {
+        return ReportStorageFailure("JPEG payload has trailing or missing frames");
+    }
     return true;
 } // VerifyJpegSaveStep
 

@@ -931,6 +931,7 @@ DecodeJpegParallel (
     @param context Borrowed pixel-consumer context.
     @param timing Optional output counters for this record.
     @param outputRGB565 True selects little-endian RGB565 output; false selects RGB888.
+    @param payloadCrc Optional running payload CRC receiving every encoded frame byte.
 
     @return result - Completion flag, filesystem result and failure description.
 */
@@ -943,7 +944,8 @@ DecodeEncodedJpegFrame (
     MemoryManager::ImageSink sink,
     void* context,
     MemoryManager::FrameReadTiming* timing,
-    bool outputRGB565
+    bool outputRGB565,
+    uint32_t* payloadCrc
     )
 {
     FrameResult result;
@@ -958,10 +960,12 @@ DecodeEncodedJpegFrame (
     decltype(&JpegStream::WriteDecodedJpegPixels) outputCallback;
     JpegStream stream{file, result, sink, context, timing, bytes};
 
+    stream.payloadCrc = payloadCrc;
     result = {};
     decoderError = 0;
     usedCore1 = false;
-    decodeUs = waitUs = 0;
+    decodeUs = 0;
+    waitUs = 0;
     pipelineBytes = 0;
     started = to_us_since_boot(get_absolute_time());
     DriverReadProfileScope profile(timing);
@@ -1993,7 +1997,7 @@ ReadAndVerifyJpegFrame (
 
     // Playback uses a checked index window; inspection and verification read independent index records.
     if (!inspecting && !verifying) {
-        if (!LoadJpegIndexWindow(slot, index, read.result)) {
+        if (!LoadJpegIndexWindow(*file, slot, index, read.result)) {
             return read;
         }
         offset = managerState.jpegIndex[index - managerState.jpegIndexFirst].offset;
@@ -2058,14 +2062,17 @@ ReadAndVerifyJpegFrame (
 } // ReadAndVerifyJpegFrame
 
 /**
-    Loads and checks a bounded index window for JPEG playback.
+    Loads and checks a bounded index window for JPEG playback or save verification.
 
     Caches offset/length pairs for at most 512 frames in four KiB. Every entry
     CRC, bound and local continuity check passes before the window is published.
     A preceding entry validates the window boundary, and the final entry must end
-    exactly at the payload boundary. Cache ownership ends whenever playback closes.
+    exactly at the payload boundary. Cache ownership ends whenever playback closes or verification starts.
+    Save readback borrows the same cache while playback is suspended; the supplied
+    file always belongs to that exclusive operation.
 
-    @param slot Checked JPEG metadata for the active playback handle.
+    @param file Open playback or verification file whose index is being checked.
+    @param slot Checked JPEG metadata and stored payload offset.
     @param index Frame whose index window is required.
     @param result Receives filesystem status; stays zero for invalid index content.
 
@@ -2074,6 +2081,7 @@ ReadAndVerifyJpegFrame (
 */
 bool
 LoadJpegIndexWindow (
+    FIL& file,
     const SavedPhotoSlot& slot,
     uint32_t index,
     int& result
@@ -2115,9 +2123,9 @@ LoadJpegIndexWindow (
                   "JPEG index window exceeds shared input scratch");
 
     // Read the complete bounded window into shared scratch before publishing any cached entry.
-    result = MemoryStorage::SeekPlaybackFile(managerState.playbackFile, slot.dataOffset + uint64_t(readFirst) * MediaTransfer::JpegIndexBytes);
+    result = MemoryStorage::SeekPlaybackFile(file, slot.dataOffset + uint64_t(readFirst) * MediaTransfer::JpegIndexBytes);
     if (result == FR_OK) {
-        result = MemoryStorage::ReadPlaybackFileBytes(managerState.playbackFile, managerState.readBuffer, bytes, &count, nullptr);
+        result = MemoryStorage::ReadPlaybackFileBytes(file, managerState.readBuffer, bytes, &count, nullptr);
     }
     if (result != FR_OK || count != bytes) {
         return false;

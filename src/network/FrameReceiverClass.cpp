@@ -264,7 +264,7 @@ FrameReceiver::Release (
 } // Release
 
 /**
-    Claims exclusive framebuffer access for saved-media work.
+    Claims exclusive framebuffer ownership for an incremental media upload.
 
     @return true - External media owns the framebuffer until explicitly released.
     @return false - Another operation currently owns the framebuffer.
@@ -292,7 +292,7 @@ FrameReceiver::EndExternal (
 } // EndExternal
 
 /**
-    Marks a saved-media frame as complete and advances its revision.
+    Marks a verified stored-media frame complete and advances its revision.
 
     Foreground only while holding Render. Playback does not create an upload transaction, and
     keeps ownership until the driver submission finishes.
@@ -310,7 +310,7 @@ FrameReceiver::PublishStoredFrame (
 } // PublishStoredFrame
 
 /**
-    Clears the availability of the previously published frame.
+    Clears availability after failed stored-media restoration.
 */
 void
 FrameReceiver::ClearStoredFrame (

@@ -177,7 +177,7 @@ bool DecodeJpegParallel(JpegStream& stream, uint16_t width, uint16_t height, int
 #endif
 
 // Decodes and checks a bounded JPEG record already positioned by the storage manager.
-FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, bool outputRGB565);
+FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, bool outputRGB565, uint32_t* payloadCrc = nullptr);
 
 // Checks whether a file is the active playback handle using the prefetch cache.
 bool IsPrefetchedPlaybackFile(FIL& file);
@@ -374,8 +374,8 @@ struct JpegIndexEntry {
     uint32_t length = 0;
 };
 
-// Loads and checks a bounded index window for JPEG playback.
-bool LoadJpegIndexWindow(const SavedPhotoSlot& slot, uint32_t index, int& result);
+// Loads and checks a bounded index window for JPEG playback or save verification.
+bool LoadJpegIndexWindow(FIL& file, const SavedPhotoSlot& slot, uint32_t index, int& result);
 
 // Validates an indexed JPEG record before completing provisional frame output.
 SavedFrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, MemoryManager::ImageSink sink, void* context, bool inspecting, bool verifying = false, MemoryManager::FrameReadTiming* timing = nullptr, bool outputRGB565 = false);
