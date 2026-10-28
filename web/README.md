@@ -108,12 +108,15 @@ client-side operations. Browser clients retain the local-origin request checks.
 Summary displays separate display/video FPS averages for the latest 30 seconds,
 plus RAM accounting, managed SD usage and card state. A photo shows display FPS;
 a video also shows the rate of distinct submitted frames. The startup averaging
-window grows to 30 seconds.
+window grows to 30 seconds. The mode card also shows the displayed photo/slideshow
+item or the first frame of the active video. Built-in content has no saved-media
+preview. Preview requests run when the displayed item or SD session changes; normal
+status polling retains the loaded image. **Refresh summary** reloads it explicitly.
 
 While Summary is visible, cached status refreshes every two seconds. Managed SD
 totals are measured on manual refresh and at most once per 30 seconds when storage
 is idle. Photos and Videos load on tab selection, explicit Refresh, page navigation
-or a saved-library action; Summary polling does not fetch their pages or previews.
+or a saved-library action; Summary polling does not reload the collection pages.
 
 Refreshes keep the last confirmed values visible. A connection failure adds a
 separate warning. Input fields remain editable, and brightness/FPS edits survive

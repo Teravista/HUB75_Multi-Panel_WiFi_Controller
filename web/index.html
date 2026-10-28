@@ -19,13 +19,23 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 #video-source{display:block;width:128px;height:256px;object-fit:cover;margin:24px auto;background:#000}
 .preview-editor{position:relative;width:256px;max-width:100%;aspect-ratio:1/2;margin:24px auto;outline:1px solid #64748b}.preview-editor canvas{width:100%;height:100%;margin:0;border:0}.content-outline{position:absolute;border:1px solid #ef4444;box-sizing:border-box;pointer-events:none}.preview-editor[data-draggable=true] canvas{cursor:grab;touch-action:none}.drag-hint{font-size:.8rem;text-align:center}.tabs{display:flex;gap:8px;margin:0 0 24px}.tabs button{flex:1;width:auto;margin:0;padding:12px 6px;background:#1f2937;color:#cbd5e1;border:1px solid #475569}.tabs button[aria-selected=true]{background:#38bdf8;color:#082f49}.summary-box,.photo-card{padding:16px;border:1px solid #475569;border-radius:12px;background:#1f2937}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.photo-card{padding:12px;min-width:0}.photo-card h3{font-size:1rem;overflow-wrap:anywhere}.photo-card p{font-size:.8rem}.photo-card canvas{width:64px;height:128px;margin:8px auto;image-rendering:pixelated}.photo-card button{padding:10px;margin-top:8px}.photo-card.showing{border-color:#38bdf8}.library-actions{display:flex;align-items:center;gap:10px}.library-actions button{padding:10px}.summary-box p{overflow-wrap:anywhere}
 .mode-line{display:flex;align-items:center;flex-wrap:wrap;gap:12px}#active-fps{font-size:.8rem;color:#cbd5e1;font-variant-numeric:tabular-nums}#summary-status{min-height:1.5em}
+.summary-content {display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.summary-details {min-width:0;flex:1}
+.summary-preview {flex:0 0 96px;width:96px;min-height:192px;margin:0;text-align:center}
+.summary-preview canvas {width:96px;height:192px;margin:0;image-rendering:pixelated;box-sizing:border-box}
+.summary-preview figcaption {font-size:.7rem;color:#cbd5e1;margin-top:6px}
+.summary-preview figcaption:empty {display:none}
+@media(max-width:380px) {
+    .summary-preview {flex-basis:64px;width:64px;min-height:128px}
+    .summary-preview canvas {width:64px;height:128px}
+}
 </style>
 </head>
 <body>
 <h1>HUB75</h1>
 <nav class="tabs" role="tablist" aria-label="Media sections"><button id="tab-summary" type="button" role="tab" aria-controls="panel-summary" aria-selected="true">Summary</button><button id="tab-photos" type="button" role="tab" aria-controls="panel-photos" aria-selected="false" tabindex="-1">Photos</button><button id="tab-videos" type="button" role="tab" aria-controls="panel-videos" aria-selected="false" tabindex="-1">Videos</button></nav>
 <div id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
-<div class="summary-box"><p>Active mode on panel</p><div class="mode-line"><strong id="active-mode">Checking…</strong><span id="active-fps" hidden></span></div><p id="active-mode-detail"></p></div>
+<div class="summary-box summary-content"><div class="summary-details"><p>Active mode on panel</p><div class="mode-line"><strong id="active-mode">Checking…</strong><span id="active-fps" hidden></span></div><p id="active-mode-detail"></p></div><figure id="summary-preview" class="summary-preview" hidden><canvas id="summary-preview-canvas" width="32" height="64" aria-label="Displayed media preview" hidden></canvas><figcaption id="summary-preview-caption" role="status"></figcaption></figure></div>
 <section><h2>Display settings</h2><label for="playback-max-fps">Maximum video FPS</label><input id="playback-max-fps" type="number" min="1" max="60" step="1" placeholder="Use video FPS"><label for="panel-brightness">Brightness %</label><input id="panel-brightness" type="number" min="0" max="100" step="1" value="80"><button id="display-settings-save" type="button" disabled>Apply settings</button></section>
 <section><h2>Memory usage</h2><p>Pico RAM: <strong id="ram-usage">Checking…</strong></p><progress id="ram-meter" max="100" value="0" hidden aria-label="RAM usage"></progress><p id="ram-detail"></p><p id="sd-state" role="status" aria-live="polite">Checking SD card…</p><p id="storage-usage">Checking…</p><p id="storage-capacity"></p></section><button id="summary-refresh" class="secondary" type="button">Refresh summary</button><p id="summary-status" role="status" aria-live="polite"></p></div>
 <div id="panel-photos" role="tabpanel" aria-labelledby="tab-photos" hidden>
@@ -1696,6 +1706,8 @@ let galleryBusy = false;
 let activeMediaTab = 'summary';
 let summaryBusy = false;
 let summaryLoaded = false;
+const SUMMARY_PREVIEW_RETRY_MS = 10000;
+const summaryPreviewState = {targetKey: '', loadedKey: '', attemptKey: '', busy: false, retryAfter: 0};
 let lastStorageRefreshMs = 0;
 let settingsLoaded = false;
 let settingsDirty = false;
@@ -1744,8 +1756,9 @@ function formatStorageBytes(bytes) {
     controls, but later background replies cannot replace dirty or focused input values.
 
     @param status Latest validated controller status response.
+    @param forcePreview True refreshes the displayed preview even when its media ID is unchanged.
 */
-function renderPlaybackStatus(status) {
+function renderPlaybackStatus(status, forcePreview = false) {
     const labels = {builtin: 'Built-in', photo: 'Single photo', slideshow: 'Slideshow', video: 'Video'};
     if (!Object.prototype.hasOwnProperty.call(labels, status.mode)) {
         throw new Error('Invalid playback status.');
@@ -1783,6 +1796,7 @@ function renderPlaybackStatus(status) {
         }
     }
     updateSettingsButton();
+    refreshSummaryPreview(status, forcePreview);
 }
 
 /**
@@ -1793,17 +1807,18 @@ function renderPlaybackStatus(status) {
     library action. Failed requests retain confirmed values and show a separate warning.
 
     @param includeStorage True requests a fresh managed-storage measurement when idle.
+    @param forcePreview True reloads the displayed preview on a manual Summary refresh.
 
     @return Promise<void> - Completes after refreshing available fields or showing a warning.
 */
-async function refreshSummary(includeStorage = true) {
+async function refreshSummary(includeStorage = true, forcePreview = false) {
     if (summaryBusy) {
         return;
     }
     summaryBusy = true;
     const message = document.getElementById('summary-status');
     try {
-        renderPlaybackStatus(await libraryRequest(15));
+        renderPlaybackStatus(await libraryRequest(15), forcePreview);
         summaryLoaded = true;
         if ((includeStorage || Date.now() - lastStorageRefreshMs >= 30000) && !uploading && !videoBusy &&
             !galleryBusy && !libraryPages.photo.busy && !libraryPages.video.busy) {
@@ -1839,7 +1854,7 @@ function selectMediaTab(name) {
         document.getElementById('panel-' + candidate).hidden = !active;
     }
     if (name === 'summary') {
-        refreshSummary();
+        refreshSummary(true, true);
     } else if (name === 'photos') {
         loadLibraryPage('photo');
     } else {
@@ -1873,6 +1888,91 @@ function renderLibraryPreview(canvas, preview) {
         pixels.data[target + 3] = 255;
     }
     context.putImageData(pixels, 0, 0);
+}
+
+/**
+    Shows the displayed saved photo or the first frame of the active saved video.
+
+    Uses actual displayed IDs, rather than the selection waiting for publication.
+    One validated preview is retained across status polls. Item/name or SD-generation
+    changes load a replacement; manual refresh can reload an unchanged ID. Requests
+    wait during uploads and library actions, and failures retry with a bounded delay.
+    A late response cannot replace the preview of a newer item or a hidden tab.
+    Preview failures remain separate from the confirmed Summary values and inputs.
+
+    @param status Confirmed playback status, including displayed IDs and SD generation.
+    @param force True bypasses the cached preview and failure-retry delay.
+
+    @return Promise<void> - Completes after loading, retaining or deferring the preview.
+*/
+async function refreshSummaryPreview(status, force = false) {
+    const figure = document.getElementById('summary-preview');
+    const canvas = document.getElementById('summary-preview-canvas');
+    const caption = document.getElementById('summary-preview-caption');
+    let kind = 'photo';
+    let id = status.displayed;
+    let operation = 14;
+    if (status.mode === 'video') {
+        kind = 'video';
+        id = status.displayedVideo;
+        operation = 19;
+    }
+    if (status.mode === 'builtin' || !Number.isInteger(id) || id <= 0 || id > 0x0fffffff) {
+        summaryPreviewState.targetKey = '';
+        summaryPreviewState.loadedKey = '';
+        figure.hidden = true;
+        return;
+    }
+    const name = status.displayedName || '';
+    const key = JSON.stringify([status.storageGeneration, kind, id, name]);
+    summaryPreviewState.targetKey = key;
+    figure.hidden = false;
+    canvas.hidden = summaryPreviewState.loadedKey !== key;
+    if (summaryPreviewState.loadedKey === key && !force) {
+        caption.textContent = '';
+        if (kind === 'video') {
+            caption.textContent = 'First frame';
+        }
+        return;
+    }
+    if (activeMediaTab !== 'summary' || summaryPreviewState.busy || uploading || videoBusy ||
+        galleryBusy || libraryPages.photo.busy || libraryPages.video.busy) {
+        return;
+    }
+    if (status.storageReady === false) {
+        caption.textContent = 'Preview unavailable';
+        return;
+    }
+    if (!force && summaryPreviewState.attemptKey === key && Date.now() < summaryPreviewState.retryAfter) {
+        return;
+    }
+    summaryPreviewState.busy = true;
+    summaryPreviewState.attemptKey = key;
+    summaryPreviewState.retryAfter = Date.now() + SUMMARY_PREVIEW_RETRY_MS;
+    figure.setAttribute('aria-busy', 'true');
+    caption.textContent = 'Loading preview…';
+    try {
+        const preview = await libraryRequest(operation, id);
+        if (summaryPreviewState.targetKey !== key || activeMediaTab !== 'summary') {
+            return;
+        }
+        renderLibraryPreview(canvas, preview);
+        canvas.setAttribute('aria-label', name + ' preview');
+        canvas.hidden = false;
+        caption.textContent = '';
+        if (kind === 'video') {
+            caption.textContent = 'First frame';
+        }
+        summaryPreviewState.loadedKey = key;
+    } catch (error) {
+        if (summaryPreviewState.targetKey === key && activeMediaTab === 'summary') {
+            caption.textContent = 'Preview unavailable';
+            canvas.hidden = summaryPreviewState.loadedKey !== key;
+        }
+    } finally {
+        summaryPreviewState.busy = false;
+        figure.setAttribute('aria-busy', 'false');
+    }
 }
 
 /**
@@ -2150,7 +2250,7 @@ for (const kind of ['photo', 'video']) {
     document.getElementById(kind + '-previous').addEventListener('click', () => changeLibraryPage(kind, false));
     document.getElementById(kind + '-next').addEventListener('click', () => changeLibraryPage(kind, true));
 }
-document.getElementById('summary-refresh').addEventListener('click', () => refreshSummary(true));
+document.getElementById('summary-refresh').addEventListener('click', () => refreshSummary(true, true));
 document.getElementById('display-settings-save').addEventListener('click', applyDisplaySettings);
 document.getElementById('slideshow-save').addEventListener('click', applySlideshow);
 updateVideoControls();
