@@ -25,7 +25,12 @@ DEFAULT_OUTPUT_FOLDER = "imagesVideos"
 
 # ------------------------------ Input and scaling ------------------------------
 
+# Parses image conversion paths, sizing, and C header options.
+#
+# @return value - Parsed command-line option namespace.
 def parse_arguments() -> argparse.Namespace:
+
+    # Collect command-line overrides before applying the editable defaults.
     parser = argparse.ArgumentParser(
         description="Convert an image to a C/C++ RGB888 byte-array header"
     )
@@ -40,6 +45,11 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Converts an output name into a valid C identifier.
+#
+# @param name Text to convert into a valid C identifier.
+#
+# @return value - Valid C identifier derived from the supplied name.
 def sanitize_c_identifier(name: str) -> str:
     identifier = re.sub(r"[^A-Za-z0-9_]", "_", name)
     if not identifier or identifier[0].isdigit():
@@ -47,6 +57,14 @@ def sanitize_c_identifier(name: str) -> str:
     return identifier
 
 
+# Resolves the output header path and generated C symbol names.
+#
+# @param input_path Path to the source image or video.
+# @param width Image width in pixels.
+# @param height Image height in pixels.
+# @param output_folder Destination folder for generated headers.
+#
+# @return value - Output header path and generated C identifier derived from the source file.
 def derive_output_names(
     input_path: Path,
     width: int,
@@ -60,6 +78,13 @@ def derive_output_names(
     return header_path, array_name
 
 
+# Center-crops an image to the requested display aspect ratio.
+#
+# @param image Pillow image to convert or resize.
+# @param target_width Requested output width in pixels.
+# @param target_height Requested output height in pixels.
+#
+# @return value - Image cropped centrally to match the requested output aspect ratio.
 def crop_to_aspect(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
     """Center-crop an image to the requested aspect ratio."""
     source_width, source_height = image.size
@@ -78,6 +103,13 @@ def crop_to_aspect(image: Image.Image, target_width: int, target_height: int) ->
     return image.crop(crop_box)
 
 
+# Loads a photo and resizes its crop to the logical panel dimensions.
+#
+# @param input_path Path to the source image or video.
+# @param target_width Requested output width in pixels.
+# @param target_height Requested output height in pixels.
+#
+# @return value - RGB Pillow image resized to the requested logical dimensions.
 def load_and_resize_image(
     input_path: Path,
     target_width: int,
@@ -94,6 +126,11 @@ def load_and_resize_image(
 
 # ------------------------------ RGB888 conversion ------------------------------
 
+# Serializes image pixels in the RGB byte order expected by the firmware.
+#
+# @param image Pillow image to convert or resize.
+#
+# @return value - Row-major RGB888 bytes with one red, green and blue byte per pixel.
 def image_to_rgb888_bytes(image: Image.Image) -> bytes:
     """Return row-major RGB888 bytes: red, green, blue for each pixel."""
     return image.tobytes()
@@ -101,6 +138,13 @@ def image_to_rgb888_bytes(image: Image.Image) -> bytes:
 
 # ------------------------------ C header output ------------------------------
 
+# Writes the converted image bytes and dimensions as a C header.
+#
+# @param output_path Path of the generated C header.
+# @param variable_name C identifier used for the generated image array.
+# @param width Image width in pixels.
+# @param height Image height in pixels.
+# @param rgb888_data Row-major RGB888 pixel bytes to write into the generated header.
 def write_rgb888_header(
     output_path: Path,
     variable_name: str,
@@ -134,6 +178,9 @@ def write_rgb888_header(
 
 # ------------------------------------ Main ------------------------------------
 
+# Runs image conversion and reports the generated header.
+#
+# @return 0 - Conversion completed successfully; failures raise an exception.
 def main() -> int:
     arguments = parse_arguments()
     input_path = Path(arguments.input)

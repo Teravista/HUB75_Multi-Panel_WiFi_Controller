@@ -10,6 +10,13 @@ endif()
 
 file(READ "${ENV_FILE}" ENV_CONTENT)
 
+# Reads a required nonempty setting from the local environment file.
+#
+# Missing or empty values stop generation. The extracted value is published in
+# the caller's scope for validation and escaped header substitution.
+#
+# @param key Exact environment variable name to look up.
+# @param output_variable Caller-scope variable receiving the extracted value.
 function(read_env_value key output_variable)
     string(REGEX MATCH "(^|\n)[ \t]*${key}=([^\r\n]*)" env_match "${ENV_CONTENT}")
     if(NOT env_match)

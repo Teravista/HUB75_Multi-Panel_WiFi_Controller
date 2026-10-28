@@ -1,5 +1,5 @@
 imageio
+imageio-ffmpeg
 numpy
 Pillow
 python-dotenv
-imageio-ffmpeg

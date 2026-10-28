@@ -47,7 +47,9 @@ complete incoming payload.
 Named Python uploads use magic `H75N` for bulk chunks or `H75n` for legacy-sized chunks.
 After the 36-byte request, the Pico replies `NAME 64\n`. Send a 64-byte NUL-terminated,
 zero-padded ASCII name, then wait for `READY 6144\n` or `READY\n`. The name is saved with
-the library item; legacy `H75V`/`H75M` requests remain supported.
+the library item; legacy `H75V`/`H75M` requests remain supported. Names come from
+`--name`, the top-level default or the source filename. TCP does not send the separate
+maximum-duration setting; saved clip duration follows frame count and FPS.
 
 1. Send the descriptor and optional name; wait for the negotiated `READY` reply.
 2. Send one negotiated chunk and wait for `NEXT\n` before sending another.

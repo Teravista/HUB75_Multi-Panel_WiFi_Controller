@@ -136,43 +136,49 @@ target_compile_definitions(hub75 PRIVATE HUB75_VERBOSE_LOGS=$<BOOL:${HUB75_VERBO
 target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
     ${WEB_PAGE_HEADER}
-    ${CMAKE_CURRENT_LIST_DIR}/src/http/HttpMediaUploadClass.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/http/webServer.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/http/httpRequest.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/http/api/httpControl.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rgb565.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/mainEntry.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/display/cpuFrame.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/display/FrameRateTrackerClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/display/PanelRendererClass.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/display/RenderPipelineClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameBufferControllerClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameReceiverClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/PhotoPersistenceClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaMetadata.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/jpegFrameDecoder.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/third_party/tjpgd/tjpgd.c
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaTransfer.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaPlayerClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaLibraryClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/JsonWriterClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/network/TcpVideoUploadClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/network/WifiConnectionClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/network/NetworkServicesClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/network/networkCorePico.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/core/Core1SchedulerClass.cpp
+
+    ${CMAKE_CURRENT_LIST_DIR}/src/core/Core1SchedulerClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/core/serialLog.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/JpegInputPipeClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/jpegWorkerPico.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/sd/PlaybackPrefetchClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryStorage.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/sd/storageCrc32.cpp
-        ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp
-        )
+
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/FrameRateTrackerClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/PanelRendererClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/RenderPipelineClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/cpuFrame.cpp
+
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameBufferControllerClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameReceiverClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/NetworkServicesClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/TcpVideoUploadClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/WifiConnectionClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/networkCorePico.cpp
+
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/HttpMediaUploadClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/api/httpControl.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/httpRequest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/webServer.cpp
+
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/JsonWriterClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaLibraryClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/MediaPlayerClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/PhotoPersistenceClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/JpegInputPipeClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/jpegFrameDecoder.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/jpeg/jpegWorkerPico.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaMetadata.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaTransfer.cpp
+
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/PlaybackPrefetchClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryStorage.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/storageCrc32.cpp
+
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rgb565.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/tjpgd/tjpgd.c
+)
 
 # Add the standard library to the build
 target_link_libraries(hub75

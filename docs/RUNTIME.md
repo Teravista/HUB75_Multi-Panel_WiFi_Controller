@@ -1,4 +1,4 @@
-# Runtime ownership
+# Runtime ownership and connectivity
 
 ## Cores and buffers
 
@@ -42,6 +42,23 @@ Storage loss discards failed handles and clears saved-media display state; the b
 fallback remains available. A successful remount reloads that card's library and persisted
 selection before accepting new storage jobs. Worker completion precedes any buffer or
 session invalidation.
+
+## Wi-Fi recovery
+
+Local networking uses `no-wifi`, `wifi-no-tcp` and `ready` states. A usable link/IP
+advances to listener startup; all required listeners must be running before service
+readiness. Packet reachability is reported separately as `ready-unverified` while
+fresh gateway replies or incoming traffic are awaited. Internet access is not required.
+
+Connection attempts wait up to 15 seconds. A timed-out association or DHCP attempt
+keeps the radio alive for a further 30-second grace period to adopt a late address.
+SDK error `-2` means `PICO_ERROR_TIMEOUT`, distinct from CYW43's `NONET` link value.
+
+Gateway TCP probes are diagnostic. Fresh ARP replies or recent incoming IPv4 traffic
+can confirm the LAN path even when the gateway filters the TCP port. Debounced loss
+of packet reachability or loss of the station link/IP stops services and schedules
+recovery. Wi-Fi restarts retain the SD mount, cache and playback position; SD recovery
+leaves the radio and network listeners running.
 
 ## Upload and rendering ownership
 

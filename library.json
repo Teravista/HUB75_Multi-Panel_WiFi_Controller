@@ -26,7 +26,7 @@
     "frameworks": "arduino",
     "platforms": "raspberrypi",
     "build": {
-        "srcDir": "HUB75DriverSrc/src",
+        "srcDir": "third_party/hub75/src",
         "srcFilter": "+<*>"
     },
     "headers": "hub75.hpp"

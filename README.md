@@ -4,7 +4,6 @@
 
 | Topic | Guide |
 | --- | --- |
-| HTTP routes, custom controllers and resumable uploads | [Controller API](docs/HTTP-API.md) |
 | Browser tabs, upload options, placement and previews | [Web interface](web/README.md) |
 | Saved collections, slideshow, settings and pagination | [Media library](docs/MEDIA-LIBRARY.md) |
 | Python uploads, transfer messages and failure handling | [Video uploads](docs/VIDEO-UPLOAD.md) |
@@ -12,7 +11,8 @@
 | Binary descriptors and container compatibility | [Media metadata](docs/MEDIA-METADATA.md) |
 | Compressed frame layout and bounded decoder | [JPEG video](docs/JPEG-VIDEO.md) |
 | Frame buffers, scan isolation and FPS | [Display](docs/DISPLAY.md) |
-| Core ownership, network lifecycle and upload handoffs | [Runtime](docs/RUNTIME.md) |
+| Core ownership, connectivity, recovery and serial status | [Runtime](docs/RUNTIME.md) |
+| Custom controller routes and examples | [HTTP API](docs/HTTP-API.md) |
 
 <table>
   <tr>
@@ -46,6 +46,7 @@
   - [Flashing Your Own Image or Animation](#flashing-your-own-image-or-animation)
   - [Python Utility Setup](#python-utility-setup)
   - [Uploading an Image Over TCP](#uploading-an-image-over-tcp)
+  - [Uploading a Video to microSD](#uploading-a-video-to-microsd)
 - [4. Implementation Details / Architecture](#4-implementation-details--architecture)
   - [Source folders](#source-folders)
   - [Program Flow](#program-flow)
@@ -84,13 +85,14 @@ address identify the local connection; browser and Python uploaders save content
 display and restoration after restart.
 
 ## Ways to Get Content Onto the Panel
-Python tools prepare and upload content:
+These Python scripts handle content:
 - `imageToRGB888ArrayConverter.py` / `mp4ToRGB888ArrayConverter.py` - convert an image or video into a C header with a byte array, included via `defines.h` under the `USE_ANIMATION` flag. This becomes the default image/animation flashed into firmware.
 - `sendImageOverTCP.py` - uploads a full photo over TCP, or a compact fitted photo through HTTP.
-- `sendVideoOverTCP.py` - prepares and uploads SD-backed videos with format, FPS, duration, loop and name options.
+- `sendVideoOverTCP.py` - converts and uploads a video to microSD, waits for verification, then starts looping playback.
 
-Conversion/upload scripts expose defaults at the top and command-line overrides.
-See the [API guide](docs/HTTP-API.md) for HTTP routes and usage.
+Scripts accept settings at the top of each file and command-line overrides. The built-in
+web page uploads photos and videos, manages saved collections and controls display
+settings; see [web usage](web/README.md).
 
 # 2. Hardware / Wiring
 
@@ -132,8 +134,9 @@ that generated file; a normal build recreates it when it is missing or when `.en
 changes. The Python upload script reads `PICO_IP` and `PICO_PORT` directly from the same
 `.env` file.
 
-If the connection fails, the Wi-Fi icon shows red and network uploads are unavailable.
-Saved media or the built-in fallback continues displaying while the controller retries.
+If the connection fails, the WiFi icon shows red and network uploads are unavailable.
+Saved media can still load from SD. Network connection/retry work runs on Core 1 while
+Core 0 retains SD playback and the panel scanner.
 
 ## Build & Flash Quickstart
 Configure `.env` as described above before the first build. This project is built and
@@ -141,6 +144,17 @@ flashed using VS Code with the [Raspberry Pi Pico
 extension](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico).
 Import the project through the extension, then use its UI buttons to compile and
 run/flash - no manual CLI setup required.
+
+With CMake and Ninja on PATH, the `web-upload` preset selects `pico2_w` and
+`MinSizeRel`. SDK/toolchain discovery follows the project configuration:
+
+```powershell
+cmake --preset web-upload
+cmake --build --preset web-upload
+```
+
+Flash `build/web-upload/hub75.uf2` to the board. `HUB75_VERBOSE_LOGS` defaults to
+`OFF`; pass `-DHUB75_VERBOSE_LOGS=ON` during configuration for detailed diagnostics.
 
 ## USE_ANIMATION flag
 The `USE_ANIMATION` flag in `src/config/defines.h` controls what gets built into flash:
@@ -165,9 +179,25 @@ python -m pip install -r utilityScripts/requirements.txt
 4. Set your image path (`IMAGE_PATH`) in `utilityScripts/sendImageOverTCP.py`, then run the script.
 5. The new image should be uploaded and displayed by the panel.
 
-Completed photo uploads are saved to microSD. Python video uploads use TCP port 5002 and
-retain their format, frame rate and loop setting after restart. If no valid saved
-content is available, the controller uses the flashed fallback.
+With a usable microSD card, completed TCP photo uploads save automatically. The raw
+photo `ACK` confirms receipt into RAM; SD publication completes in the foreground. Use
+the browser's saved-and-verified confirmation when durable-save acknowledgement is
+required.
+
+## Uploading a Video to microSD
+
+To upload a clip from Python:
+
+```powershell
+python utilityScripts/sendVideoOverTCP.py "clip.mp4" --fps 30 --seconds 10
+```
+
+The video service uses TCP port 5002. Configure its target IP in the script or with
+`--ip`. The uploader prepares the selected RGB565/RGB888/JPEG encoding, sends bounded
+chunks and waits for **Saved and verified**. The Pico selects the saved clip for looping
+playback and restores the selection after restart. `--seconds` limits source conversion;
+`--output "clip.h75v"` retains the prepared file for later uploads. See [video
+usage](docs/VIDEO-UPLOAD.md) for settings, formats and failure handling.
 
 # 4. Implementation Details / Architecture
 
@@ -175,33 +205,35 @@ content is available, the controller uses the flashed fallback.
 
 ```text
 src/
-  config/       Network, panel, storage and filesystem configuration
-  display/      CPU frame, rendering and display helpers
-  network/      Wi-Fi connection and TCP photo/video uploads
-  http/         Request parsing, web server and browser media uploads
-  sd/           MemoryManager, SPI storage and checksums
+  config/       Application, network, storage and filesystem configuration
+  core/         Shared-core scheduling and serial logging
+  display/      CPU frame, rendering, overlays, FPS and submission implementations
+  network/      Wi-Fi state machine, network worker and TCP uploads
+  http/         HTTP server, request parsing and browser upload sessions
+    api/        Controller commands and API discovery information
+  sd/           MemoryManager, card access, file storage, CRC and prefetch
   media/        Metadata, playback, libraries and slideshow
-    jpeg/       Bounded JPEG decoder wrapper
+    jpeg/       JPEG decoder wrapper, input pipe and worker
 third_party/    Bundled HUB75, SD filesystem and JPEG dependencies
 ```
 
-Implementation files live in each module; declarations belong in its `include/`
-subfolder. `mainEntry.cpp` contains startup and the main loop. Include paths are
-relative to `src/`, with `src/config/` supplying the SDK's `ffconf.h` and `lwipopts.h`
-names.
+Each module keeps its `.cpp` implementations directly in its folder and its `.hpp`
+declarations in an `include/` subfolder. Nested modules such as `media/jpeg/` and
+`http/api/` follow the same layout.
+
+Application headers use paths relative to `src/`, such as
+`network/include/WifiConnectionClass.hpp` and `sd/include/MemoryManagerClass.hpp`. The
+separate `config/` include directory also supplies the `ffconf.h` and `lwipopts.h` names
+expected by the filesystem and network libraries. The main entry point remains at the
+repository root; the panel driver remains in `third_party/hub75/`.
 
 ## Program Flow
 
-Startup initializes HUB75, prepares a fallback frame, mounts storage and restores the
-saved library selection where available. It then attempts the Wi-Fi connection and
-starts the HTTP and TCP services.
-
-Core 1 advances Wi-Fi and HTTP/TCP transport work and accepts JPEG decode jobs when idle.
-Core 0 handles upload/save jobs, library selection, local JPEG fallback and video playback,
-then prepares and submits frames under shared-frame ownership. Listener changes use
-brief foreground handoffs. Wi-Fi retries retain the mounted SD session and playback
-position; SD loss and remounting do not restart the network services.
-See [runtime ownership and handoffs](docs/RUNTIME.md).
+Core 0 starts the panel, restores selected SD media or the built-in fallback, then owns
+frame preparation, storage jobs and publication. Core 1 owns Wi-Fi and upload transports
+and can decode JPEG when its foreground network work is idle. Uploads hold shared media
+resources until save, verification or cancellation. See [runtime ownership and
+recovery](docs/RUNTIME.md).
 
 ## Driver Overview
 
@@ -212,19 +244,9 @@ image preparation can pause while the scanner displays the last submitted frame.
 
 ## WiFi State Machine
 
-`WifiConnection` advances `NoWifi`, `WifiNoTcp` and `Ready` on Core 1.
-
-- `NoWifi`: retries radio initialization and association after the configured delay.
-  A timed-out join receives a grace period so a late DHCP address can be adopted.
-- `WifiNoTcp`: has a station address and retries binding the HTTP, photo and video
-  listeners until all required services are available.
-- `Ready`: accepts uploads and checks station/link health and listener availability.
-  Lost links, repeated radio-response failures or debounced loss of fresh gateway
-  replies and incoming traffic stop services and schedule recovery.
-
-A periodic TCP connection to the local gateway is diagnostic. A filtered or closed
-gateway port alone does not stop active upload services. Fresh ARP replies or recent
-incoming traffic verify the local path. No Internet access is required.
+Local networking advances through disconnected, link/IP available and ready service
+states, with packet reachability tracked separately. Wi-Fi and SD recover independently.
+See [connection states and recovery](docs/RUNTIME.md#wi-fi-recovery).
 
 # 5. Credits / License
 
@@ -236,11 +258,3 @@ incoming traffic verify the local path. No Internet access is required.
 This project's original code is licensed under the [MIT License](LICENSE). Vendored and
 derived components remain subject to their respective licenses; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-Video upload supports RGB565, RGB888 and indexed JPEG, with JPEG quality 85 by default.
-See [JPEG video and compact storage](docs/JPEG-VIDEO.md).
-
-The local web page groups summary controls and saved photo/video libraries into three
-tabs, with ten-item pages, previews, selection/deletion and slideshows. Uploads support
-fit/crop or draggable zoom while storing only visible image data. See [web
-interface](web/README.md) and [media placement](web/README.md#upload-placement).

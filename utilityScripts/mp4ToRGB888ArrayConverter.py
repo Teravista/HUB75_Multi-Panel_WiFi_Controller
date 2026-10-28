@@ -43,7 +43,12 @@ import numpy as np
 from PIL import Image
 
 
-def parse_args() -> argparse.Namespace:
+# Parses video conversion paths, frame limits, and output options.
+#
+# @return value - Parsed command-line option namespace.
+def parse_arguments() -> argparse.Namespace:
+
+    # Collect command-line overrides before applying the editable defaults.
     parser = argparse.ArgumentParser(description="Convert MP4 to C header animation array")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Input MP4 file")
     parser.add_argument(
@@ -66,6 +71,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Resolves the animation header path and generated C symbol names.
+#
+# @param input_path Path to the source image or video.
+# @param width Image width in pixels.
+# @param height Image height in pixels.
+# @param output_folder Destination folder for generated headers.
+#
+# @return value - Output header path and generated C identifier derived from the source file.
 def derive_output_names(
     input_path: Path,
     width: int,
@@ -83,6 +96,13 @@ def derive_output_names(
     return header_path, array_name
 
 
+# Center-crops a video frame to the requested display aspect ratio.
+#
+# @param img Pillow image to crop.
+# @param target_w Requested output width in pixels.
+# @param target_h Requested output height in pixels.
+#
+# @return value - Image cropped centrally to match the requested output aspect ratio.
 def crop_to_aspect(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     """Center-crop image to target aspect ratio."""
     w, h = img.size
@@ -103,6 +123,11 @@ def crop_to_aspect(img: Image.Image, target_w: int, target_h: int) -> Image.Imag
     return img.crop((left, top, right, bottom))
 
 
+# Converts an output name into a valid C identifier.
+#
+# @param name Text to convert into a valid C identifier.
+#
+# @return value - Valid C identifier derived from the supplied name.
 def sanitize_c_identifier(name: str) -> str:
     identifier = re.sub(r"[^A-Za-z0-9_]", "_", name)
     if not identifier or identifier[0].isdigit():
@@ -110,12 +135,24 @@ def sanitize_c_identifier(name: str) -> str:
     return identifier
 
 
+# Selects the Lanczos resampling constant supported by Pillow.
+#
+# @return value - Lanczos resampling constant supported by the installed Pillow version.
 def get_resample_lanczos() -> int:
     if hasattr(Image, "Resampling"):
         return Image.Resampling.LANCZOS
     return Image.LANCZOS
 
 
+# Crops and resizes a video frame for the logical panel.
+#
+# @param frame_rgb Source frame as an RGB NumPy array.
+# @param width Image width in pixels.
+# @param height Image height in pixels.
+# @param trim_bottom Number of source rows to remove from the bottom before resizing.
+# @param resample_lanczos Pillow Lanczos resampling constant for the installed Pillow version.
+#
+# @return value - Cropped and resized RGB NumPy frame.
 def preprocess_frame(
     frame_rgb: np.ndarray,
     width: int,
@@ -141,11 +178,28 @@ def preprocess_frame(
     return np.asarray(img, dtype=np.uint8)
 
 
+# Serializes a prepared frame in the firmware's RGB byte order.
+#
+# @param processed_frame Resized RGB NumPy frame to flatten into bytes.
+#
+# @return value - Flattened row-major RGB888 bytes for the processed frame.
 def processed_frame_to_bytes(processed_frame: np.ndarray) -> bytes:
     """Return row-major RGB888 bytes: red, green, blue for each pixel."""
     return processed_frame.tobytes()
 
 
+# Extracts and converts video frames at the requested rate and duration.
+#
+# @param input_path Path to the source image or video.
+# @param width Image width in pixels.
+# @param height Image height in pixels.
+# @param target_fps Requested output frame rate in frames per second.
+# @param frame_step Source frame sampling stride.
+# @param max_frames Maximum number of frames to extract; zero disables this limit.
+# @param trim_bottom Number of source rows to remove from the bottom before resizing.
+#
+# @return tuple - Processed RGB888 frame arrays, source FPS and effective source sampling
+#                 stride.
 def extract_processed_frames(
     input_path: Path,
     width: int,
@@ -198,6 +252,15 @@ def extract_processed_frames(
     return frames, src_fps, effective_step
 
 
+# Writes converted animation frames and timing metadata as a C header.
+#
+# @param output_path Path of the generated C header.
+# @param input_path Path to the source image or video.
+# @param var_name C identifier used for the generated video array.
+# @param width Image width in pixels.
+# @param height Image height in pixels.
+# @param delay_ms Delay between generated animation frames, in milliseconds.
+# @param frames Prepared frames or number of frames described by the media header.
 def write_c_header(
     output_path: Path,
     input_path: Path,
@@ -251,8 +314,11 @@ def write_c_header(
     )
 
 
+# Runs video-to-header conversion and reports the generated animation.
+#
+# @return 0 - Conversion completed successfully; failures raise an exception.
 def main() -> int:
-    args = parse_args()
+    args = parse_arguments()
     input_path = Path(args.input)
 
     if not input_path.exists():
