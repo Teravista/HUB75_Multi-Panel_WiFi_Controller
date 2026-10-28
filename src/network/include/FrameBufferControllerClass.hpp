@@ -1,5 +1,5 @@
 #pragma once
-#include "display/include/displayHelpers.hpp"
+#include "display/include/PanelRendererClass.hpp"
 #include <cstddef>
 #include <cstdint>
 #include "lwip/tcp.h"
@@ -21,7 +21,7 @@
 class FrameBufferController {
 public:
     // Connects frame reception to the CPU framebuffer and display helpers.
-    explicit FrameBufferController(DisplayHelpers* helpers, unsigned char* buffer, bool holdCompletedFrame = false);
+    explicit FrameBufferController(PanelRenderer* helpers, unsigned char* buffer, bool holdCompletedFrame = false);
 
     // Copies framebuffer pixels into RGB888 output for saving.
     bool ReadFramePixels(uint8_t* pixels, size_t bytes, size_t offset) const;
@@ -94,7 +94,7 @@ public:
 
 private:
     // Converts stored pixels and places them in the CPU framebuffer.
-    template <PixelFormat Format> static bool MapStoredPixels(DisplayHelpers& helpers, uint8_t* buffer, const uint8_t* bytes, size_t count, size_t offset, uint16_t width, uint16_t height, uint16_t left, uint16_t top);
+    template <PixelFormat Format> static bool MapStoredPixels(PanelRenderer& helpers, uint8_t* buffer, const uint8_t* bytes, size_t count, size_t offset, uint16_t width, uint16_t height, uint16_t left, uint16_t top);
 
     // Returns elapsed boot time in milliseconds for transport deadlines.
     static uint32_t GetPhotoUploadTimeMs(void);
@@ -108,7 +108,7 @@ private:
 
     static constexpr size_t kAckBytes = sizeof(UPLOAD_ACK_MESSAGE) - 1;
 
-    DisplayHelpers* m_displayHelpers;
+    PanelRenderer* m_panelRenderer;
     unsigned char* m_frameBuffer;
     FrameReceiver m_receiver;
     MediaMetadata m_metadata = MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);

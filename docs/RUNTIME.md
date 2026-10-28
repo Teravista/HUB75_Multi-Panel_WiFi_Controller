@@ -82,3 +82,17 @@ reported as events. Expected busy/unavailable storage queries are quiet; identic
 storage failures are limited to one report per 15 seconds, while changed failures
 are reported immediately. `HUB75_VERBOSE_LOGS=1` enables extra startup/listener and
 storage diagnostics, including the optional serial startup delay.
+
+## Prepared-frame ownership
+
+The foreground loop passes borrowed preparation/submission callbacks to
+`RenderPipeline`. Preparation adopts completed uploads, persists a new live photo
+and advances saved playback before drawing overlays. Submission updates the
+connection overlay and counts a distinct video revision only after handing the
+prepared frame to HUB75.
+
+Source ownership stays held while the scanner is busy, and foreground maintenance
+continues between readiness checks. A listener handoff or SD availability change
+resets pending submission before ownership or saved selection changes. A scanner
+timeout releases the CPU source so uploads can proceed, without resetting the
+independent panel scanner.

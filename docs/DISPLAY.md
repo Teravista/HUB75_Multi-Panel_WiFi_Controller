@@ -47,3 +47,21 @@ Summary reports static allocations, live heap allocations and reserved core stac
 separately. Used RAM is their sum; free RAM is total controller SRAM minus that sum.
 The figures include CPU/driver buffers and runtime allocations. Reserved stacks count
 their full configured space, rather than measuring each stack's current usage.
+
+## Rendering boundary
+
+`PanelRenderer` maps logical image coordinates into the physical panel chain and
+renders the Wi-Fi indicator/IP label through that same mapping. The IP label uses
+a compact bitmap font and a backing sized to its text. A small saved background
+patch restores the underlying image when the address changes or Wi-Fi disconnects.
+Callers mark a new source frame so the patch is captured from the new image.
+
+`RenderPipeline` separates synchronous frame preparation from driver submission.
+It claims the CPU framebuffer once, lets preparation overlap the preceding scan,
+and retains the prepared pixels until the scanner accepts them. Pending frames
+are not prepared twice. A 250 ms scanner timeout releases ownership and waits for
+scanner recovery before preparing again; the pipeline does not reset DMA/PIO.
+
+`graphicsTypes.hpp` selects the configured CPU graphics type. `cpuFrame.hpp`
+declares packing, byte-order conversion and RGB read/write helpers; their
+implementations remain in `cpuFrame.cpp`.
