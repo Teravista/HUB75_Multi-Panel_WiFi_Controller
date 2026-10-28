@@ -5,23 +5,9 @@
 #include "sd/include/storageCrc32.hpp"
 #include <cstdio>
 #include <cstring>
-#define HTTP_OP_UPLOAD_RESUME 20
 #define HTTP_RESUME_TOKEN_BYTES 4
 #define HTTP_UPLOAD_HEADER_CRC_INITIAL_U 0xffffffffu
 
-#define HTTP_OP_DISPLAY_SETTINGS_SET 21
-#define HTTP_OP_MEMORY_STATUS 23
-#define HTTP_OP_PHOTOS_LIST 10
-#define HTTP_OP_PHOTO_DELETE 13
-#define HTTP_OP_PHOTO_PREVIEW 14
-#define HTTP_OP_PHOTO_SHOW 11
-#define HTTP_OP_PLAYBACK_STATUS 15
-#define HTTP_OP_SLIDESHOW_SET 12
-#define HTTP_OP_UPLOAD_PHOTO_BEGIN 5
-#define HTTP_OP_VIDEOS_LIST 16
-#define HTTP_OP_VIDEO_DELETE 18
-#define HTTP_OP_VIDEO_PREVIEW 19
-#define HTTP_OP_VIDEO_SHOW 17
 
 /**
     Binds browser media uploads to storage and framebuffer ownership.
@@ -521,7 +507,9 @@ HttpMediaUpload::HandleLibraryRequest (
     bool success;
 
     handled = (operation >= HTTP_OP_PHOTOS_LIST && operation <= HTTP_OP_VIDEO_PREVIEW) ||
-              operation == HTTP_OP_DISPLAY_SETTINGS_SET || operation == HTTP_OP_MEMORY_STATUS;
+              operation == HTTP_OP_DISPLAY_SETTINGS_SET || operation == HTTP_OP_MEMORY_STATUS ||
+              operation == HTTP_OP_FPS_LIMIT_SET || operation == HTTP_OP_BRIGHTNESS_SET ||
+              operation == HTTP_OP_SLIDESHOW_STOP;
     if (!handled) {
         return false;
     }
@@ -574,6 +562,18 @@ HttpMediaUpload::HandleLibraryRequest (
         break;
     case HTTP_OP_DISPLAY_SETTINGS_SET:
         success = library_->SetDisplaySettings(id, offset, GetUploadTimeMs()) &&
+                  library_->PlaybackStatus(response_, sizeof(response_));
+        break;
+    case HTTP_OP_FPS_LIMIT_SET:
+        success = !offset && library_->SetDisplaySettings(id, library_->GetBrightness(), GetUploadTimeMs()) &&
+                  library_->PlaybackStatus(response_, sizeof(response_));
+        break;
+    case HTTP_OP_BRIGHTNESS_SET:
+        success = !offset && library_->SetDisplaySettings(library_->GetMaxFps(), id, GetUploadTimeMs()) &&
+                  library_->PlaybackStatus(response_, sizeof(response_));
+        break;
+    case HTTP_OP_SLIDESHOW_STOP:
+        success = !id && !offset && library_->SetSlideshow(false, library_->GetSlideshowInterval()) &&
                   library_->PlaybackStatus(response_, sizeof(response_));
         break;
     case HTTP_OP_MEMORY_STATUS:

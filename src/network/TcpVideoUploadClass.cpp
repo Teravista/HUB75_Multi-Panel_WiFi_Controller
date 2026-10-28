@@ -250,7 +250,8 @@ TcpVideoUpload::Receive (
         }
         return server->Cancel();
     }
-    accepting = server->phase_ == Phase::Header || server->phase_ == Phase::Body;
+    accepting = server->phase_ == Phase::Header || server->phase_ == Phase::Name ||
+                server->phase_ == Phase::Body;
     if (!accepting || packet->tot_len > server->needed_ - server->received_) {
         pbuf_free(packet);
         return server->Cancel();
@@ -528,6 +529,8 @@ TcpVideoUpload::UpdateTransport (
     work outside it. The stop-and-wait protocol applies backpressure: a chunk is
     acknowledged only after its append succeeds. VERIFY precedes incremental SD
     readback; SAVED is sent only after the final checked header is published.
+    Named requests first receive a separate fixed-size ASCII label; no storage is opened
+    until its terminator and characters are validated. Legacy requests retain their handshake.
     Network shutdown defers cancellation cleanup here without entering a dead radio.
 */
 void
@@ -541,7 +544,12 @@ TcpVideoUpload::UpdateStorage (
     bool bulk;
     bool complete;
     bool opened;
-    uint32_t checksum;
+    bool namedBulk;
+    bool named;
+    bool nameComplete;
+    const uint8_t* nameEnd = nullptr;
+    const uint8_t* nameCharacter = nullptr;
+    const char* videoName = nullptr;
 
     if (!enabled_) {
         if (external_) {
@@ -559,7 +567,7 @@ TcpVideoUpload::UpdateStorage (
     phase = phase_;
     full = received_ == needed_;
     pending = reply_ != nullptr;
-    if (phase == Phase::Header && full) {
+    if ((phase == Phase::Header || phase == Phase::Name) && full && !pending) {
         phase_ = Phase::Opening;
     }
     if (phase == Phase::Body && full && !pending) {
@@ -586,10 +594,15 @@ TcpVideoUpload::UpdateStorage (
         FinishJob("ERR STORAGE\n");
         return;
     }
+    // Negotiate an optional name before opening storage or claiming the framebuffer.
     if (phase == Phase::Header && full) {
-        bulk = std::memcmp(receive_, MediaTransfer::BulkRequestMagic, MEDIA_MAGIC_BYTES) == 0;
-        if (bulk) {
+        namedBulk = std::memcmp(receive_, MediaTransfer::NamedBulkRequestMagic, MEDIA_MAGIC_BYTES) == 0;
+        named = namedBulk || std::memcmp(receive_, MediaTransfer::NamedRequestMagic, MEDIA_MAGIC_BYTES) == 0;
+        bulk = namedBulk || std::memcmp(receive_, MediaTransfer::BulkRequestMagic, MEDIA_MAGIC_BYTES) == 0;
+        if (bulk || named) {
             std::memcpy(receive_, "H75M", MEDIA_MAGIC_BYTES);
+        }
+        if (bulk) {
             chunkBytes_ = MediaTransfer::BulkChunkBytes;
         } else {
             chunkBytes_ = MediaTransfer::ChunkBytes;
@@ -599,17 +612,53 @@ TcpVideoUpload::UpdateStorage (
             FinishJob("ERR METADATA\n");
             return;
         }
+        payloadChecksum_ = MediaMetadataCodec::ReadUnsigned32LittleEndian(receive_ + MediaMetadataCodec::HeaderBytes);
+        if (named) {
+            if (!libraryUploads_) {
+                FinishJob("ERR NAME\n");
+                return;
+            }
+            cyw43_arch_lwip_begin();
+            if (phase_ != Phase::Canceled) {
+                phase_ = Phase::Name;
+                received_ = 0;
+                needed_ = MemoryManager::PhotoNameBytes;
+                progress_ = GetVideoUploadTimeMs();
+                Reply("NAME 64\n");
+            }
+            cyw43_arch_lwip_end();
+            return;
+        }
+    }
+
+    // Validate the complete bounded ASCII name before publishing it in library metadata.
+    if ((phase == Phase::Header && full) || (phase == Phase::Name && full && !pending)) {
+        nameComplete = phase == Phase::Name;
+        videoName = "Uploaded video";
+        if (nameComplete) {
+            nameEnd = static_cast<const uint8_t*>(std::memchr(receive_, 0, MemoryManager::PhotoNameBytes));
+            if (!nameEnd || nameEnd == receive_) {
+                FinishJob("ERR NAME\n");
+                return;
+            }
+            for (nameCharacter = receive_; nameCharacter < nameEnd; ++nameCharacter) {
+                if (*nameCharacter < ASCII_SPACE || *nameCharacter > ASCII_PRINTABLE_MAX) {
+                    FinishJob("ERR NAME\n");
+                    return;
+                }
+            }
+            videoName = reinterpret_cast<const char*>(receive_);
+        }
         if (memory_.IsMediaSaveActive() || !upload_.TryBeginExternalMedia()) {
             FinishJob("ERR BUSY\n");
             return;
         }
         external_ = true;
-        checksum = MediaMetadataCodec::ReadUnsigned32LittleEndian(receive_ + MediaMetadataCodec::HeaderBytes);
         transactionId_ = 0;
         if (libraryUploads_) {
-            opened = memory_.BeginLibraryVideo(metadata_, checksum, "Uploaded video", 0, transactionId_);
+            opened = memory_.BeginLibraryVideo(metadata_, payloadChecksum_, videoName, 0, transactionId_);
         } else {
-            opened = memory_.BeginMediaSave(metadata_, checksum);
+            opened = memory_.BeginMediaSave(metadata_, payloadChecksum_);
         }
         if (!opened) {
             FinishJob("ERR STORAGE\n");
@@ -622,7 +671,7 @@ TcpVideoUpload::UpdateStorage (
             received_ = 0;
             needed_ = size_t(std::min(uint64_t(chunkBytes_), total_));
             progress_ = GetVideoUploadTimeMs();
-            if (bulk) {
+            if (chunkBytes_ == MediaTransfer::BulkChunkBytes) {
                 Reply("READY 6144\n");
             } else {
                 Reply("READY\n");

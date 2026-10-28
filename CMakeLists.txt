@@ -139,6 +139,7 @@ target_sources(hub75 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/http/HttpMediaUploadClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/http/webServer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/http/httpRequest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/http/api/httpControl.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rgb565.cpp
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp

@@ -4,6 +4,7 @@
 #include "webPage.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "http/include/httpRequest.hpp"
+#include "http/api/include/httpApiInfo.hpp"
 #include "lwip/ip4_addr.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include "config/defines.h"
 
+#define HTTP_RESUME_MESSAGE_BYTES 13
 #define HTTP_LISTEN_PORT 80
 #define HTTP_RESPONSE_HEADER_BYTES 192
 #define HTTP_SEND_CHUNK_BYTES 512
@@ -378,14 +380,16 @@ RejectHttpRequest (
 } // RejectHttpRequest
 
 /**
-    Routes an HTTP header to the page, raw-photo receiver or video mailbox.
+    Routes a complete HTTP header to its page or API handler.
 
-    Checks the request against the PCB's local address before borrowing a page response
-    or claiming the shared photo receiver or video mailbox. Conflicting claims are rejected.
-    Routing performs no SD I/O; completed frames are saved later by the main loop.
+    Validates the completed header against the local address, then selects the page, API
+    discovery, deferred control/upload path or legacy raw-photo receiver. Deferred operations
+    reserve the upload controller's bounded input buffer and encode the request for foreground
+    processing. Conflicting ownership is rejected immediately; filesystem work remains outside
+    this network-context routing function.
 
-    @return true - A page response, photo transaction or bounded video message was prepared.
-    @return false - The response header or local address could not be prepared.
+    @return true - A response or deferred request was prepared successfully.
+    @return false - The request could not be queued or the response exceeded its buffer.
 */
 bool
 RouteHttpRequest (
@@ -394,6 +398,9 @@ RouteHttpRequest (
 {
     char localHost[IPV4_TEXT_BYTES];
     HttpRequest::Result result;
+    const HttpControl::Command* command = nullptr;
+    uint8_t* input = nullptr;
+    uint32_t sessionId;
 
     std::memset(localHost, 0, sizeof(localHost));
     if (!ip4addr_ntoa_r(ip_2_ip4(&client.pcb->local_ip), localHost, sizeof(localHost))) {
@@ -406,8 +413,43 @@ RouteHttpRequest (
     if (result.route == HttpRequest::Route::Page) {
         return BuildHttpResponse("200 OK", "text/html; charset=utf-8", WebPage::kHtml, WebPage::kLength);
     }
-
-    // Reserve one protocol message; the foreground coordinator performs SD work later.
+    if (result.route == HttpRequest::Route::ApiInfo) {
+        return BuildHttpResponse("200 OK", "application/json", HttpApiInfo::Json,
+                                 sizeof(HttpApiInfo::Json) - STRING_TERMINATOR_BYTES);
+    }
+    if (result.route == HttpRequest::Route::Control) {
+        if (!httpUpload) {
+            return RejectHttpRequest(HTTP_STATUS_NOT_FOUND);
+        }
+        if (!httpUpload->Reserve()) {
+            return RejectHttpRequest(HTTP_STATUS_CONFLICT);
+        }
+        command = &(result.command);
+        input = httpUpload->Input();
+        input[0] = command->op;
+        sessionId = {};
+        if (command->token) {
+            sessionId = 0;
+        } else {
+            sessionId = command->id;
+        }
+        MediaMetadataCodec::WriteUnsigned32LittleEndian(input + HTTP_ENVELOPE_ID_FIELD, sessionId);
+        MediaMetadataCodec::WriteUnsigned32LittleEndian(input + HTTP_ENVELOPE_OFFSET_FIELD, command->offset);
+        client.video = true;
+        client.frameBytes = HttpMediaUpload::EnvelopeBytes;
+        client.expected = client.frameBytes + result.bodyBytes;
+        if (command->token) {
+            MediaMetadataCodec::WriteUnsigned32LittleEndian(input + HTTP_UPLOAD_ENVELOPE_BYTES, command->id);
+            client.frameBytes = client.expected = HTTP_RESUME_MESSAGE_BYTES;
+        }
+        if (client.frameBytes == client.expected) {
+            httpUpload->Submit(client.frameBytes);
+            client.waiting = true;
+        } else {
+            client.receiving = true;
+        }
+        return true;
+    }
     if (result.route == HttpRequest::Route::Video) {
         if (!httpUpload) {
             return RejectHttpRequest(HTTP_STATUS_NOT_FOUND);
@@ -420,10 +462,8 @@ RouteHttpRequest (
         client.expected = result.bodyBytes;
         return true;
     }
-
-    // Hold the same token used by TCP photos until the complete HTTP body arrives.
     client.expected = HttpRequest::kFrameBytes;
-    client.owner = receiver->BeginFrame(client.expected);
+    client.owner = receiver->BeginFrame(HttpRequest::kFrameBytes);
     if (!client.owner) {
         return RejectHttpRequest(HTTP_STATUS_CONFLICT);
     }

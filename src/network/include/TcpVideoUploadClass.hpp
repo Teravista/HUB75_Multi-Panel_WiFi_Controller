@@ -86,7 +86,7 @@ private:
     // Releases the video client after a TCP error.
     static void Error(void* context, err_t error);
 
-    enum class Phase { Idle, Header, Opening, Body, Writing, Verifying, Closing, Canceled };
+    enum class Phase { Idle, Header, Name, Opening, Body, Writing, Verifying, Closing, Canceled };
     MemoryManager& memory_;
     FrameBufferController& upload_;
     tcp_pcb* listener_ = nullptr;
@@ -97,6 +97,7 @@ private:
     size_t received_ = 0;
     size_t needed_ = MediaTransfer::RequestBytes;
     MediaMetadata metadata_;
+    uint32_t payloadChecksum_ = 0;
     uint64_t total_ = 0;
     uint64_t written_ = 0;
     uint32_t progress_ = 0;

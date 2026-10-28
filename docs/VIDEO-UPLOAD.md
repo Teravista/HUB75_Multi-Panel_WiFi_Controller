@@ -17,16 +17,20 @@ python utilityScripts/sendVideoOverTCP.py "clip.mp4" --ip 192.168.1.48 --pixel-f
 ```
 
 At the top of the script, configure `DEFAULT_VIDEO_PATH`, `DEFAULT_PICO_IP`,
-`DEFAULT_FPS`, `MAX_VIDEO_SECONDS`, `PING_PONG`, `PIXEL_FORMAT` and `JPEG_QUALITY`.
+`DEFAULT_VIDEO_NAME`, `DEFAULT_FPS`, `MAX_VIDEO_SECONDS`, `PING_PONG`,
+`PIXEL_FORMAT`, `SIZING_MODE` and `JPEG_QUALITY`.
 Blank IP uses `.env` PICO_IP. A configured path lets you run the script without a
-positional argument. The FPS range is 1–60 and accepts rational values such as
+positional argument. Relative default paths resolve from the repository; explicit command-line
+paths resolve from the current directory. A blank `DEFAULT_VIDEO_NAME` uses the source filename;
+`--name "Forest walk"` overrides it. The FPS range is 1–60 and accepts rational values such as
 30000/1001. Duration limits conversion to the shorter of that setting and the source.
-The default is RGB565, 30 FPS, 10 seconds and ordinary looping. JPEG quality defaults to
+The default is RGB565, 30 FPS, at most 600 seconds and ordinary looping. JPEG quality defaults to
 85. `--ping-pong` / `--no-ping-pong` override loop mode; prepared files otherwise keep
 their stored mode.
 
-FFmpeg is resolved from `--ffmpeg`, PATH or `imageio-ffmpeg`. It scales to cover the
-panel and crops centrally. Audio is omitted. Preparation holds one raw frame at a time
+FFmpeg is resolved from `--ffmpeg`, PATH or `imageio-ffmpeg`. `--sizing crop` scales to
+cover the panel and crops centrally. `--sizing fit` saves only the fitted rectangle;
+playback generates the black borders without reading border pixels from SD. Audio is omitted. Preparation holds one raw frame at a time
 and writes a temporary disk-backed file. A `.h75v` prepared file is a 36-byte request
 plus the selected raw or indexed JPEG payload; it is not an MP4 or the Pico's SD
 container. Do not copy it onto the card as a saved-media slot.
@@ -40,13 +44,19 @@ Raw descriptors use version 1; JPEG uses versions 2/3, with version 4 for explic
 placement. See [metadata](MEDIA-METADATA.md) for quality flags. The checksum covers the
 complete incoming payload.
 
-1. Send the 36-byte request and wait for `READY 6144\n` or `READY\n`.
+Named Python uploads use magic `H75N` for bulk chunks or `H75n` for legacy-sized chunks.
+After the 36-byte request, the Pico replies `NAME 64\n`. Send a 64-byte NUL-terminated,
+zero-padded ASCII name, then wait for `READY 6144\n` or `READY\n`. The name is saved with
+the library item; legacy `H75V`/`H75M` requests remain supported.
+
+1. Send the descriptor and optional name; wait for the negotiated `READY` reply.
 2. Send one negotiated chunk and wait for `NEXT\n` before sending another.
 3. After the last payload chunk, expect `VERIFY\n`.
 4. Wait for `SAVED\n`; an `ERR ...\n` response is failure.
 
-The Python client can retry explicit rejection of bulk negotiation using a fresh legacy
-handshake, before sending pixels. It does not replay an uncertain payload transfer. A
+Unnamed bulk requests can retry an explicit metadata rejection with the legacy handshake,
+before sending pixels. Named requests require the name handshake and never silently discard
+the requested name. It does not replay an uncertain payload transfer. A
 separate verification timeout allows long SD readback. A transport inactivity deadline
 cancels stalled clients; verification updates its progress while local work advances.
 
@@ -106,6 +116,14 @@ Firmware TCP uploads publish an independent video library item and select it aft
 verification. Existing clips remain available. The transfer messages below describe the
 TCP handshake and payload encoding. See [saved media library](MEDIA-LIBRARY.md) for item
 metadata, publication and selection.
+
+## Named HTTP routes
+
+The [controller API](HTTP-API.md) exposes library controls and resumable photo/video
+transactions without the legacy operation envelope. Upload routes accept prepared media
+headers and binary payload chunks, support persistent resume tokens and report SD verification.
+The named HTTP video start stores the chosen maximum-duration setting. TCP naming sends the
+name and existing media descriptor; it does not send that separate duration setting.
 
 ## Browser video messages
 
@@ -205,3 +223,12 @@ a receiving job, a Pico restart, replacement by another upload, or page/browser
 shutdown requires sending the source again. A retained verifying or saved job can
 still be checked without resending its bytes. Python TCP payload transfers use
 their existing stop-and-wait protocol and restart an interrupted payload.
+
+
+## Python photo sizing
+
+`sendImageOverTCP.py` keeps its TCP RGB888 full-panel crop path. `--sizing fit` instead
+uses the HTTP photo-library transaction: it stores the fitted RGB888 rectangle, a filename
+label and thumbnail, then waits for verified publication. Configure `SIZING_MODE` at the
+top or pass `--sizing crop`/`--sizing fit`; `--http-port` defaults to 80. Client-side photo
+fitting respects orientation and renders transparent areas against black.

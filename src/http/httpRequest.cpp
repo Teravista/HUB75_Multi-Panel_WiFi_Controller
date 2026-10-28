@@ -115,10 +115,10 @@ RejectRequestHeader (
 } // namespace
 
 /**
-    Validates an HTTP header and selects the page or binary media route.
+    Validates an HTTP request header and identifies its API or page route.
 
     Checks request-line and header syntax, method/body framing and the accepted local Host/Origin
-    before choosing the embedded page or bounded binary media route. The complete header is mutated in
+    before choosing the page or a bounded API/media route. The complete header is mutated in
     place to isolate tokens, so callers must supply exactly length bytes followed by NUL. Parsing
     returns a route/status description; network replies and storage mutations are handled by later
     layers.
@@ -127,7 +127,7 @@ RejectRequestHeader (
     @param length Number of bytes to process.
     @param localHost Pico IPv4 address accepted by the Host header check.
 
-    @return Result - Selected route, status, body length; Route::Reject carries the
+    @return Result - Selected route, status, body length and command; Route::Reject carries the
                      HTTP error status for an invalid or unsupported request.
 */
 HttpRequest::Result
@@ -160,6 +160,8 @@ HttpRequest::ParseRequestHeader (
     size_t digit;
     const char** slot = nullptr;
     bool video;
+    HttpControl::Command command;
+    int status;
 
     // Check framing and control bytes before tokenizing the untrusted request buffer.
     if (length >= kHeaderCapacity || length < HTTP_HEADER_TERMINATOR_BYTES || header[length] != '\0' ||
@@ -321,11 +323,37 @@ HttpRequest::ParseRequestHeader (
         return {Route::Page, HTTP_STATUS_OK};
     }
 
-    // Raw photos use a complete frame; the video coordinator accepts bounded protocol messages.
-    video = std::strcmp(path, "/api/video") == 0;
+    // Route controller commands separately from the legacy binary photo and video endpoints.
+    video = !std::strcmp(path, "/api/video");
     if (!video && std::strcmp(path, "/api/frame")) {
-        return RejectRequestHeader(HTTP_STATUS_NOT_FOUND);
+        command = {};
+        status = HttpControl::ParseControllerCommand(header, path, command);
+        if (status != HTTP_STATUS_OK) {
+            return RejectRequestHeader(status);
+        }
+        if (command.binary) {
+            if (!lengthSeen) {
+                return RejectRequestHeader(HTTP_STATUS_LENGTH_REQUIRED);
+            }
+            if (!bodyLength || bodyLength > HTTP_UPLOAD_CHUNK_BYTES) {
+                if (bodyLength > HTTP_UPLOAD_CHUNK_BYTES) {
+                    return RejectRequestHeader(HTTP_STATUS_CONTENT_TOO_LARGE);
+                }
+                return RejectRequestHeader(HTTP_STATUS_BAD_REQUEST);
+            }
+            if (!contentType || !CompareHttpTokenIgnoringCase(contentType, "application/octet-stream")) {
+                return RejectRequestHeader(HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE);
+            }
+        } else if (bodyLength) {
+            return RejectRequestHeader(HTTP_STATUS_BAD_REQUEST);
+        }
+        if (command.info) {
+            return {Route::ApiInfo, HTTP_STATUS_OK, bodyLength, command};
+        }
+        return {Route::Control, HTTP_STATUS_OK, bodyLength, command};
     }
+
+    // Legacy uploads keep their existing framing and method checks.
     if (std::strcmp(header, "POST")) {
         return RejectRequestHeader(HTTP_STATUS_METHOD_NOT_ALLOWED);
     }
