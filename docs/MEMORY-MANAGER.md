@@ -4,8 +4,13 @@
 shared 24 KiB read buffer. Its APIs store named photos, retained legacy media and
 independent photo/video library items without allocating another framebuffer.
 
-The class overview is in `src/sd/include/MemoryManagerClass.hpp`; its implementation and
-private class-owned storage state are in `src/sd/MemoryManagerClass.cpp`.
+`src/sd/include/MemoryManagerClass.hpp` declares the public API and recovery state;
+`src/sd/MemoryManagerClass.cpp` implements those operations. Private filesystem
+handles, save/playback sessions, header/index codecs and library traversal live in
+`src/sd/memoryStorage.cpp`, with declarations in `src/sd/include/memoryStorage.hpp`.
+All manager instances share one guarded storage session, the 24 KiB scratch buffer
+and the 64 KiB active-playback cache. The helpers keep filesystem details behind
+the manager API; callers retain the same chunked read/write interfaces.
 
 ## Wiring
 
