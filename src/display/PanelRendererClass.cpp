@@ -10,17 +10,45 @@
 
 #define IP_MAX_ADDRESS_CHARACTERS 15
 #define IP_LABEL_PADDING_PIXELS 2
-#define IP_LABEL_MAX_WIDTH (IP_MAX_ADDRESS_CHARACTERS * IP_DIGIT_ADVANCE - 1 + IP_LABEL_PADDING_PIXELS * 2)
-#define IP_LABEL_HEIGHT (WIFI_ICON_BACKING_HEIGHT)
-#define IP_LABEL_HORIZONTAL_ADJUSTMENT 2
+#define IP_LABEL_PADDING_SIDES 2
+#define IP_LABEL_GAP 2
+#define NETWORK_INDICATOR_COUNT 2
+#define NETWORK_INDICATOR_MIN_GAP 1
+#define NETWORK_INDICATOR_FIXED_WIDTH (NETWORK_INDICATOR_COUNT * (WIFI_ICON_MARGIN + WIFI_ICON_BACKING_WIDTH + IP_LABEL_GAP + IP_LABEL_PADDING_SIDES * IP_LABEL_PADDING_PIXELS) + NETWORK_INDICATOR_MIN_GAP)
 #define IP_FONT_HEIGHT IP_FONT_ROW_COUNT
 #define IP_DIGIT_WIDTH 3
 #define IP_DIGIT_ADVANCE 4
+#define IP_DOT_WIDTH 1
 #define IP_DOT_ADVANCE 2
 #define IP_DOT_ROW 4
 #define IP_TEXT_VERTICAL_ADJUSTMENT 1
+#define HOTSPOT_DOT_HEIGHT 3
+#define HOTSPOT_DOT_CENTER_ROW 1
+#define HOTSPOT_DOT_FIRST_COLUMN 1
+#define HOTSPOT_DOT_GAP 1
+#define NETWORK_INDICATOR_TOP (LOGICAL_IMAGE_HEIGHT - WIFI_ICON_MARGIN - WIFI_ICON_BACKING_HEIGHT)
+#define HOTSPOT_DOT_TOP (NETWORK_INDICATOR_TOP - HOTSPOT_DOT_GAP - HOTSPOT_DOT_HEIGHT)
+#define NETWORK_OVERLAY_TOP HOTSPOT_DOT_TOP
+#define HOTSPOT_DOT_WIDTH 1
+#define HOTSPOT_DOT_ADVANCE 2
+#define HOTSPOT_DOT_STRIP_WIDTH (HOTSPOT_DOT_FIRST_COLUMN + (WIFI_HOTSPOT_MAX_CLIENTS - 1) * HOTSPOT_DOT_ADVANCE + HOTSPOT_DOT_WIDTH)
+#define NETWORK_OVERLAY_HEIGHT (NETWORK_INDICATOR_TOP + WIFI_ICON_BACKING_HEIGHT - NETWORK_OVERLAY_TOP)
+#define NETWORK_GREEN_SOURCE_BYTE_OFFSET 1
 
+static_assert(WIFI_HOTSPOT_MAX_CLIENTS > 0 && HOTSPOT_DOT_STRIP_WIDTH <= WIFI_ICON_BACKING_WIDTH,
+    "Hotspot client dots must fit across the antenna backing");
+static_assert(NETWORK_OVERLAY_TOP >= 0 &&
+    HOTSPOT_DOT_TOP + HOTSPOT_DOT_HEIGHT <= NETWORK_INDICATOR_TOP &&
+    NETWORK_INDICATOR_TOP + WIFI_ICON_BACKING_HEIGHT <= LOGICAL_IMAGE_HEIGHT,
+    "Network icons and device strip must fit within separate display rows");
 
+const uint8_t PanelRenderer::houseRows_[WIFI_ICON_HEIGHT] = {
+    0b00011000, 0b00111100, 0b01100110, 0b11000011,
+    0b01000010, 0b01011010, 0b01011010, 0b01111110};
+
+const uint8_t PanelRenderer::antennaRows_[WIFI_ICON_HEIGHT] = {
+    0b00000000, 0b10000001, 0b01011010, 0b00100100,
+    0b00011000, 0b00011000, 0b00011000, 0b00111100};
 
 const uint8_t PanelRenderer::digitRows_[][IP_FONT_HEIGHT] = {
     {IP_ROW_FULL, IP_ROW_SIDES, IP_ROW_SIDES, IP_ROW_SIDES, IP_ROW_FULL},
@@ -154,82 +182,58 @@ PanelRenderer::RenderLogicalImageToGraphics (
 } // RenderLogicalImageToGraphics
 
 /**
-    Draws the Wi-Fi connection indicator over the logical image.
+    Draws independent home Wi-Fi and hotspot indicators at the bottom corners.
 
-    Maps the icon and IP label through the same logical-to-physical transform as image content. A
-    compact bitmap font and text-sized black backing keep the label aligned next to the connection
-    indicator.
-
-    The function retains the covered base pixels for repeated overlays on an unchanged frame and
-    refreshes that background when a new image is supplied. Restoring the background before
-    drawing prevents stale address text or a disconnected label from permanently altering the
-    displayed photo.
+    The home address stays at the bottom-right and the hosted address stays at
+    the bottom-left. A saved bottom strip restores the image before every redraw,
+    so address changes and disconnects cannot leave old text behind. New source
+    frames replace that strip before either indicator is painted. Exceptionally
+    long address pairs use tighter character spacing to keep the labels apart.
 
     @param graphics Destination graphics framebuffer for the panel chain.
-    @param isConnected Whether the local network connection is ready.
-    @param ipAddress IPv4 address text to show next to the Wi-Fi icon.
-    @param freshFrame Whether a new base image was drawn before the status overlay.
+    @param homeReady Whether home Wi-Fi and its local controller services are ready.
+    @param homeIp Home Wi-Fi IPv4 text, never replaced by the hotspot address.
+    @param hotspotReady Whether the hosted network and controller services are ready.
+    @param hotspotIp Hosted network IPv4 text, independent of home association.
+    @param freshFrame Whether a new base image was drawn before these overlays.
+    @param hotspotDevices Optional WIFI_HOTSPOT_MAX_CLIENTS device-state entries.
 */
 void
-PanelRenderer::DrawWifiStatusIcon (
+PanelRenderer::DrawNetworkStatus (
     CpuGraphics& graphics,
-    bool isConnected,
-    const char* ipAddress,
-    bool freshFrame
+    bool homeReady,
+    const char* homeIp,
+    bool hotspotReady,
+    const char* hotspotIp,
+    bool freshFrame,
+    const uint8_t* hotspotDevices
     )
 {
-    static CpuFrame::Pixel background[IP_LABEL_MAX_WIDTH * IP_LABEL_HEIGHT];
+    static CpuFrame::Pixel background[LOGICAL_IMAGE_WIDTH * NETWORK_OVERLAY_HEIGHT];
+    static_assert(sizeof(background) / sizeof(background[0]) ==
+        LOGICAL_IMAGE_WIDTH * (NETWORK_OVERLAY_HEIGHT),
+        "Network overlay backup must cover every captured row");
     static CpuFrame::Pixel* savedFrameBuffer = nullptr;
-
-    int physicalX;
-    int physicalY;
-    int iconLogicalLeft;
-    int iconLogicalTop;
-    int backingLogicalLeft;
-    int backingLogicalTop;
-    int y;
-    int x;
-    int bar;
-    int dx;
-    int barHeight;
-    int barLeft;
-    int labelRight;
-    int labelLeft;
-    int textTop;
     CpuFrame::Pixel* pixels = nullptr;
     bool captureBackground;
+    int physicalX;
+    int physicalY;
+    int logicalX;
+    int logicalY;
+    int top;
+    int digitAdvance;
+    int homeWidth;
+    int hotspotWidth;
     size_t backgroundIndex;
     size_t pixelIndex;
-    int length;
-    int textWidth;
-    bool valid;
-    char c;
-    int cursor;
-    int i;
-    char nextC;
-    int width;
-    int row;
-    uint8_t bits;
-    int column;
 
-    iconLogicalLeft = LOGICAL_IMAGE_WIDTH - WIFI_ICON_MARGIN - WIFI_ICON_WIDTH - WIFI_ICON_HORIZONTAL_OFFSET;
-    iconLogicalTop = WIFI_ICON_MARGIN;
-    backingLogicalLeft = iconLogicalLeft - WIFI_ICON_BACKING_SIDE_PADDING;
-    backingLogicalTop = iconLogicalTop;
-
-    // A compact 3x5 font keeps even 255.255.255.255 on one line. Drawing each
-    // logical pixel through the panel mapper preserves orientation across seams.
-    labelRight = backingLogicalLeft - IP_LABEL_HORIZONTAL_ADJUSTMENT;
-    labelLeft = labelRight - IP_LABEL_HORIZONTAL_ADJUSTMENT + IP_LABEL_PADDING_PIXELS - IP_LABEL_MAX_WIDTH;
-    textTop = iconLogicalTop + (WIFI_ICON_HEIGHT - IP_FONT_HEIGHT) / CENTER_ALIGNMENT_DIVISOR + IP_TEXT_VERTICAL_ADJUSTMENT;
-
-    // Restore or capture only the small backing patch under the IP label.
+    top = NETWORK_OVERLAY_TOP;
     pixels = static_cast<CpuFrame::Pixel*>(graphics.frame_buffer) + graphics.layer_offset;
     captureBackground = freshFrame || savedFrameBuffer != pixels;
     backgroundIndex = 0;
-    for (y = iconLogicalTop; y < iconLogicalTop + IP_LABEL_HEIGHT; ++y) {
-        for (x = labelLeft; x < labelLeft + IP_LABEL_MAX_WIDTH; ++x) {
-            ConvertLogicalToPhysicalCoordinates(x, y, physicalX, physicalY);
+    for (logicalY = top; logicalY < top + NETWORK_OVERLAY_HEIGHT; ++logicalY) {
+        for (logicalX = 0; logicalX < LOGICAL_IMAGE_WIDTH; ++logicalX) {
+            ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, physicalX, physicalY);
             pixelIndex = physicalY * MATRIX_PANEL_WIDTH + physicalX;
             if (captureBackground) {
                 background[backgroundIndex] = pixels[pixelIndex];
@@ -239,94 +243,194 @@ PanelRenderer::DrawWifiStatusIcon (
             ++backgroundIndex;
         }
     }
-
     savedFrameBuffer = pixels;
-    if (isConnected && ipAddress != nullptr) {
-        length = 0;
-        textWidth = 0;
-        valid = true;
-        for (; length < IP_MAX_ADDRESS_CHARACTERS && ipAddress[length]; ++length) {
-            c = ipAddress[length];
-            if (c != '.' && (c < '0' || c > '9')) {
-                valid = false;
-                break;
-            }
-            if (c == '.') {
-                textWidth += IP_DOT_ADVANCE;
-            } else {
-                textWidth += IP_DIGIT_ADVANCE;
+
+    // Normal spacing fits the fixed hotspot address and every home IPv4 address.
+    // Compact spacing also supports a longer, custom hotspot subnet without overlap.
+    digitAdvance = IP_DIGIT_ADVANCE;
+    homeWidth = MeasureIpLabel(homeIp, digitAdvance);
+    hotspotWidth = MeasureIpLabel(hotspotIp, digitAdvance);
+    if (homeWidth + hotspotWidth + NETWORK_INDICATOR_FIXED_WIDTH > LOGICAL_IMAGE_WIDTH) {
+        digitAdvance = IP_DIGIT_WIDTH;
+    }
+    DrawNetworkIndicator(graphics, homeReady, homeIp, true, digitAdvance);
+    DrawNetworkIndicator(graphics, hotspotReady, hotspotIp, false, digitAdvance);
+    DrawHotspotDeviceDots(graphics, hotspotDevices);
+} // DrawNetworkStatus
+
+/**
+    Measures a bounded numeric IP label with the selected digit spacing.
+
+    @param ipAddress Null-terminated address text containing only digits and dots.
+    @param digitAdvance Horizontal distance between consecutive digit origins.
+
+    @return pixels - Width of the visible glyphs without trailing character spacing.
+    @return 0 - The label is absent, empty, too long or contains unsupported characters.
+*/
+int
+PanelRenderer::MeasureIpLabel (
+    const char* ipAddress,
+    int digitAdvance
+    )
+{
+    int length;
+    int width;
+    int trailingSpacing;
+    char character;
+
+    if (!ipAddress) {
+        return 0;
+    }
+    width = 0;
+    trailingSpacing = 0;
+    length = 0;
+    for (; length < IP_MAX_ADDRESS_CHARACTERS && ipAddress[length]; ++length) {
+        character = ipAddress[length];
+        if (character == '.') {
+            width += IP_DOT_ADVANCE;
+            trailingSpacing = IP_DOT_ADVANCE - IP_DOT_WIDTH;
+        } else if (character >= '0' && character <= '9') {
+            width += digitAdvance;
+            trailingSpacing = digitAdvance - IP_DIGIT_WIDTH;
+        } else {
+            return 0;
+        }
+    }
+    if (!length || ipAddress[length]) {
+        return 0;
+    }
+    return width - trailingSpacing;
+} // MeasureIpLabel
+
+/**
+    Draws one connection icon and its inward-facing IP label.
+
+    Left indicators place the label to the icon's right; right indicators place
+    it to the icon's left. Coordinates are logical image coordinates and pass
+    through the existing panel rotation/wiring mapper. The black text backing
+    follows the measured glyph width. Disconnected indicators retain a red icon
+    without showing an address from another network interface.
+
+    @param graphics Destination graphics framebuffer for the panel chain.
+    @param connected Whether this particular network path is ready.
+    @param ipAddress IPv4 label belonging to this network path.
+    @param alignRight True anchors the icon at the bottom-right; false uses bottom-left.
+    @param digitAdvance Horizontal distance between consecutive digit origins.
+*/
+void
+PanelRenderer::DrawNetworkIndicator (
+    CpuGraphics& graphics,
+    bool connected,
+    const char* ipAddress,
+    bool alignRight,
+    int digitAdvance
+    )
+{
+    int physicalX;
+    int physicalY;
+    int backingLeft;
+    int top;
+    int iconLeft;
+    int labelLeft;
+    int textLeft;
+    int textTop;
+    int textWidth;
+    int x;
+    int y;
+    int cursor;
+    int index;
+    int width;
+    int advance;
+    int row;
+    int column;
+    const uint8_t* iconRows = nullptr;
+    uint8_t bits;
+    char character;
+
+    top = NETWORK_INDICATOR_TOP;
+    backingLeft = WIFI_ICON_MARGIN;
+    if (alignRight) {
+        backingLeft = LOGICAL_IMAGE_WIDTH - WIFI_ICON_MARGIN - WIFI_ICON_BACKING_WIDTH;
+    }
+    iconLeft = backingLeft + WIFI_ICON_BACKING_SIDE_PADDING;
+    textTop = top + (WIFI_ICON_HEIGHT - IP_FONT_HEIGHT) / CENTER_ALIGNMENT_DIVISOR + IP_TEXT_VERTICAL_ADJUSTMENT;
+
+    // Only ready paths display their own address. The common saved strip already
+    // restored any former label before this function draws the current one.
+    textWidth = 0;
+    if (connected) {
+        textWidth = MeasureIpLabel(ipAddress, digitAdvance);
+    }
+    if (textWidth > 0) {
+        labelLeft = backingLeft + WIFI_ICON_BACKING_WIDTH + IP_LABEL_GAP;
+        if (alignRight) {
+            labelLeft = backingLeft - IP_LABEL_GAP - textWidth - IP_LABEL_PADDING_PIXELS * IP_LABEL_PADDING_SIDES;
+        }
+        textLeft = labelLeft + IP_LABEL_PADDING_PIXELS;
+        graphics.set_pen(BLACK_COLOR_VALUE, BLACK_COLOR_VALUE, BLACK_COLOR_VALUE);
+        for (y = top; y < top + WIFI_ICON_BACKING_HEIGHT; ++y) {
+            for (x = labelLeft; x < labelLeft + textWidth + IP_LABEL_PADDING_PIXELS * IP_LABEL_PADDING_SIDES; ++x) {
+                ConvertLogicalToPhysicalCoordinates(x, y, physicalX, physicalY);
+                graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
             }
         }
-        if (valid && length > 0 && ipAddress[length] == '\0') {
-            --textWidth; // No trailing character spacing.
-            cursor = labelRight - textWidth - IP_DOT_ADVANCE;
-            graphics.set_pen(BLACK_COLOR_VALUE, BLACK_COLOR_VALUE, BLACK_COLOR_VALUE);
-            for (y = iconLogicalTop; y < iconLogicalTop + IP_LABEL_HEIGHT; ++y) {
-                for (x = cursor - IP_LABEL_PADDING_PIXELS; x < cursor + textWidth + IP_LABEL_PADDING_PIXELS; ++x) {
-                    ConvertLogicalToPhysicalCoordinates(x, y, physicalX, physicalY);
-                    graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
-                }
+
+        graphics.set_pen(RGB_CHANNEL_MAX, RGB_CHANNEL_MAX, RGB_CHANNEL_MAX);
+        cursor = textLeft;
+        for (index = 0; ipAddress[index]; ++index) {
+            character = ipAddress[index];
+            width = IP_DIGIT_WIDTH;
+            advance = digitAdvance;
+            if (character == '.') {
+                width = IP_DOT_WIDTH;
+                advance = IP_DOT_ADVANCE;
             }
-            graphics.set_pen(RGB_CHANNEL_MAX, RGB_CHANNEL_MAX, RGB_CHANNEL_MAX);
-            for (i = 0; i < length; ++i) {
-                nextC = ipAddress[i];
-                if (nextC == '.') {
-                    width = 1;
-                } else {
-                    width = IP_DIGIT_WIDTH;
-                }
-                for (row = 0; row < IP_FONT_HEIGHT; ++row) {
-                    bits = 0;
-                    if (nextC == '.') {
-                        if (row == IP_DOT_ROW) {
-                            bits = 1;
-                        }
-                    } else {
-                        bits = digitRows_[nextC - '0'][row];
+            for (row = 0; row < IP_FONT_HEIGHT; ++row) {
+                bits = 0;
+                if (character == '.') {
+                    if (row == IP_DOT_ROW) {
+                        bits = IP_ROW_RIGHT;
                     }
-                    for (column = 0; column < width; ++column) {
-                        if (!(bits & (1u << (width - 1 - column)))) {
-                            continue;
-                        }
-                        ConvertLogicalToPhysicalCoordinates(cursor + column, textTop + row, physicalX,
-                                                            physicalY);
+                } else {
+                    bits = digitRows_[character - '0'][row];
+                }
+                for (column = 0; column < width; ++column) {
+                    if (bits & (1u << (width - 1 - column))) {
+                        ConvertLogicalToPhysicalCoordinates(cursor + column, textTop + row, physicalX, physicalY);
                         graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
                     }
                 }
-                cursor += width + 1;
             }
+            cursor += advance;
         }
     }
 
-    // Black backing square so the icon reads clearly over any image content.
     graphics.set_pen(BLACK_COLOR_VALUE, BLACK_COLOR_VALUE, BLACK_COLOR_VALUE);
-    for (y = 0; y < WIFI_ICON_BACKING_HEIGHT; y++) {
-        for (x = 0; x < WIFI_ICON_BACKING_WIDTH; x++) {
-            ConvertLogicalToPhysicalCoordinates(backingLogicalLeft + x, backingLogicalTop + y, physicalX,
-                                                physicalY);
+    for (y = top; y < top + WIFI_ICON_BACKING_HEIGHT; ++y) {
+        for (x = backingLeft; x < backingLeft + WIFI_ICON_BACKING_WIDTH; ++x) {
+            ConvertLogicalToPhysicalCoordinates(x, y, physicalX, physicalY);
             graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
         }
     }
-
-    if (isConnected) {
-        graphics.set_pen(RGB_CHANNEL_MAX, RGB_CHANNEL_MAX, RGB_CHANNEL_MAX); // white bars for connected
+    if (connected) {
+        graphics.set_pen(RGB_CHANNEL_MAX, RGB_CHANNEL_MAX, RGB_CHANNEL_MAX);
     } else {
-        graphics.set_pen(0, RGB_CHANNEL_MAX,
-                         0); // red bars for not connected (counting in my bit shiftied coloring)
+        // These panels route the physical red diode through the green channel.
+        graphics.set_pen(BLACK_COLOR_VALUE, RGB_CHANNEL_MAX, BLACK_COLOR_VALUE);
     }
-    for (bar = 0; bar < WIFI_ICON_BAR_COUNT; bar++) {
-        barHeight = (bar + 1) * WIFI_ICON_BAR_HEIGHT_STEP;
-        barLeft = bar * WIFI_ICON_BAR_COLUMN_STEP;
-
-        for (y = WIFI_ICON_HEIGHT - barHeight; y < WIFI_ICON_HEIGHT; y++) {
-            for (dx = 0; dx < WIFI_ICON_BAR_WIDTH; dx++) {
-                ConvertLogicalToPhysicalCoordinates(iconLogicalLeft + barLeft + dx, iconLogicalTop + y,
-                                                    physicalX, physicalY);
+    iconRows = antennaRows_;
+    if (alignRight) {
+        iconRows = houseRows_;
+    }
+    for (y = 0; y < WIFI_ICON_HEIGHT; ++y) {
+        for (x = 0; x < WIFI_ICON_WIDTH; ++x) {
+            if (iconRows[y] & (1u << (WIFI_ICON_WIDTH - 1 - x))) {
+                ConvertLogicalToPhysicalCoordinates(iconLeft + x, top + y, physicalX, physicalY);
                 graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
             }
         }
     }
-} // DrawWifiStatusIcon
+} // DrawNetworkIndicator
 
 /**
     Advances one frame and reverses direction at each animation endpoint.
@@ -391,3 +495,59 @@ PanelRenderer::GetNextAnimationFrameIndex (
     return FIRST_FRAME_INDEX;
 #endif
 } // GetNextAnimationFrameIndex
+
+/**
+    Draws one stable connection/activity dot for each hotspot device slot.
+
+    The ten-column, three-row backing sits above the antenna with a one-pixel gap.
+    Single pixels occupy the middle row at columns two, four, six and eight.
+    A connected idle peer is white, accepted meaningful traffic is green, and an
+    empty slot is black.
+    The shared overlay backup restores the strip before redraw. Logical green
+    passes through the same configured channel reordering as ordinary images.
+
+    @param graphics Destination graphics framebuffer for the panel chain.
+    @param hotspotDevices Optional WIFI_HOTSPOT_MAX_CLIENTS device-state entries.
+*/
+void
+PanelRenderer::DrawHotspotDeviceDots (
+    CpuGraphics& graphics,
+    const uint8_t* hotspotDevices
+    )
+{
+    uint8_t activeColor[IMAGE_BYTES_PER_PIXEL]{};
+    int top;
+    int left;
+    int x;
+    int y;
+    int physicalX;
+    int physicalY;
+    size_t slot;
+
+    top = HOTSPOT_DOT_TOP;
+    left = WIFI_ICON_MARGIN;
+    graphics.set_pen(BLACK_COLOR_VALUE, BLACK_COLOR_VALUE, BLACK_COLOR_VALUE);
+    for (y = top; y < top + HOTSPOT_DOT_HEIGHT; ++y) {
+        for (x = left; x < left + WIFI_ICON_BACKING_WIDTH; ++x) {
+            ConvertLogicalToPhysicalCoordinates(x, y, physicalX, physicalY);
+            graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
+        }
+    }
+    if (!hotspotDevices) {
+        return;
+    }
+    activeColor[NETWORK_GREEN_SOURCE_BYTE_OFFSET] = RGB_CHANNEL_MAX;
+    for (slot = 0; slot < WIFI_HOTSPOT_MAX_CLIENTS; ++slot) {
+        if (hotspotDevices[slot] == WIFI_HOTSPOT_CLIENT_OFF) {
+            continue;
+        }
+        graphics.set_pen(RGB_CHANNEL_MAX, RGB_CHANNEL_MAX, RGB_CHANNEL_MAX);
+        if (hotspotDevices[slot] == WIFI_HOTSPOT_CLIENT_ACTIVE) {
+            graphics.set_pen(activeColor[IMAGE_RED_BYTE_OFFSET], activeColor[IMAGE_GREEN_BYTE_OFFSET],
+                activeColor[IMAGE_BLUE_BYTE_OFFSET]);
+        }
+        x = left + HOTSPOT_DOT_FIRST_COLUMN + int(slot) * HOTSPOT_DOT_ADVANCE;
+        ConvertLogicalToPhysicalCoordinates(x, top + HOTSPOT_DOT_CENTER_ROW, physicalX, physicalY);
+        graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
+    }
+} // DrawHotspotDeviceDots

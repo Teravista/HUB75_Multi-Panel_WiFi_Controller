@@ -5,6 +5,7 @@
 #include "webPage.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "http/include/httpRequest.hpp"
+#include "network/include/clientActivity.hpp"
 #include "http/api/include/httpApiInfo.hpp"
 #include "lwip/ip4_addr.h"
 #include "pico/cyw43_arch.h"
@@ -51,6 +52,8 @@ struct Client {
     bool receiving = false;
     bool video = false;
     bool waiting = false;
+    bool meaningfulActivity = false;
+    bool classifyBinaryOperation = false;
     size_t expected = 0;
     FrameBufferController::Token owner = 0;
     size_t frameBytes = 0;
@@ -304,6 +307,9 @@ SendPendingHttpResponse (
             return AbortHttpClient();
         }
         client.queued += amount;
+        if (client.meaningfulActivity) {
+            ClientActivity::RecordCommunication(client.pcb);
+        }
     }
 
     // Ask lwIP to transmit the queued response bytes.
@@ -412,9 +418,11 @@ RouteHttpRequest (
         return RejectHttpRequest(result.status);
     }
     if (result.route == HttpRequest::Route::Page) {
+        client.meaningfulActivity = true;
         return BuildHttpResponse("200 OK", "text/html; charset=utf-8", WebPage::kHtml, WebPage::kLength);
     }
     if (result.route == HttpRequest::Route::ApiInfo) {
+        client.meaningfulActivity = true;
         return BuildHttpResponse("200 OK", "application/json", HttpApiInfo::Json,
                                  sizeof(HttpApiInfo::Json) - STRING_TERMINATOR_BYTES);
     }
@@ -426,6 +434,10 @@ RouteHttpRequest (
             return RejectHttpRequest(HTTP_STATUS_CONFLICT);
         }
         command = &(result.command);
+        client.meaningfulActivity = !HttpRequest::IsRoutineControlOperation(command->op);
+        if (client.meaningfulActivity) {
+            ClientActivity::RecordCommunication(client.pcb);
+        }
         input = httpUpload->Input();
         input[0] = command->op;
         sessionId = {};
@@ -452,6 +464,7 @@ RouteHttpRequest (
         return true;
     }
     if (result.route == HttpRequest::Route::Video) {
+        client.classifyBinaryOperation = true;
         if (!httpUpload) {
             return RejectHttpRequest(HTTP_STATUS_NOT_FOUND);
         }
@@ -463,6 +476,7 @@ RouteHttpRequest (
         client.expected = result.bodyBytes;
         return true;
     }
+    client.meaningfulActivity = true;
     client.expected = HttpRequest::kFrameBytes;
     client.owner = receiver->BeginFrame(HttpRequest::kFrameBytes);
     if (!client.owner) {
@@ -542,6 +556,13 @@ ReceiveHttpRequestBytes (
                     valid = receiver->FeedFrame(client.owner, bytes + i, amount);
                 }
                 client.frameBytes += amount;
+                if (client.classifyBinaryOperation && client.frameBytes) {
+                    client.meaningfulActivity = !HttpRequest::IsRoutineControlOperation(httpUpload->Input()[0]);
+                    client.classifyBinaryOperation = false;
+                }
+                if (client.meaningfulActivity && amount) {
+                    ClientActivity::RecordCommunication(pcb);
+                }
                 i += amount;
             } else {
                 byte = bytes[i++];
@@ -615,6 +636,9 @@ HandleHttpResponseAcknowledgement (
         return AbortHttpClient();
     }
     client.acknowledged += length;
+    if (length && client.meaningfulActivity) {
+        ClientActivity::RecordCommunication(client.pcb);
+    }
     client.progress = GetTransportTimeMs();
     return SendPendingHttpResponse();
 } // HandleHttpResponseAcknowledgement

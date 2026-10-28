@@ -9,7 +9,7 @@
 /**
     Caches nearby bytes of the active playback file to reduce repeated SD reads.
 
-    Two sector-aligned blocks share a fixed 64 KiB allocation. They retain reusable file ranges
+    Two sector-aligned blocks share a fixed 32 KiB allocation. They retain reusable file ranges
     while a logical playback cursor supports sequential, reverse and random frame access; playback
     direction guides optional ahead reads. The backend is a borrowed synchronous callback, so a
     cache miss can wait for SD I/O in the calling foreground operation. Core 0 alone owns the
@@ -18,7 +18,7 @@
 */
 class PlaybackPrefetch {
 public:
-    static constexpr size_t Bytes = 64 * 1024;
+    static constexpr size_t Bytes = 32 * 1024;
     static constexpr size_t BlockBytes = Bytes / 2;
 
     struct Stats {

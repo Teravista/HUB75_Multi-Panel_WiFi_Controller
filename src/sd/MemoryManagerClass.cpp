@@ -89,7 +89,9 @@ MemoryManager::Initialize (
     }
 
     // Register the existing filesystem; mounting does not format or replace card contents.
+    HUB75_DEBUG("[sd] startup: mounting FAT filesystem\n");
     result = f_mount(&MemoryStorage::managerState.filesystem, "0:", 1);
+    HUB75_DEBUG("[sd] startup: mount result=%u\n", unsigned(result));
 
     if (result != FR_OK) {
         f_mount(nullptr, "0:", 0);

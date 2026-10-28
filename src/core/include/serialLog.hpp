@@ -43,10 +43,13 @@ struct Status {
     uint32_t targetNumerator = 0;
     uint32_t targetDenominator = 1;
     uint32_t sdRetryMs = 0;
+    uint32_t hotspotClients = 0;
     bool video = false;
     const char* mode = "builtin";
-    const char* network = "no-wifi";
-    const char* ip = "-";
+    const char* homeNetwork = "no-wifi";
+    const char* homeIp = "-";
+    const char* hotspotNetwork = "unavailable";
+    const char* hotspotIp = "-";
     const char* storage = "unavailable";
     const char* job = "idle";
 };

@@ -15,6 +15,12 @@
 #define HTTP_STATUS_NOT_IMPLEMENTED 501
 #define HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE 415
 
+#define HTTP_POLL_UPLOAD_STATUS 3
+#define HTTP_POLL_CONTROLLER_STATUS 15
+#define HTTP_POLL_UPLOAD_RESUME 20
+#define HTTP_POLL_MEMORY_STATUS 23
+
+
 namespace {
 /**
     Compares an HTTP token with an expected value without case sensitivity.
@@ -442,3 +448,24 @@ HttpRequest::GetHttpStatusText (
         return "500 Internal Server Error";
     }
 } // GetHttpStatusText
+
+/**
+    Identifies routine control polling that should not light a device activity dot.
+
+    Browser status, memory and upload-progress/resume queries are small background
+    reads. Library navigation, previews, mutations and upload data remain visible
+    application traffic. Both named API routes and legacy envelopes use this rule.
+
+    @param operation Validated controller operation byte.
+
+    @return true - The operation is a routine status/progress query.
+    @return false - The operation represents other application communication.
+*/
+bool
+HttpRequest::IsRoutineControlOperation (
+    uint8_t operation
+    )
+{
+    return operation == HTTP_POLL_UPLOAD_STATUS || operation == HTTP_POLL_CONTROLLER_STATUS ||
+        operation == HTTP_POLL_UPLOAD_RESUME || operation == HTTP_POLL_MEMORY_STATUS;
+} // IsRoutineControlOperation

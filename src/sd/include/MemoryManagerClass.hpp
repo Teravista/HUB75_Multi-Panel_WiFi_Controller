@@ -12,7 +12,7 @@
     Provides the foreground SD storage boundary for saved photos and raw/indexed-JPEG videos.
 
     It coordinates SPI and private storage helpers holding the filesystem, file handles,
-    shared 24 KiB scratch and a 64 KiB
+    shared 24 KiB scratch and a 32 KiB
     active-playback cache. Mount retries and read-only health checks recover
     unavailable cards without restarting Wi-Fi. JPEG reads can feed an available Core 1 decoder through
     bounded input slots; all filesystem operations remain on Core 0.

@@ -17,6 +17,9 @@ struct Result {
 // Validates an HTTP request header and identifies its API or page route.
 Result ParseRequestHeader(char* header, size_t length, const char* localHost);
 
+// Identifies routine control polling that should not light a device activity dot.
+bool IsRoutineControlOperation(uint8_t operation);
+
 // Returns the HTTP status text for a parsed request result.
 const char* GetHttpStatusText(int code);
 

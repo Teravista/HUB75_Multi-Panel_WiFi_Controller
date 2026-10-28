@@ -76,10 +76,10 @@ NetworkServices::Request (
 } // Request
 
 /**
-    Publishes the latest network state and IP as one coherent snapshot.
+    Publishes both network interfaces and aggregate status as one coherent snapshot.
 
-    Captures connection readiness and address text into a local snapshot before acquiring the
-    short publication lock. A suspended snapshot clears foreground-facing readiness while radio
+    Captures each interface's readiness and address separately before acquiring the
+    short publication lock. The home address never falls back to the hotspot address. A suspended snapshot clears foreground-facing readiness while radio
     services restart. The lock protects only the bounded copy; radio initialization and filesystem
     operations must remain outside it.
 
@@ -95,6 +95,13 @@ NetworkServices::PublishStatus (
     next = {};
     if (!suspended) {
         next.ready = wifi_.IsNetworkReady();
+        next.homeReady = wifi_.IsHomeWifiReady();
+        next.hotspotReady = wifi_.IsHotspotReady();
+        wifi_.CopyHotspotClientStates(next.hotspotDevices);
+        std::strncpy(next.homeState, wifi_.GetHomeWifiStateName(), sizeof(next.homeState) - 1);
+        std::strncpy(next.hotspotState, wifi_.GetHotspotStateName(), sizeof(next.hotspotState) - 1);
+        std::strncpy(next.homeIp, wifi_.GetHomeWifiIpText(), sizeof(next.homeIp) - 1);
+        std::strncpy(next.hotspotIp, wifi_.GetHotspotIpText(), sizeof(next.hotspotIp) - 1);
         std::strncpy(next.state, wifi_.GetNetStateName(), sizeof(next.state) - 1);
         std::strncpy(next.ip, wifi_.GetWifiIpText(), sizeof(next.ip) - 1);
     }

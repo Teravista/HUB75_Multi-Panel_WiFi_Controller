@@ -9,7 +9,7 @@ independent photo/video library items without allocating another framebuffer.
 handles, save/playback sessions, header/index codecs and library traversal live in
 `src/sd/memoryStorage.cpp`, with declarations in `src/sd/include/memoryStorage.hpp`.
 All manager instances share one guarded storage session, the 24 KiB scratch buffer
-and the 64 KiB active-playback cache. The helpers keep filesystem details behind
+and the 32 KiB active-playback cache. The helpers keep filesystem details behind
 the manager API; callers retain the same chunked read/write interfaces.
 
 ## Wiring
@@ -169,8 +169,8 @@ a bulk buffer does not make every underlying transfer one continuous SD command.
 raw-sector path bypasses the filesystem or its bounds checks. Consumers publish an image
 only after the complete read and its checksums succeed.
 
-The active playback handle has a separate 64 KiB cache (`PlaybackPrefetch::Bytes`),
-split into two 32 KiB blocks. Reads reuse cached file ranges and use a logical cursor
+The active playback handle has a separate 32 KiB cache (`PlaybackPrefetch::Bytes`),
+split into two 16 KiB blocks. Reads reuse cached file ranges and use a logical cursor
 for forward, reverse and random frame selection. Closing, replacing or remounting
 playback clears cached bytes. Inspection and upload verification read directly from
 FatFs. A speculative read failure cannot invalidate an already checked current frame;

@@ -108,9 +108,10 @@ SerialLog::FormatStatus (
         std::snprintf(job, sizeof(job), " job=%s", status.job);
     }
     size = std::snprintf(
-        output, capacity, "[status] t=%lus display_fps=%lu.%lu video_fps=%s mode=%s net=%s ip=%s sd=%s%s%s",
+        output, capacity, "[status] t=%lus display_fps=%lu.%lu video_fps=%s mode=%s home_wifi=%s home_ip=%s pico_wifi=%s pico_ip=%s pico_clients=%lu/%u sd=%s%s%s",
         (unsigned long)status.uptimeSeconds, (unsigned long)(status.displayTenths / FPS_DECIMAL_SCALE),
-        (unsigned long)(status.displayTenths % FPS_DECIMAL_SCALE), video, status.mode, status.network,
-        status.ip, status.storage, retry, job);
+        (unsigned long)(status.displayTenths % FPS_DECIMAL_SCALE), video, status.mode, status.homeNetwork,
+        status.homeIp, status.hotspotNetwork, status.hotspotIp,
+        (unsigned long)status.hotspotClients, unsigned(WIFI_HOTSPOT_MAX_CLIENTS), status.storage, retry, job);
     return size >= 0 && size_t(size) < capacity;
 } // FormatStatus
