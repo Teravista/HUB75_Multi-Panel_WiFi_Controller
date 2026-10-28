@@ -133,7 +133,7 @@ playback](VIDEO-UPLOAD.md) for layouts and failure behavior.
 
 Video transactions also accept RGB565 and indexed baseline JPEG. RGB565 retains the raw
 version-4 record layout with two bytes per pixel. JPEG uses version 5, validates the
-complete saved payload and every decoded frame before publishing, and checks each
+complete saved payload and every encoded frame before publishing, and checks each
 selected frame again during playback. A four-KiB bounded index cache avoids rereading
 offsets for each frame. JPEG shares the existing 24 KiB scratch allocation between
 compressed input and decoder workspace; no extra full framebuffer is allocated. See
@@ -208,3 +208,16 @@ Its record separates total bytes, static data, allocated heap and reserved stack
 the availability flag identifies a valid measurement. `GetActivityName()` returns
 `idle`, `receiving` or `verifying` without reading the card. Summary and serial status
 use these snapshots alongside the SD lifecycle and retry fields.
+
+## JPEG save verification
+
+Readback checksums the index, then validates each indexed JPEG record while updating
+both its frame checksum and the whole-payload checksum from the same encoded bytes.
+The existing four-KiB index window is reused while playback is suspended. Index CRCs,
+record continuity, lengths, dimensions, entropy data and end markers must all pass;
+the final payload checksum must match before publication.
+
+Validation skips IDCT and colour reconstruction. Every saved payload byte is read
+back from SD; verification bypasses playback prefetch. Both browser and TCP uploads
+use this same verification path, and a failed replacement retains previously
+published media.
