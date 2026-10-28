@@ -150,6 +150,8 @@ target_sources(hub75 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/network/NetworkServicesClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/network/TcpVideoUploadClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/network/WifiConnectionClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/PicoHotspotClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/network/clientActivity.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/network/networkCorePico.cpp
 
     ${CMAKE_CURRENT_LIST_DIR}/src/http/HttpMediaUploadClass.cpp

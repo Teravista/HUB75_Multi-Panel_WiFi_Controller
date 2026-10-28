@@ -122,6 +122,7 @@ InitializeMemoryStorageHardware (
     bool initialized;
     unsigned systemClock;
 
+    HUB75_DEBUG("[sd] startup: configuring timeouts\n");
     // Initialization permits slow cards; mounted runtime operations use shorter deadlines.
     sd_timeouts.sd_command = SD_INITIAL_COMMAND_TIMEOUT_MS;
     sd_timeouts.sd_command_retries = SD_COMMAND_RETRY_COUNT;
@@ -134,6 +135,7 @@ InitializeMemoryStorageHardware (
     // Set the SPI peripheral clock source before the bus is initialized. The
     // card still starts at the driver's slow initialization clock.
     if (!configured && StorageConfig::BaudRate > SD_PERIPHERAL_CLOCK_THRESHOLD_HZ) {
+        HUB75_DEBUG("[sd] startup: configuring peripheral clock\n");
         systemClock = clock_get_hz(clk_sys);
         clock_configure_undivided(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS, systemClock);
     }
@@ -157,11 +159,15 @@ InitializeMemoryStorageHardware (
     // sd_init_driver has a process-wide initialized flag. Explicitly restore
     // the SPI/card hooks here too, so Initialize works after a failed attempt
     // has returned this module's DMA channels and deinitialized SPI0.
+    HUB75_DEBUG("[sd] startup: attaching SPI card\n");
     sd_spi_ctor(&storageCard);
+    HUB75_DEBUG("[sd] startup: initializing SPI/DMA\n");
     if (!my_spi_init(&storageSpi)) {
         return false;
     }
+    HUB75_DEBUG("[sd] startup: initializing filesystem driver\n");
     initialized = sd_init_driver();
+    HUB75_DEBUG("[sd] startup: hardware initialized=%u\n", unsigned(initialized));
     return initialized;
 } // InitializeMemoryStorageHardware
 

@@ -4,6 +4,7 @@
 #include "display/include/PanelRendererClass.hpp"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "network/include/clientActivity.hpp"
 #include <cstdio>
 
 #define RGB888_RED_CHANNEL_INDEX 0
@@ -317,6 +318,9 @@ FrameBufferController::OnTcpRecv (
             valid = self->FeedFrame(self->m_rawOwner, static_cast<const uint8_t*>(part->payload), part->len);
         }
         self->m_rawBytes += packet->tot_len;
+    }
+    if (valid && packet->tot_len) {
+        ClientActivity::RecordCommunication(pcb);
     }
     tcp_recved(pcb, packet->tot_len);
 

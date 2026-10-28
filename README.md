@@ -127,6 +127,8 @@ with your local settings.
 - `PICO_PORT` - TCP image-upload port. CMake gives this value to the firmware listener, and the Python upload script connects to the same port.
 - `WIFI_SSID` - WiFi network name compiled into the firmware.
 - `WIFI_PASSWORD` - WiFi password compiled into the firmware.
+- `WIFI_AP_SSID` - required private direct Pico network name (1–32 bytes).
+- `WIFI_AP_PASSWORD` - required private direct network password (8–63 bytes).
 - `WIFI_GATEWAY_PROBE_PORT` - local gateway TCP diagnostic port
 
 CMake generates `build/generated/networkConfig.h` from `.env`. Do not edit or commit
@@ -134,9 +136,20 @@ that generated file; a normal build recreates it when it is missing or when `.en
 changes. The Python upload script reads `PICO_IP` and `PICO_PORT` directly from the same
 `.env` file.
 
-If the connection fails, the WiFi icon shows red and network uploads are unavailable.
-Saved media can still load from SD. Network connection/retry work runs on Core 1 while
-Core 0 retains SD playback and the panel scanner.
+The Pico also creates its own password-protected Wi-Fi network. On your phone,
+join the network named by `WIFI_AP_SSID` using your private `WIFI_AP_PASSWORD`
+from `.env`, then open `http://192.168.4.1/` in Safari or another browser. Both
+hotspot settings are required; there are no built-in credentials. The direct network
+serves the same page, API and image/video upload ports as the home address, without
+a router or Internet connection. A phone may label it as a network without Internet.
+
+Both interfaces run together. The panel shows home Wi-Fi and its IP at the
+bottom-right, and the hosted network and its IP at the bottom-left. Each icon
+indicates that interface's controller availability; disconnected interfaces show
+a red icon without borrowing the other interface's address.
+Home connection retries retain hotspot clients and the independent SD playback
+session. The Pico does not share your home Internet through its hotspot. See
+[connectivity and recovery](docs/RUNTIME.md#wi-fi-and-direct-hotspot).
 
 ## Build & Flash Quickstart
 Configure `.env` as described above before the first build. This project is built and

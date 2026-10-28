@@ -14,12 +14,6 @@
 #include <cstdio>
 #include <cstring>
 
-#define MAC_BYTE_INDEX_2 2
-#define MAC_BYTE_INDEX_3 3
-#define MAC_BYTE_INDEX_4 4
-#define MAC_BYTE_INDEX_5 5
-#define MAC_TEXT_BYTES 18
-#define WIFI_RADIO_RESTART_SETTLE_MS 200
 #define WIFI_REACHABILITY_GRACE_MS 30000
 
 
@@ -79,6 +73,7 @@ WifiConnection::~WifiConnection (
 {
     if (m_cyw43Initialized) {
         StopNetworkServices();
+        m_hotspot.Stop();
     }
 } // ~WifiConnection
 
@@ -158,7 +153,7 @@ WifiConnection::ObserveNetworkInput (
 /**
     Installs the network input monitor used by reachability checks.
 
-    Installs one wrapper around the default interface's original input function while holding the
+    Installs one wrapper around the station interface's original input function while holding the
     lwIP lock. It resets evidence for the new monitoring session and schedules a fresh gateway
     check. With no gateway configured, local service availability is not made dependent on a
     nonexistent remote probe target.
@@ -170,16 +165,16 @@ WifiConnection::StartInputMonitor (
 {
     // Serialize TCP state changes with lwIP; keep storage work outside this lock.
     cyw43_arch_lwip_begin();
-    if (netif_default && !m_monitoredInterface) {
-        m_monitoredInterface = netif_default;
-        m_originalInput = netif_default->input;
+    if (!m_monitoredInterface) {
+        m_monitoredInterface = StationInterface();
+        m_originalInput = StationInterface()->input;
         s_inputMonitor = this;
-        netif_default->input = ObserveNetworkInput;
+        StationInterface()->input = ObserveNetworkInput;
     }
     m_arpPending = m_arpReply = m_inboundSeen = false;
     m_arpFailStreak = 0;
     // Without a gateway there is no remote target to check; keep local services.
-    m_reachabilityVerified = netif_default && ip4_addr_isany_val(*netif_ip4_gw(netif_default));
+    m_reachabilityVerified = ip4_addr_isany_val(*netif_ip4_gw(StationInterface()));
     m_nextArpProbeTime = get_absolute_time();
     cyw43_arch_lwip_end();
 } // StartInputMonitor
@@ -247,15 +242,15 @@ WifiConnection::CheckReachability (
             HUB75_DEBUG("[net] gateway ARP timeout, failures=%u (link/IP still up)\n", m_arpFailStreak);
         }
     }
-    if (!m_arpPending && absolute_time_diff_us(now, m_nextArpProbeTime) <= 0 && netif_default) {
+    if (!m_arpPending && absolute_time_diff_us(now, m_nextArpProbeTime) <= 0) {
         m_nextArpProbeTime = make_timeout_time_ms(WIFI_GATEWAY_PROBE_INTERVAL_MS);
-        gateway = *netif_ip4_gw(netif_default);
+        gateway = *netif_ip4_gw(StationInterface());
         if (!ip4_addr_isany_val(gateway)) {
             m_arpPending = true;
             m_arpReply = false;
             m_arpProbeDeadline = make_timeout_time_ms(WIFI_GATEWAY_PROBE_TIMEOUT_MS);
             // Always send a fresh request; an old ARP cache entry is not evidence.
-            result = etharp_request(netif_default, &gateway);
+            result = etharp_request(StationInterface(), &gateway);
             if (result != ERR_OK) {
                 m_arpPending = false;
                 if (!recentTraffic) {
@@ -268,7 +263,7 @@ WifiConnection::CheckReachability (
     lost = m_arpFailStreak >= WIFI_GATEWAY_PROBE_FAIL_DEBOUNCE_COUNT;
     cyw43_arch_lwip_end();
     if (lost) {
-        EnterNoWifiState("gateway ARP and incoming traffic lost; restarting radio");
+        EnterNoWifiState("home gateway and incoming traffic lost");
     }
 } // CheckReachability
 
@@ -363,13 +358,9 @@ WifiConnection::HasIpv4Address (
 {
     ip4_addr_t ipAddr;
 
-    if (netif_default == nullptr) {
-        return false;
-    }
-
     // Serialize TCP state changes with lwIP; keep storage work outside this lock.
     cyw43_arch_lwip_begin();
-    ipAddr = *netif_ip4_addr(netif_default);
+    ipAddr = *netif_ip4_addr(StationInterface());
     cyw43_arch_lwip_end();
     return !ip4_addr_isany_val(ipAddr);
 } // HasIpv4Address
@@ -420,22 +411,29 @@ WifiConnection::IsRadioResponding (
 } // IsRadioResponding
 
 /**
-    Stops network services and schedules a Wi-Fi reconnect attempt.
+    Stops station monitoring and schedules a home Wi-Fi reconnect attempt.
 
-    @param reason Human-readable reason for the state transition.
+    A station failure does not close shared listeners or the hotspot. Its ARP/TCP
+    probes and cached address are released independently. Only a debounced radio
+    fault requests full recovery; that reset waits until no client is active.
+
+    @param reason Human-readable reason for the station transition.
+    @param restartRadio True requests a deferred reset of the shared radio.
 */
 void
 WifiConnection::EnterNoWifiState (
-    const char* reason
+    const char* reason,
+    bool restartRadio
     )
 {
     printf("[net] -> no-wifi (%s)\n", reason);
-    StopNetworkServices();
+    StopStationMonitoring();
+    cyw43_arch_disable_sta_mode();
     m_netState = NetState::NoWifi;
     m_wifiIpText.clear();
+    m_stationConnecting = false;
     m_rssiProbeFailStreak = 0;
-    m_gatewayProbeFailStreak = 0;
-    m_forceRadioRestart = true;
+    m_forceRadioRestart = restartRadio;
     m_nextWifiAttemptTime = make_timeout_time_ms(WIFI_RETRY_INTERVAL_MS);
 } // EnterNoWifiState
 
@@ -554,11 +552,11 @@ WifiConnection::StartGatewayProbe (
 
     gateway = {};
 
-    if (m_gatewayProbePcb != nullptr || netif_default == nullptr) {
+    if (m_gatewayProbePcb != nullptr) {
         return;
     }
 
-    gateway = *netif_ip4_gw(netif_default);
+    gateway = *netif_ip4_gw(StationInterface());
     if (ip4_addr_isany_val(gateway)) {
         HUB75_DEBUG("[net] gateway probe skipped (no gateway)\n");
         return;
@@ -649,93 +647,62 @@ WifiConnection::UpdateGatewayProbe (
 } // UpdateGatewayProbe
 
 /**
-    Initializes the radio and attempts station association and address acquisition.
+    Initializes the radio and starts a nonblocking home Wi-Fi association.
 
-    Stops local listeners through their lifecycle boundary, publishes radio-restart status, and
-    recreates the CYW43 station context before attempting association and DHCP. The SDK connection
-    call can block up to the configured timeout; this work runs on the network core while Core 0
-    retains SD ownership and playback state.
-
-    After the SDK returns, actual link/address usability determines the next state. A timeout with
-    association or DHCP still progressing keeps the radio alive for a grace period so a late
-    address can be adopted. Other failures schedule a later retry, while a usable address advances
-    to listener startup.
+    The hotspot uses the same radio but retains its interface and DHCP leases
+    across ordinary home retries. Association and DHCP advance asynchronously;
+    subsequent network passes keep HTTP replies and upload acknowledgements
+    moving while the station waits. A full radio fault recovery explicitly closes
+    clients and the hotspot before deinitialization, then recreates both services.
 */
 void
 WifiConnection::RunWifiConnectSequence (
     void
     )
 {
-    char macBuffer[MAC_TEXT_BYTES];
-    int connectResult;
-    const uint8_t* mac = nullptr;
-    int initializationResult;
-    int link;
-    int tcpip;
-    bool pending;
-    uint32_t retryDelayMs;
+    int result;
 
-    printf("[net] -> connecting\n");
-
-    StopNetworkServices();
-    if (m_beforeRadioRestart) {
-        m_beforeRadioRestart(m_restartContext);
+    if (HasActiveNetworkClient()) {
+        return;
+    }
+    if (m_forceRadioRestart && m_cyw43Initialized) {
+        StopNetworkServices();
+        m_hotspot.Stop();
+        if (m_beforeRadioRestart) {
+            m_beforeRadioRestart(m_restartContext);
+        }
+        cyw43_arch_deinit();
+        m_cyw43Initialized = false;
     }
     m_forceRadioRestart = false;
 
-    // if is already initialized then deinit for fresh state for clean connect sequence
-    if (m_cyw43Initialized) {
-        cyw43_arch_deinit();
-        m_cyw43Initialized = false;
-        sleep_ms(WIFI_RADIO_RESTART_SETTLE_MS);
+    if (!m_cyw43Initialized) {
+        result = cyw43_arch_init();
+        if (result != PICO_OK) {
+            printf("[wifi] radio initialization failed code=%d\n", result);
+            m_nextWifiAttemptTime = make_timeout_time_ms(WIFI_RETRY_INTERVAL_MS);
+            return;
+        }
+        m_cyw43Initialized = true;
+        m_nextHotspotAttemptTime = get_absolute_time();
     }
 
-    HUB75_DEBUG("[wifi] initializing radio\n");
-    initializationResult = cyw43_arch_init();
-    if (initializationResult) {
-
-        printf("[wifi] cyw43_arch_init failed, code=%d\n", initializationResult);
-        m_nextWifiAttemptTime = make_timeout_time_ms(WIFI_RETRY_INTERVAL_MS);
-        return;
-    }
-    m_cyw43Initialized = true;
-    HUB75_DEBUG("[wifi] radio initialized; enabling station mode\n");
-    // enable client mode and connect to the configured WiFi network
+    // Reset only the station interface; AP clients and all shared listeners stay alive.
+    StopStationMonitoring();
+    cyw43_arch_disable_sta_mode();
     cyw43_arch_enable_sta_mode();
-    // CYW43 owns separate PIO/DMA resources. Core 0 keeps its open SD reader
-    // and advances frames during radio initialization and association alike.
-
-    mac = cyw43_state.mac;
-    snprintf(macBuffer, sizeof(macBuffer), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1],
-             mac[MAC_BYTE_INDEX_2], mac[MAC_BYTE_INDEX_3], mac[MAC_BYTE_INDEX_4], mac[MAC_BYTE_INDEX_5]);
-
-    HUB75_DEBUG("[wifi] MAC %s, connecting to %s...\n", macBuffer, WIFI_SSID);
-    connectResult = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK,
-                                                       WIFI_CONNECT_TIMEOUT_MS);
-
-    // check after the blocking wifi connect (non blocking connect is unstable)
-    if (!IsWifiUsable()) {
-        cyw43_arch_lwip_begin();
-        link = cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
-        tcpip = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-        cyw43_arch_lwip_end();
-        printf("[wifi] connect incomplete, code=%d (%s), link=%s tcpip=%s\n", connectResult,
-               GetConnectResultName(connectResult), GetCyw43StatusName(link), GetCyw43StatusName(tcpip));
-        pending = connectResult == PICO_ERROR_TIMEOUT && (tcpip == CYW43_LINK_JOIN || tcpip == CYW43_LINK_NOIP);
-        if (pending) {
-            printf("[wifi] join/IP still pending; keeping radio alive for %u ms\n", WIFI_JOIN_GRACE_MS);
-        }
-        retryDelayMs = {};
-        if (pending) {
-            retryDelayMs = WIFI_JOIN_GRACE_MS;
-        } else {
-            retryDelayMs = WIFI_RETRY_INTERVAL_MS;
-        }
-        m_nextWifiAttemptTime = make_timeout_time_ms(retryDelayMs);
+    cyw43_arch_lwip_begin();
+    netif_set_default(StationInterface());
+    cyw43_arch_lwip_end();
+    printf("[net] -> connecting\n");
+    result = cyw43_arch_wifi_connect_async(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK);
+    if (result != PICO_OK) {
+        printf("[wifi] connection start failed code=%d (%s)\n", result, GetConnectResultName(result));
+        EnterNoWifiState("association start failed");
         return;
     }
-
-    EnterWifiNoTcpState();
+    m_stationConnecting = true;
+    m_stationDeadline = make_timeout_time_ms(WIFI_CONNECT_TIMEOUT_MS + WIFI_JOIN_GRACE_MS);
 } // RunWifiConnectSequence
 
 /**
@@ -746,11 +713,12 @@ WifiConnection::EnterWifiNoTcpState (
     void
     )
 {
+    m_stationConnecting = false;
     RefreshWifiIpText();
     StartInputMonitor();
 
     printf("[net] -> wifi-no-tcp, ip=%s\n", m_wifiIpText.c_str());
-    // WiFi is connected, but the frame upload server is not listening yet.
+    // The shared listeners may already be serving the direct hotspot.
     m_netState = NetState::WifiNoTcp;
     m_rssiProbeFailStreak = 0;
     m_gatewayProbeFailStreak = 0;
@@ -774,7 +742,7 @@ WifiConnection::CheckWifiHealth (
     void
     )
 {
-    // to prevent spamming the serial output
+    // Bound radio and gateway work to the health-check interval.
     if (absolute_time_diff_us(get_absolute_time(), m_nextHealthCheckTime) > 0) {
         return;
     }
@@ -788,13 +756,13 @@ WifiConnection::CheckWifiHealth (
     // DHCP can change the address without a full Wi-Fi reconnect.
     RefreshWifiIpText();
 
-    // succseful response reset fail counter
+    // Debounce radio-query failures before requesting a full radio reset.
     if (IsRadioResponding()) {
         m_rssiProbeFailStreak = 0;
     } else {
         m_rssiProbeFailStreak++;
         if (m_rssiProbeFailStreak >= RSSI_PROBE_FAIL_DEBOUNCE_COUNT) {
-            EnterNoWifiState("radio not responding");
+            EnterNoWifiState("radio not responding", true);
             return;
         }
     }
@@ -820,153 +788,181 @@ WifiConnection::InitializeNetworkTiming (
 } // InitializeNetworkTiming
 
 /**
-    Advances Wi-Fi connection, local services, and recovery states.
+    Advances home Wi-Fi, the direct hotspot and shared listener recovery.
 
-    Advances the local network through no-Wi-Fi, address-acquired and listeners-ready states using
-    retry deadlines. The disconnected state can adopt late DHCP success before deciding to
-    recreate the radio. Listener creation is bracketed by foreground pause/resume callbacks so it
-    cannot race a shared-buffer operation.
-
-    A connect sequence can block inside the SDK and a service handoff can wait for Core 0
-    acknowledgement; ordinary deadline checks simply return until due. Ready state continues
-    health checks and detects missing listeners. Recovery affects network services without forcing
-    the SD manager to remount.
+    AP availability is independent of station association and router reachability.
+    Each pass polls the asynchronous station deadline, starts a missing hotspot
+    on its own retry timer and maintains one set of HTTP/photo/video listeners.
+    Normal home failures leave those listeners and active AP clients untouched.
+    Core 0 retains SD ownership and playback throughout network retries.
 */
 void
 WifiConnection::UpdateNetworkStateMachine (
     void
     )
 {
-    bool rawReady;
-    bool webReady;
-    bool videoReady;
+    int link;
 
-    switch (m_netState) {
-    case NetState::NoWifi:
-        // A timed-out blocking call can leave association/DHCP progressing.
-        // Adopt a late address instead of throwing it away at the next retry.
-        if (!m_forceRadioRestart && IsWifiUsable()) {
-            HUB75_DEBUG("[wifi] connection completed; IP address acquired\n");
-            EnterWifiNoTcpState();
-            break;
-        }
-        // Attempt to connect to WiFi if the retry interval has elapsed.
-        if (absolute_time_diff_us(get_absolute_time(), m_nextWifiAttemptTime) <= 0) {
-            RunWifiConnectSequence();
-        }
-        break;
-
-    case NetState::WifiNoTcp:
-        CheckWifiHealth();
-        // double check if wifi is still up
-        if (m_netState != NetState::WifiNoTcp) {
-            break;
-        }
-
-        // Attempt to bind the TCP listener if the retry interval has elapsed.
-        if (absolute_time_diff_us(get_absolute_time(), m_nextBindAttemptTime) <= 0) {
-            m_nextBindAttemptTime = make_timeout_time_ms(TCP_BIND_RETRY_INTERVAL_MS);
-            if (m_beginServices) {
-                m_beginServices(m_servicesContext);
-            }
-            rawReady = m_frameBufferController && m_frameBufferController->StartFrameUploadServer(IMAGE_UPLOAD_PORT);
-            webReady = m_frameBufferController && WebServer::Start(*m_frameBufferController);
-            videoReady = !m_videoUpload || m_videoUpload->Start();
-            if (m_endServices) {
-                m_endServices(m_servicesContext);
-            }
-            if (rawReady && webReady && videoReady) {
-                printf("[net] -> ready http://%s/ tcp=5001,5002\n", m_wifiIpText.c_str());
-                m_netState = NetState::Ready;
+    if (m_cyw43Initialized && !m_forceRadioRestart && IsWifiUsable()) {
+        if (m_netState == NetState::NoWifi) {
+            if (HasSubnetConflict()) {
+                EnterNoWifiState("home network overlaps hotspot subnet");
             } else {
-                printf("[net] upload listeners pending: photo=%u http=%u video=%u\n", unsigned(rawReady),
-                       unsigned(webReady), unsigned(videoReady));
+                EnterWifiNoTcpState();
             }
-            // if failed then just keep the wifinotcp state and retry after the interval
+        } else {
+            CheckWifiHealth();
         }
-        break;
-
-    case NetState::Ready:
-        // check if wifi is still up and healthy, if not then go back to no-wifi state
-        CheckWifiHealth();
-        if (m_netState != NetState::Ready) {
-            break;
-        }
-
-        // Return to NoWifi if the upload listener is no longer available.
-        if (m_frameBufferController == nullptr || !m_frameBufferController->IsFrameUploadServerListening() ||
-            !WebServer::IsListening() || (m_videoUpload && !m_videoUpload->IsListening())) {
-            EnterNoWifiState("TCP listener unavailable");
-        }
-        break;
+    } else if (m_netState != NetState::NoWifi) {
+        EnterNoWifiState("link/ip lost");
     }
+
+    if (m_stationConnecting) {
+        cyw43_arch_lwip_begin();
+        link = cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
+        cyw43_arch_lwip_end();
+        if (link < CYW43_LINK_DOWN) {
+            printf("[wifi] association failed link=%s\n", GetCyw43StatusName(link));
+            EnterNoWifiState("association failed");
+        } else if (absolute_time_diff_us(get_absolute_time(), m_stationDeadline) <= 0) {
+            EnterNoWifiState("association/IP timeout");
+        }
+    } else if (m_netState == NetState::NoWifi &&
+        absolute_time_diff_us(get_absolute_time(), m_nextWifiAttemptTime) <= 0) {
+        RunWifiConnectSequence();
+    }
+
+    if (!m_cyw43Initialized) {
+        return;
+    }
+    if (!m_hotspot.IsReady() &&
+        absolute_time_diff_us(get_absolute_time(), m_nextHotspotAttemptTime) <= 0) {
+        m_nextHotspotAttemptTime = make_timeout_time_ms(WIFI_RETRY_INTERVAL_MS);
+        if (!m_hotspot.Start()) {
+            printf("[hotspot] unavailable; retry=%u ms\n", WIFI_RETRY_INTERVAL_MS);
+        }
+        // AP setup changes lwIP's default netif; keep the home interface as the default route.
+        cyw43_arch_lwip_begin();
+        netif_set_default(StationInterface());
+        cyw43_arch_lwip_end();
+    }
+    EnsureNetworkServices();
+    m_hotspot.UpdateClients(to_ms_since_boot(get_absolute_time()));
 } // UpdateNetworkStateMachine
 
 /**
-    Reports whether local services and configured reachability checks are ready.
+    Reports whether the shared controller services are locally accessible.
 
-    @return true - Local listeners are ready and reachability has been verified.
-    @return false - Wi-Fi, listeners or reachability checks are not ready.
+    @return true - Listeners are ready through the hotspot or verified home Wi-Fi.
+    @return false - No usable local interface or complete listener set is available.
 */
 bool
 WifiConnection::IsNetworkReady (
     void
     ) const
 {
-    return m_netState == NetState::Ready && m_reachabilityVerified && !m_arpFailStreak;
+    return m_servicesReady && (m_hotspot.IsReady() ||
+        (m_netState == NetState::Ready && m_reachabilityVerified && !m_arpFailStreak));
 } // IsNetworkReady
 
 /**
     Returns the readable current network state.
 
-    Combines the lifecycle state with reachability verification when formatting the ready state.
-    This distinguishes started local listeners from a path that has already demonstrated working
-    packet communication. The returned static text is for status reporting and does not advance
-    any connection attempt.
-
-    @return "no-wifi" - No usable Wi-Fi connection is available.
-    @return "wifi-no-tcp" - Wi-Fi has an IP address but local listeners are not all ready.
-    @return "ready" - The required local services are ready.
-    @return "ready-unverified" - Listeners are ready but local reachability is not yet verified.
-    @return "unknown" - The stored state value is not recognized.
+    @return "hotspot" - Direct controller access is ready without home Wi-Fi.
+    @return "hotspot-connecting" - Direct access is ready while home Wi-Fi connects.
+    @return "connecting" - The home association is pending without ready direct access.
+    @return "no-wifi" - Neither network path has reached readiness.
+    @return "wifi-no-tcp" - Home Wi-Fi is up but listeners are pending.
+    @return "ready" - Home Wi-Fi and shared listeners are verified.
+    @return "ready-unverified" - Home listeners are up while reachability is checked.
 */
 const char*
 WifiConnection::GetNetStateName (
     void
     ) const
 {
-    switch (m_netState) {
-    case NetState::NoWifi:
-        return "no-wifi";
-    case NetState::WifiNoTcp:
-        return "wifi-no-tcp";
-    case NetState::Ready: {
-        if (IsNetworkReady()) {
-            return "ready";
-        } else {
-            return "ready-unverified";
+    if (m_netState == NetState::NoWifi && m_servicesReady && m_hotspot.IsReady()) {
+        if (m_stationConnecting) {
+            return "hotspot-connecting";
         }
+        return "hotspot";
     }
-    }
-
-    return "unknown";
+    return GetHomeWifiStateName();
 } // GetNetStateName
 
 /**
-    Returns the station's current IPv4 address text.
+    Returns the home Wi-Fi state independently of hotspot availability.
 
-    @return address - Borrowed IPv4 address text, valid until connection state updates it.
-    @return "-" - No usable IPv4 address is currently assigned.
+    Reports station association, listener availability and path verification from
+    the network worker's current state. A ready hotspot does not conceal a pending
+    or failed home connection. This accessor performs no radio or transport work.
+
+    @return "connecting" - Home association or address acquisition is pending.
+    @return "no-wifi" - Home Wi-Fi has no usable association/address.
+    @return "wifi-no-tcp" - Home Wi-Fi has an address while listeners are pending.
+    @return "ready" - Home Wi-Fi, listeners and path verification are ready.
+    @return "ready-unverified" - Home listeners are up while the path is checked.
+*/
+const char*
+WifiConnection::GetHomeWifiStateName (
+    void
+    ) const
+{
+    if (m_netState == NetState::NoWifi) {
+        if (m_stationConnecting) {
+            return "connecting";
+        }
+        return "no-wifi";
+    }
+    if (!m_servicesReady) {
+        return "wifi-no-tcp";
+    }
+    if (m_reachabilityVerified && !m_arpFailStreak) {
+        return "ready";
+    }
+    return "ready-unverified";
+} // GetHomeWifiStateName
+
+/**
+    Returns the hosted network state independently of home Wi-Fi availability.
+
+    @return "unavailable" - The Pico access point or DHCP server is not running.
+    @return "services-pending" - The access point is running while listeners start.
+    @return "ready" - The hosted interface and shared controller listeners are ready.
+*/
+const char*
+WifiConnection::GetHotspotStateName (
+    void
+    ) const
+{
+    if (!m_hotspot.IsReady()) {
+        return "unavailable";
+    }
+    if (!m_servicesReady) {
+        return "services-pending";
+    }
+    return "ready";
+} // GetHotspotStateName
+
+/**
+    Returns the preferred local controller address.
+
+    @return address - Home Wi-Fi address while its station interface is usable.
+    @return WIFI_HOTSPOT_ADDRESS - Direct address when only the hotspot is usable.
+    @return "-" - No local interface has an available address.
 */
 const char*
 WifiConnection::GetWifiIpText (
     void
     ) const
 {
-    if (m_netState == NetState::NoWifi || m_wifiIpText.empty()) {
-        return "-";
+    if (m_netState != NetState::NoWifi && !m_wifiIpText.empty()) {
+        return m_wifiIpText.c_str();
     }
-    return m_wifiIpText.c_str();
+    if (m_hotspot.IsReady()) {
+        return WIFI_HOTSPOT_ADDRESS;
+    }
+    return "-";
 } // GetWifiIpText
 
 /**
@@ -985,7 +981,8 @@ WifiConnection::StopNetworkServices (
     if (m_beginServices) {
         m_beginServices(m_servicesContext);
     }
-    StopInputMonitor();
+    m_servicesReady = false;
+    StopStationMonitoring();
     if (m_videoUpload) {
         m_videoUpload->Stop();
     }
@@ -994,15 +991,6 @@ WifiConnection::StopNetworkServices (
         m_frameBufferController->StopFrameUploadServer();
     }
 
-    // Serialize TCP state changes with lwIP; keep storage work outside this lock.
-    cyw43_arch_lwip_begin();
-    if (m_gatewayProbePcb) {
-        tcp_arg(m_gatewayProbePcb, nullptr);
-        tcp_err(m_gatewayProbePcb, nullptr);
-        tcp_abort(m_gatewayProbePcb);
-        m_gatewayProbePcb = nullptr;
-    }
-    cyw43_arch_lwip_end();
     if (m_endServices) {
         m_endServices(m_servicesContext);
     }
@@ -1022,9 +1010,7 @@ WifiConnection::RefreshWifiIpText (
 
     // Serialize TCP state changes with lwIP; keep storage work outside this lock.
     cyw43_arch_lwip_begin();
-    if (netif_default != nullptr) {
-        ip4addr_ntoa_r(netif_ip4_addr(netif_default), address, sizeof(address));
-    }
+    ip4addr_ntoa_r(netif_ip4_addr(StationInterface()), address, sizeof(address));
     cyw43_arch_lwip_end();
     m_wifiIpText = address;
 } // RefreshWifiIpText
@@ -1107,3 +1093,221 @@ WifiConnection::WifiConnection (
 {
     return;
 } // WifiConnection
+
+/**
+    Checks for active clients before a disruptive station retry or radio reset.
+
+    @return true - A photo, HTTP or video connection is currently in progress.
+    @return false - Retrying the station will not interrupt an active controller client.
+*/
+bool
+WifiConnection::HasActiveNetworkClient (
+    void
+    ) const
+{
+    if (!m_cyw43Initialized) {
+        return false;
+    }
+    return (m_frameBufferController && m_frameBufferController->IsFrameUploadInProgress()) ||
+        WebServer::HasActiveClient() || (m_videoUpload && m_videoUpload->HasActiveClient());
+} // HasActiveNetworkClient
+
+/**
+    Cancels station-only probes without stopping shared client listeners.
+
+    Removes the input wrapper before the SDK can destroy the station netif. The
+    diagnostic TCP PCB is detached and aborted under the lwIP lock; AP clients,
+    DHCP leases and upload listeners retain their own independent lifetimes.
+*/
+void
+WifiConnection::StopStationMonitoring (
+    void
+    )
+{
+    if (!m_cyw43Initialized) {
+        return;
+    }
+    StopInputMonitor();
+    cyw43_arch_lwip_begin();
+    if (m_gatewayProbePcb) {
+        tcp_arg(m_gatewayProbePcb, nullptr);
+        tcp_err(m_gatewayProbePcb, nullptr);
+        tcp_abort(m_gatewayProbePcb);
+        m_gatewayProbePcb = nullptr;
+    }
+    m_arpPending = m_arpReply = m_inboundSeen = false;
+    m_arpFailStreak = m_gatewayProbeFailStreak = 0;
+    m_reachabilityVerified = false;
+    cyw43_arch_lwip_end();
+} // StopStationMonitoring
+
+/**
+    Detects overlapping home and hotspot subnets before publishing a home address.
+
+    Two local interfaces cannot route the same address range reliably. The AP's
+    fixed /24 and the router's DHCP mask are both checked, so a broader home mask
+    is detected too. The station is rejected while direct hotspot access remains.
+
+    @return true - The home and direct networks overlap.
+    @return false - The two IPv4 address ranges are disjoint.
+*/
+bool
+WifiConnection::HasSubnetConflict (
+    void
+    ) const
+{
+    ip4_addr_t address;
+    ip4_addr_t mask;
+    bool conflict;
+
+    cyw43_arch_lwip_begin();
+    ip4addr_aton(WIFI_HOTSPOT_ADDRESS, &address);
+    ip4addr_aton(WIFI_HOTSPOT_NETMASK, &mask);
+    conflict = ip4_addr_netcmp(&address, netif_ip4_addr(StationInterface()), &mask) ||
+        ip4_addr_netcmp(&address, netif_ip4_addr(StationInterface()),
+            netif_ip4_netmask(StationInterface()));
+    cyw43_arch_lwip_end();
+    return conflict;
+} // HasSubnetConflict
+
+/**
+    Starts missing shared listeners while either network interface is available.
+
+    All services bind to any local address and validate HTTP origins against the
+    receiving connection's local IP. Listener creation still uses the existing
+    foreground handoff. A home connection appearing or disappearing does not
+    recreate an already complete listener set or cancel an AP-side transaction.
+*/
+void
+WifiConnection::EnsureNetworkServices (
+    void
+    )
+{
+    bool photoReady;
+    bool httpReady;
+    bool videoReady;
+    bool previouslyReady;
+
+    previouslyReady = m_servicesReady;
+    photoReady = m_frameBufferController && m_frameBufferController->IsFrameUploadServerListening();
+    httpReady = WebServer::IsListening();
+    videoReady = !m_videoUpload || m_videoUpload->IsListening();
+    m_servicesReady = photoReady && httpReady && videoReady;
+
+    if (!m_servicesReady && (m_hotspot.IsReady() || m_netState != NetState::NoWifi) &&
+        absolute_time_diff_us(get_absolute_time(), m_nextBindAttemptTime) <= 0) {
+        m_nextBindAttemptTime = make_timeout_time_ms(TCP_BIND_RETRY_INTERVAL_MS);
+        if (m_beginServices) {
+            m_beginServices(m_servicesContext);
+        }
+        if (!photoReady && m_frameBufferController) {
+            photoReady = m_frameBufferController->StartFrameUploadServer(IMAGE_UPLOAD_PORT);
+        }
+        if (!httpReady && m_frameBufferController) {
+            httpReady = WebServer::Start(*m_frameBufferController);
+        }
+        if (!videoReady && m_videoUpload) {
+            videoReady = m_videoUpload->Start();
+        }
+        if (m_endServices) {
+            m_endServices(m_servicesContext);
+        }
+        m_servicesReady = photoReady && httpReady && videoReady;
+    }
+
+    if (m_servicesReady && !previouslyReady) {
+        printf("[net] listeners ready http=80 tcp=5001,5002\n");
+    }
+    if (m_netState != NetState::NoWifi && m_servicesReady) {
+        m_netState = NetState::Ready;
+    }
+} // EnsureNetworkServices
+
+/**
+    Returns the home Wi-Fi interface independently of lwIP's default route.
+
+    @return interface - Station netif owned by the initialized CYW43 driver.
+*/
+netif*
+WifiConnection::StationInterface (
+    void
+    )
+{
+    return &cyw43_state.netif[CYW43_ITF_STA];
+} // StationInterface
+
+/**
+    Reports whether verified home Wi-Fi and its shared listeners are ready.
+
+    @return true - Home association, IPv4, listeners and path verification are ready.
+    @return false - The home path is disconnected, unverified or missing listeners.
+*/
+bool
+WifiConnection::IsHomeWifiReady (
+    void
+    ) const
+{
+    return m_servicesReady && m_netState == NetState::Ready &&
+        m_reachabilityVerified && !m_arpFailStreak;
+} // IsHomeWifiReady
+
+/**
+    Reports whether the hosted network and its shared listeners are ready.
+
+    @return true - The hotspot, DHCP server and controller listeners are running.
+    @return false - The hotspot or its controller listeners are unavailable.
+*/
+bool
+WifiConnection::IsHotspotReady (
+    void
+    ) const
+{
+    return m_servicesReady && m_hotspot.IsReady();
+} // IsHotspotReady
+
+/**
+    Returns only the home Wi-Fi address without a hotspot fallback.
+
+    @return address - Home interface's assigned IPv4 text while associated.
+    @return "-" - The home interface has no usable assigned address.
+*/
+const char*
+WifiConnection::GetHomeWifiIpText (
+    void
+    ) const
+{
+    if (m_netState != NetState::NoWifi && !m_wifiIpText.empty()) {
+        return m_wifiIpText.c_str();
+    }
+    return "-";
+} // GetHomeWifiIpText
+
+/**
+    Returns only the hosted network address without a home Wi-Fi fallback.
+
+    @return WIFI_HOTSPOT_ADDRESS - The hosted interface's fixed IPv4 address.
+    @return "-" - The hosted interface has not started or is unavailable.
+*/
+const char*
+WifiConnection::GetHotspotIpText (
+    void
+    ) const
+{
+    if (m_hotspot.IsReady()) {
+        return WIFI_HOTSPOT_ADDRESS;
+    }
+    return "-";
+} // GetHotspotIpText
+
+/**
+    Copies the hotspot's stable per-device display states.
+
+    @param states Destination with WIFI_HOTSPOT_MAX_CLIENTS entries.
+*/
+void
+WifiConnection::CopyHotspotClientStates (
+    uint8_t* states
+    ) const
+{
+    m_hotspot.CopyClientStates(states, to_ms_since_boot(get_absolute_time()));
+} // CopyHotspotClientStates

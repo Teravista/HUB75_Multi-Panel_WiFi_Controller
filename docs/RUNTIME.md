@@ -6,7 +6,7 @@
 | --- | --- |
 | Core 0 foreground | SD/FatFs operations, upload persistence and verification, saved-media selection, local JPEG fallback, frame preparation and submission |
 | Core 0 scan interrupt | HUB75 row/bit-plane progression and complete-scan buffer swaps |
-| Core 1 | Wi-Fi association, DHCP, local listener lifecycle, HTTP/TCP transport callbacks, response pumping, connection health and reserved JPEG decode jobs |
+| Core 1 | Wi-Fi association, hotspot/DHCP, local listener lifecycle, HTTP/TCP transport callbacks, response pumping, connection health and reserved JPEG decode jobs |
 
 `StartNetworkCore` launches one long-lived `NetworkServices` worker. The HUB75 driver
 uses Core 0 (`HUB75_MULTICORE=false`). Both SDK core stacks are configured to 4 KiB.
@@ -43,22 +43,57 @@ fallback remains available. A successful remount reloads that card's library and
 selection before accepting new storage jobs. Worker completion precedes any buffer or
 session invalidation.
 
-## Wi-Fi recovery
+## Wi-Fi and direct hotspot
 
-Local networking uses `no-wifi`, `wifi-no-tcp` and `ready` states. A usable link/IP
-advances to listener startup; all required listeners must be running before service
-readiness. Packet reachability is reported separately as `ready-unverified` while
-fresh gateway replies or incoming traffic are awaited. Internet access is not required.
+The radio provides home-network station mode and a password-protected direct
+hotspot simultaneously. Both serve the same HTTP page/API on port 80, photo TCP
+listener and video TCP listener. The page uses the receiving connection's local
+address for origin validation; either address is a separate browser origin.
+There is no Internet forwarding, DNS interception or automatic captive portal.
 
-Connection attempts wait up to 15 seconds. A timed-out association or DHCP attempt
-keeps the radio alive for a further 30-second grace period to adopt a late address.
-SDK error `-2` means `PICO_ERROR_TIMEOUT`, distinct from CYW43's `NONET` link value.
+Join the `WIFI_AP_SSID` network from the phone's Wi-Fi settings and open
+`http://192.168.4.1/` using the private `WIFI_AP_PASSWORD` from `.env`. Both
+hotspot settings are required: `WIFI_AP_SSID` accepts 1–32 bytes and
+`WIFI_AP_PASSWORD` accepts 8–63 bytes. There are no built-in credentials; missing
+or empty settings stop configuration generation. Changes take effect after building/flashing.
+`WIFI_HOTSPOT_MAX_CLIENTS` in `src/config/defines.h` sets the bounded lease and
+device-indicator capacity, currently four slots (`192.168.4.2` through
+`192.168.4.5`) on `192.168.4.0/24`. Actual simultaneous associations are capped
+at the lower of that setting, the firmware-reported ceiling and the Pico 2 W's
+documented four-client SoftAP limit. An unused slot stays dark. DHCP listens only
+on the AP interface and never on the home LAN. The packet workspace and tracking
+tables are fixed-size and require no framebuffer. Dots use actual radio associations,
+with ARP/DHCP mapping accepted application traffic to the corresponding device.
 
-Gateway TCP probes are diagnostic. Fresh ARP replies or recent incoming IPv4 traffic
-can confirm the LAN path even when the gateway filters the TCP port. Debounced loss
-of packet reachability or loss of the station link/IP stops services and schedules
-recovery. Wi-Fi restarts retain the SD mount, cache and playback position; SD recovery
-leaves the radio and network listeners running.
+Home association and DHCP proceed asynchronously for up to 45 seconds, including
+the address-acquisition grace period. Failed attempts retry after ten seconds;
+starting a retry waits for active HTTP/photo/video clients to finish. Hotspot
+requests and transport maintenance continue while association is pending. The
+AP and station share one radio/channel, so association or router channel changes
+can briefly interrupt the direct wireless link.
+
+Station `no-wifi`, `wifi-no-tcp` and `ready` states track home connectivity and
+shared listeners. `ready-unverified` indicates pending home-path verification.
+Without home connectivity, `hotspot` or `hotspot-connecting` reports ready direct
+access, with the latter also indicating a pending home connection. The icon is
+ready when the corresponding interface and shared listeners are available;
+home Wi-Fi also requires path verification. Home Wi-Fi appears at the
+bottom-right, and the hosted network appears at the bottom-left. Each has its
+own IP label and never substitutes the other interface's address. Serial status
+reports both interfaces separately as `home_wifi`/`home_ip` and `pico_wifi`/`pico_ip`.
+
+Home health checks use the station interface explicitly. Gateway TCP probes are
+diagnostic; fresh ARP replies or incoming IPv4 traffic verify the home path.
+Ordinary home link/address or reachability loss cancels only station monitoring
+and retries its interface. Hotspot leases and shared listeners stay running.
+A debounced radio-query fault requests a full radio recovery once clients are
+idle; this recreates the hotspot and listeners. Listener allocation failures
+retry separately without remounting SD. SD recovery never restarts networking.
+
+The home network must not overlap `192.168.4.0/24`. If its address/mask overlaps,
+the station disconnects and direct access remains available. Change
+`WIFI_HOTSPOT_ADDRESS` and `WIFI_HOTSPOT_NETMASK` in `src/config/defines.h` to a
+disjoint /24 when required. DHCP leases use host numbers 2–5 in that subnet.
 
 ## Upload and rendering ownership
 
@@ -86,13 +121,20 @@ See [display buffers](DISPLAY.md), [storage](MEMORY-MANAGER.md) and
 
 One status line is emitted every ten seconds, including while an upload holds the
 CPU frame. It combines completed scan FPS, measured/target video FPS, active mode,
-network state/IP and SD state. Upload activity and a pending SD retry appear when
+separate home Wi-Fi and Pico hotspot states/IPs, and SD state. Upload activity and a pending SD retry appear when
 applicable. Scan and video rates cover the actual time since the preceding report.
 
 ```text
-[status] t=125s display_fps=62.6 video_fps=29.9/30.0 mode=video net=ready ip=192.168.1.48 sd=ready
-[status] t=135s display_fps=62.6 video_fps=- mode=builtin net=no-wifi ip=- sd=unavailable retry=7s
+[status] t=125s display_fps=62.6 video_fps=29.9/30.0 mode=video home_wifi=ready home_ip=192.168.1.48 pico_wifi=ready pico_ip=192.168.4.1 pico_clients=1/4 sd=ready
+[status] t=135s display_fps=62.6 video_fps=- mode=builtin home_wifi=no-wifi home_ip=- pico_wifi=ready pico_ip=192.168.4.1 pico_clients=0/4 sd=unavailable retry=7s
 ```
+
+Home states include `no-wifi`, `connecting`, `wifi-no-tcp`, `ready-unverified`
+and `ready`. Pico hotspot states are `unavailable`, `services-pending` and `ready`.
+An interface without an assigned address reports `-` for its IP.
+`pico_clients` reports associated devices against the configured hotspot capacity,
+for example `1/4`. Idle white dots and active green dots both count as connected;
+old DHCP leases without a current radio association do not.
 
 Boot, network/SD transitions, selected playback, upload completion and failures are
 reported as events. Expected busy/unavailable storage queries are quiet; identical

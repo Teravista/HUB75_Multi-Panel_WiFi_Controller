@@ -27,6 +27,13 @@ public:
 
     struct Status {
         bool ready = false;
+        bool homeReady = false;
+        bool hotspotReady = false;
+        uint8_t hotspotDevices[WIFI_HOTSPOT_MAX_CLIENTS]{};
+        char homeState[NETWORK_STATE_TEXT_BYTES] = "no-wifi";
+        char hotspotState[NETWORK_STATE_TEXT_BYTES] = "unavailable";
+        char homeIp[IPV4_TEXT_BYTES] = "-";
+        char hotspotIp[IPV4_TEXT_BYTES] = "-";
         char state[NETWORK_STATE_TEXT_BYTES] = "no-wifi";
         char ip[IPV4_TEXT_BYTES] = "-";
     };
@@ -64,7 +71,7 @@ private:
     // Publishes a service handoff and waits for foreground acknowledgement.
     void Request(Command command);
 
-    // Publishes the latest network state and IP as one coherent snapshot.
+    // Publishes both network interfaces and aggregate status as one coherent snapshot.
     void PublishStatus(bool suspended = false);
 
 };

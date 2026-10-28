@@ -1775,7 +1775,7 @@ BuildVideoStorageHeader (
     Streams and checks a raw frame from the inspection or playback handle.
 
     Delegates the bounded read/CRC pipeline while the caller retains storage ownership.
-    Playback uses its 64 KiB file cache and alternates the shared scratch halves; inspection
+    Playback uses its 32 KiB file cache and alternates the shared scratch halves; inspection
     reads directly. The complete stored checksum must pass before pixels can be published.
 
     @param slot Checked frame metadata and storage layout.

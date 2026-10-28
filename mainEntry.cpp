@@ -16,9 +16,10 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define SERIAL_STATUS_LINE_BYTES 256
+#define SERIAL_STATUS_LINE_BYTES 320
 
-#define WIFI_STATE_MACHINE_REV "render-pipeline"
+#define WIFI_STATE_MACHINE_REV "dual-wifi-client-dots"
+
 
 struct NetworkPauseContext {
     bool* servicesPaused;
@@ -150,7 +151,7 @@ PrepareDisplayFrame (
     Draws the status overlay and submits a prepared frame to the display driver.
 
     Runs only after the scanner accepts another frame. A changed source revision refreshes the
-    small saved background beneath the IP label; overlay-only redraws restore that background.
+    small saved background beneath both network labels; overlay-only redraws restore that background.
     The completed submission advances the distinct video-frame counter before the pipeline
     releases CPU-frame ownership.
 
@@ -170,8 +171,10 @@ SubmitDisplayFrame (
     render = static_cast<RenderContext*>(opaque);
     freshFrame = *render->uploadedFrame == nullptr ||
         render->upload->GetFrameRevision() != *render->displayedRevision;
-    render->renderer->DrawWifiStatusIcon(*render->graphics, render->networkStatus->ready,
-        render->networkStatus->ip, freshFrame);
+    render->renderer->DrawNetworkStatus(*render->graphics,
+        render->networkStatus->homeReady, render->networkStatus->homeIp,
+        render->networkStatus->hotspotReady, render->networkStatus->hotspotIp, freshFrame,
+        render->networkStatus->hotspotDevices);
     update(render->graphics);
     *render->displayedRevision = render->upload->GetFrameRevision();
     render->player->RecordFramePresented();
@@ -228,6 +231,7 @@ RenderLoop (
     uint32_t currentFrameCount;
     uint32_t lastVideoFrameCount;
     uint32_t videoFrameCount;
+    size_t hotspotDeviceIndex;
     SerialLog::Status status;
     char statusLine[SERIAL_STATUS_LINE_BYTES];
     const unsigned char* uploadedFrame = nullptr;
@@ -279,8 +283,17 @@ RenderLoop (
             } else {
                 status.mode = library.ActiveMode();
             }
-            status.network = networkStatus.state;
-            status.ip = networkStatus.ip;
+            status.homeNetwork = networkStatus.homeState;
+            status.homeIp = networkStatus.homeIp;
+            status.hotspotNetwork = networkStatus.hotspotState;
+            status.hotspotIp = networkStatus.hotspotIp;
+
+            // Count idle and active associations from the same snapshot as the panel dots.
+            for (hotspotDeviceIndex = 0; hotspotDeviceIndex < WIFI_HOTSPOT_MAX_CLIENTS; ++hotspotDeviceIndex) {
+                if (networkStatus.hotspotDevices[hotspotDeviceIndex] != WIFI_HOTSPOT_CLIENT_OFF) {
+                    ++status.hotspotClients;
+                }
+            }
             status.storage = memory.GetStateName();
             status.sdRetryMs = memory.GetRetryInMs(uptimeMs);
             status.job = memory.GetActivityName();
@@ -346,17 +359,17 @@ RenderLoop (
 } // RenderLoop
 
 /**
-    Initializes the controller and restores a saved photo before networking starts.
+    Constructs the controller and starts display, storage and network services.
 
+    Clocks and USB are initialized by main before any controller constructor runs.
     The flashed frame is queued first so display scanning has visible content
     during SD probing. A verified saved photo or first video frame replaces it; missing or damaged
     storage leaves the flashed image available. The mounted SD session remains
     independent of Core 1 radio initialization and connection retries.
 
-    @return value - The controller normally remains in RenderLoop indefinitely.
 */
-int
-main (
+static void __attribute__((noinline))
+RunController (
     void
     )
 {
@@ -365,7 +378,8 @@ main (
     FrameBufferController upload(&renderer, frameBuffer, true);
     MemoryManager memory;
     static TcpVideoUpload video(memory, upload, true);
-    WifiConnection wifiNetwork(&upload, &video);
+    // Keep the long-lived DHCP workspace off the foreground render stack.
+    static WifiConnection wifiNetwork(&upload, &video);
     NetworkServices network(wifiNetwork, YieldNetworkWorker, &video);
     MediaPlayer player(memory, upload);
     static MediaLibrary library(memory, upload, player);
@@ -376,13 +390,9 @@ main (
     http.SetMediaLibrary(&library);
     WebServer::SetMediaUpload(&http);
 
-    // Start clocks, serial output and panel scanning before performing storage or Wi-Fi work.
-    set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
-    stdio_init_all();
-#if HUB75_VERBOSE_LOGS
-    sleep_ms(STARTUP_DELAY_5S);
-#endif
-    printf("\n[boot] hub75 starting (%s)\n", WIFI_STATE_MACHINE_REV);
+    HUB75_DEBUG("[boot] controllers constructed\n");
+
+    // Start scanning only after USB startup and controller construction complete.
     create_hub75_driver(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, PANEL_TYPE, INVERTED_STB);
     start_hub75_driver();
     setBasisBrightness(DISPLAY_BASE_BRIGHTNESS);
@@ -392,8 +402,10 @@ main (
     // Queue visible fallback content while the saved-media slot is inspected.
     renderer.RenderLogicalImageToGraphics(
         graphics, renderer.GetImageDataForFrame(FIRST_FRAME_INDEX));
-    renderer.DrawWifiStatusIcon(graphics, false, nullptr, true);
+    HUB75_DEBUG("[boot] drawing initial network indicators\n");
+    renderer.DrawNetworkStatus(graphics, false, nullptr, false, nullptr, true);
     update(&graphics);
+    HUB75_DEBUG("[boot] initial frame submitted\n");
 
     // Restore a checked saved frame, retaining the fallback when storage or decoding fails.
     restored = false;
@@ -422,13 +434,39 @@ main (
             renderer.RenderLogicalImageToGraphics(
                 graphics, renderer.GetImageDataForFrame(FIRST_FRAME_INDEX));
         }
-        renderer.DrawWifiStatusIcon(graphics, false, nullptr, true);
+        renderer.DrawNetworkStatus(graphics, false, nullptr, false, nullptr, true);
         if (hub75_ready_for_update()) {
             update(&graphics);
             player.RecordFramePresented();
         }
         upload.EndRender();
     }
+    HUB75_DEBUG("[boot] starting network worker\n");
     StartNetworkCore(network);
     RenderLoop(renderer, upload, network, memory, library, player, video, http, graphics);
+} // RunController
+
+/**
+    Initializes clocks and USB before constructing controller services.
+
+    USB starts independently of controller constructors, display allocation and
+    SD restoration, so a later startup fault does not prevent the initial serial
+    connection. Verbose builds retain the bounded serial attachment delay.
+
+    @return 0 - The controller loop returned to the firmware entry point.
+*/
+int
+main (
+    void
+    )
+{
+    set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
+    stdio_init_all();
+#if HUB75_VERBOSE_LOGS
+    sleep_ms(STARTUP_DELAY_5S);
+#endif
+    printf("\n[boot] hub75 starting (%s)\n", WIFI_STATE_MACHINE_REV);
+    HUB75_DEBUG("[boot] constructing controllers\n");
+    RunController();
+    return 0;
 } // main

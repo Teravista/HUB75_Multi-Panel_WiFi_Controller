@@ -1,5 +1,6 @@
 #include "core/include/serialLog.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
+#include "network/include/clientActivity.hpp"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 #include <algorithm>
@@ -262,6 +263,9 @@ TcpVideoUpload::Receive (
         server->received_ += part->len;
     }
 
+    if (packet->tot_len) {
+        ClientActivity::RecordCommunication(pcb);
+    }
     tcp_recved(pcb, packet->tot_len);
 
     // Return the receive buffer to lwIP after its bytes have been consumed.
@@ -274,7 +278,7 @@ TcpVideoUpload::Receive (
     Advances the video reply after TCP acknowledges transmitted bytes.
 
     @param context Caller-owned state passed unchanged to the callback.
-    @param pcb Unused connection required by the callback interface.
+    @param pcb Connection carrying the acknowledged video-upload reply.
     @param bytes Number of bytes to process.
 
     @return ERR_OK - The callback completed without aborting the connection.
@@ -283,7 +287,7 @@ TcpVideoUpload::Receive (
 err_t
 TcpVideoUpload::Sent (
     void* context,
-    [[maybe_unused]] tcp_pcb* pcb,
+    tcp_pcb* pcb,
     u16_t bytes
     )
 {
@@ -294,6 +298,9 @@ TcpVideoUpload::Sent (
         return server->Cancel();
     }
     server->acknowledged_ += bytes;
+    if (bytes) {
+        ClientActivity::RecordCommunication(pcb);
+    }
     server->progress_ = GetVideoUploadTimeMs();
     return server->Pump();
 } // Sent

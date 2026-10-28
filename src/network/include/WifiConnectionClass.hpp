@@ -7,16 +7,17 @@ class TcpVideoUpload;
 #include "lwip/netif.h"
 
 #include "network/include/FrameBufferControllerClass.hpp"
+#include "network/include/PicoHotspotClass.hpp"
 
 /**
     Maintains local Wi-Fi connectivity and the availability of controller services.
 
-    It advances association, address acquisition, listener startup and recovery states using
-    configured retry deadlines. Link and radio checks are combined with local traffic and gateway
-    reachability observations so diagnostic TCP probe failures do not unnecessarily interrupt
-    working clients. Lifecycle callbacks coordinate listener changes with foreground code, and
-    connection status feeds the panel icon and web Summary. It requires a usable local network,
-    not Internet access, and Wi-Fi recovery leaves the independently managed SD session intact.
+    It runs the direct Pico hotspot alongside asynchronous home Wi-Fi association,
+    address acquisition and recovery. Both interfaces share one HTTP/photo/video
+    listener set. Station health observes only the home interface; normal home
+    retries retain AP clients and DHCP leases. Lifecycle callbacks coordinate
+    listener changes with Core 0, while status feeds the panel overlay. Internet
+    forwarding is not provided, and network recovery leaves the SD session intact.
 */
 class WifiConnection {
 public:
@@ -47,10 +48,10 @@ public:
     // Registers pause and resume callbacks for network service transitions.
     void SetServiceLifecycle(void (*begin)(void* context), void (*end)(void* context), void* context);
 
-    // Three-state network lifecycle:
-    //   NoWifi     - no usable WiFi link; any previous listener has been destroyed
-    //   WifiNoTcp  - WiFi up, upload listeners not all bound yet
-    //   Ready      - WiFi up and photo/HTTP/video listeners bound
+    // Home-interface lifecycle; the hotspot and shared listeners are independent.
+    //   NoWifi     - home association or address is unavailable
+    //   WifiNoTcp  - home address acquired, shared listeners pending
+    //   Ready      - home address and shared listeners available
     enum class NetState {
         NoWifi,
         WifiNoTcp,
@@ -60,16 +61,37 @@ public:
     // Initializes connection, retry, and health-check deadlines.
     void InitializeNetworkTiming(void);
 
-    // Advances Wi-Fi connection, local services, and recovery states.
+    // Advances home Wi-Fi, the direct hotspot and shared listener recovery.
     void UpdateNetworkStateMachine(void);
 
-    // Reports whether local services and configured reachability checks are ready.
+    // Reports whether the shared controller services are locally accessible.
     bool IsNetworkReady(void) const;
 
     // Returns the readable current network state.
     const char* GetNetStateName(void) const;
 
-    // Returns the station's current IPv4 address text.
+    // Returns the home Wi-Fi state independently of hotspot availability.
+    const char* GetHomeWifiStateName(void) const;
+
+    // Returns the hosted network state independently of home Wi-Fi availability.
+    const char* GetHotspotStateName(void) const;
+
+    // Reports whether verified home Wi-Fi and its shared listeners are ready.
+    bool IsHomeWifiReady(void) const;
+
+    // Reports whether the hosted network and its shared listeners are ready.
+    bool IsHotspotReady(void) const;
+
+    // Copies the hotspot's stable per-device display states.
+    void CopyHotspotClientStates(uint8_t* states) const;
+
+    // Returns only the home Wi-Fi address without a hotspot fallback.
+    const char* GetHomeWifiIpText(void) const;
+
+    // Returns only the hosted network address without a home Wi-Fi fallback.
+    const char* GetHotspotIpText(void) const;
+
+    // Returns the preferred local controller address.
     const char* GetWifiIpText(void) const;
 
 private:
@@ -79,6 +101,11 @@ private:
     NetState m_netState = NetState::NoWifi;
     std::string m_wifiIpText;
     bool m_cyw43Initialized = false;
+    bool m_servicesReady = false;
+    bool m_stationConnecting = false;
+    PicoHotspot m_hotspot;
+    absolute_time_t m_stationDeadline{};
+    absolute_time_t m_nextHotspotAttemptTime{};
     void (*m_beforeRadioRestart)(void* context) = nullptr;
     void* m_restartContext = nullptr;
 
@@ -138,11 +165,14 @@ private:
     // Checks whether the Wi-Fi driver still reports an active radio.
     static bool IsRadioResponding(void);
 
-    // Stops network services and schedules a Wi-Fi reconnect attempt.
-    void EnterNoWifiState(const char* reason);
+    // Stops station monitoring and schedules a home Wi-Fi reconnect attempt.
+    void EnterNoWifiState(const char* reason, bool restartRadio = false);
 
     // Stops upload and HTTP services before a network transition.
     void StopNetworkServices(void);
+
+    // Returns the home Wi-Fi interface independently of lwIP's default route.
+    static netif* StationInterface(void);
 
     // Updates the cached IPv4 address from the station interface.
     void RefreshWifiIpText(void);
@@ -159,8 +189,20 @@ private:
     // Advances gateway probing and handles its timeout or retry.
     void UpdateGatewayProbe(void);
 
-    // Initializes the radio and attempts station association and address acquisition.
+    // Initializes the radio and starts a nonblocking home Wi-Fi association.
     void RunWifiConnectSequence(void);
+
+    // Starts missing shared listeners while either network interface is available.
+    void EnsureNetworkServices(void);
+
+    // Cancels station-only probes without stopping shared client listeners.
+    void StopStationMonitoring(void);
+
+    // Checks for active clients before a disruptive station retry or radio reset.
+    bool HasActiveNetworkClient(void) const;
+
+    // Detects overlapping home and hotspot subnets before publishing a home address.
+    bool HasSubnetConflict(void) const;
 
     // Detects lost station links or addresses and schedules recovery.
     void CheckWifiHealth(void);

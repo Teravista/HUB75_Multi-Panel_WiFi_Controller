@@ -51,10 +51,22 @@ their full configured space, rather than measuring each stack's current usage.
 ## Rendering boundary
 
 `PanelRenderer` maps logical image coordinates into the physical panel chain and
-renders the Wi-Fi indicator/IP label through that same mapping. The IP label uses
-a compact bitmap font and a backing sized to its text. A small saved background
-patch restores the underlying image when the address changes or Wi-Fi disconnects.
-Callers mark a new source frame so the patch is captured from the new image.
+renders separate network indicators through that same mapping: a house for home
+Wi-Fi at the bottom-right and an antenna for the hotspot at the bottom-left. Each ready interface
+shows its own IP in a compact bitmap font with a text-sized black backing. An
+unavailable interface shows a red icon without an IP label. A saved bottom strip
+restores the underlying image when an address or connection state changes.
+Callers mark a new source frame so that strip is captured from the new image.
+Long address pairs use tighter character spacing to keep both labels separate.
+
+Dots above the antenna represent associated hotspot devices. White means connected;
+green indicates uploads, page/library access or controller actions and remains visible
+for 1.5 seconds after the latest meaningful traffic. Routine status, memory and upload
+progress polling leaves an idle device white. Disconnected devices lose their dot;
+remaining devices keep their positions. Associations refresh every 500 ms and failed
+radio queries retain the last confirmed snapshot. Home-network traffic does not light
+hotspot dots. The dot strip and connection/activity tracking use
+`WIFI_HOTSPOT_MAX_CLIENTS` in `src/config/defines.h`.
 
 `RenderPipeline` separates synchronous frame preparation from driver submission.
 It claims the CPU framebuffer once, lets preparation overlap the preceding scan,
