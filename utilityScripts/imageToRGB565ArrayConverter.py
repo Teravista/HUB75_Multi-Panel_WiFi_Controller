@@ -1,7 +1,7 @@
-"""Convert an image directly into a C/C++ RGB888 byte-array header.
+"""Convert an image directly into a C/C++ RGB565 byte-array header.
 
 Usage example:
-    python utilityScripts/imageToRGB888ArrayConverter.py \
+    python utilityScripts/imageToRGB565ArrayConverter.py \
         --input "sample_image.jpg" \
         --output-folder "imagesVideos" \
         --width 128 --height 256
@@ -32,7 +32,7 @@ def parse_arguments() -> argparse.Namespace:
 
     # Collect command-line overrides before applying the editable defaults.
     parser = argparse.ArgumentParser(
-        description="Convert an image to a C/C++ RGB888 byte-array header"
+        description="Convert an image to a C/C++ RGB565 byte-array header"
     )
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Input image file")
     parser.add_argument(
@@ -124,16 +124,20 @@ def load_and_resize_image(
     return image.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
 
-# ------------------------------ RGB888 conversion ------------------------------
+# ------------------------------ RGB565 conversion ------------------------------
 
 # Serializes image pixels in the RGB byte order expected by the firmware.
 #
 # @param image Pillow image to convert or resize.
 #
-# @return value - Row-major RGB888 bytes with one red, green and blue byte per pixel.
-def image_to_rgb888_bytes(image: Image.Image) -> bytes:
-    """Return row-major RGB888 bytes: red, green, blue for each pixel."""
-    return image.tobytes()
+# @return value - Row-major little-endian RGB565 pixels.
+def PackImagePixels(image: Image.Image) -> bytes:
+    """Return two little-endian bytes per RGB565 pixel."""
+    pixels = bytearray()
+    for red, green, blue in image.getdata():
+        value = (red >> 3) << 11 | (green >> 2) << 5 | blue >> 3
+        pixels.extend((value & 255, value >> 8))
+    return bytes(pixels)
 
 
 # ------------------------------ C header output ------------------------------
@@ -144,31 +148,31 @@ def image_to_rgb888_bytes(image: Image.Image) -> bytes:
 # @param variable_name C identifier used for the generated image array.
 # @param width Image width in pixels.
 # @param height Image height in pixels.
-# @param rgb888_data Row-major RGB888 pixel bytes to write into the generated header.
-def write_rgb888_header(
+# @param pixelData Row-major RGB565 pixel bytes to write into the generated header.
+def WriteImageHeader(
     output_path: Path,
     variable_name: str,
     width: int,
     height: int,
-    rgb888_data: bytes,
+    pixelData: bytes,
 ) -> None:
-    """Write RGB888 data as a compilable C/C++ byte-array header."""
-    expected_size = width * height * 3
-    if len(rgb888_data) != expected_size:
+    """Write RGB565 data as a compilable C/C++ byte-array header."""
+    expected_size = width * height * 2
+    if len(pixelData) != expected_size:
         raise SystemExit(
-            f"Unexpected data size: {len(rgb888_data)} bytes, expected {expected_size}"
+            f"Unexpected data size: {len(pixelData)} bytes, expected {expected_size}"
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="ascii") as output:
         output.write("#pragma once\n")
-        output.write(f"// Auto-generated RGB888 image: {width}x{height}\n")
+        output.write(f"// Auto-generated RGB565 image: {width}x{height}\n")
         output.write(f"#define GENERATED_IMAGE_DATA {variable_name}\n\n")
         output.write(
             f"static const unsigned char {variable_name}[{expected_size}] = {{\n"
         )
 
-        for index, byte in enumerate(rgb888_data):
+        for index, byte in enumerate(pixelData):
             if index % 12 == 0:
                 output.write("\n    ")
             output.write(f"0x{byte:02x},")
@@ -193,15 +197,15 @@ def main() -> int:
     resized_image = load_and_resize_image(
         input_path, arguments.width, arguments.height
     )
-    rgb888_data = image_to_rgb888_bytes(resized_image)
-    write_rgb888_header(
+    pixelData = PackImagePixels(resized_image)
+    WriteImageHeader(
         output_path,
         variable_name,
         arguments.width,
         arguments.height,
-        rgb888_data,
+        pixelData,
     )
-    print(f"Wrote {output_path} ({arguments.width}x{arguments.height} RGB888)")
+    print(f"Wrote {output_path} ({arguments.width}x{arguments.height} RGB565)")
     return 0
 
 

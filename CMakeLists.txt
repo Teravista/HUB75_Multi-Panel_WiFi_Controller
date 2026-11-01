@@ -131,7 +131,6 @@ target_compile_definitions(hub75 PRIVATE
     # TEMPORAL_DITHERING=false    # experimental - switch on temporal dithering to improve colour depth (currently 2 additional bits)
     # SM_CLOCKDIV_FACTOR=1.0f     # to prevent flicker or ghosting it might be worth a try to reduce state machine speed
     # BIT_DEPTH=10                # numner (count) of bit-planes used for BCM (Binary Code Modulation) - valid values for BIT_DEPTH are 8 or 10
-    CPU_FRAME_RGB565=1
     JPEG_PARALLEL_READER=1
     HUB75_MULTICORE=false      # Keep HUB75 on Core 0; application networking owns Core 1.
     PICO_CORE1_STACK_SIZE=0x1000

@@ -77,10 +77,9 @@ MediaMetadata::HasPlacement (
 /**
     Returns the readable name of the stored pixel format.
 
-    @return "JPEG" - The pixel format contains independently compressed JPEG frames.
-    @return "RGB565" - The pixel format contains raw 16-bit RGB565 pixels.
-    @return "RGB888" - The pixel format contains raw 24-bit RGB888 pixels, or the default format
-                       name.
+    @return "JPEG" - Independently compressed JPEG frames.
+    @return "RGB565" - Raw 16-bit pixels.
+    @return "unknown" - The stored format is unsupported.
 */
 const char*
 MediaMetadata::FormatName (
@@ -89,22 +88,21 @@ MediaMetadata::FormatName (
 {
     if (pixelFormat == PixelFormat::JPEG) {
         return "JPEG";
-    } else {
-        if (pixelFormat == PixelFormat::RGB565) {
-            return "RGB565";
-        } else {
-            return "RGB888";
-        }
     }
+    if (pixelFormat == PixelFormat::RGB565) {
+        return "RGB565";
+    }
+    return "unknown";
 } // FormatName
 
+
 /**
-    Creates metadata for a single RGB888 photo.
+    Creates metadata for a single RGB565 photo.
 
     @param width Image width in pixels.
     @param height Image height in pixels.
 
-    @return metadata - Single-frame RGB888 photo descriptor with the requested dimensions.
+    @return metadata - Single-frame RGB565 photo descriptor with the requested dimensions.
 */
 MediaMetadata
 MediaMetadata::Photo (
@@ -121,27 +119,22 @@ MediaMetadata::Photo (
 } // Photo
 
 /**
-    Returns the byte count of one raw pixel, or zero for JPEG.
+    Returns the byte count of one raw pixel, or zero for compressed/unsupported data.
 
-    @return 3 - One raw RGB888 pixel occupies three bytes.
-    @return 2 - One raw RGB565 pixel occupies two bytes.
-    @return 0 - JPEG is compressed and has no fixed byte count per pixel.
+    @return 2 - One RGB565 pixel occupies two bytes.
+    @return 0 - The format has no supported fixed pixel size.
 */
 size_t
 MediaMetadata::PixelBytes (
     void
     ) const
 {
-    if (pixelFormat == PixelFormat::RGB888) {
-        return RGB888_PIXEL_BYTES;
-    } else {
-        if (pixelFormat == PixelFormat::RGB565) {
-            return RGB565_PIXEL_BYTES;
-        } else {
-            return 0;
-        }
+    if (pixelFormat == PixelFormat::RGB565) {
+        return RGB565_PIXEL_BYTES;
     }
+    return 0;
 } // PixelBytes
+
 
 /**
     Returns the byte count of one uncompressed stored frame.
@@ -293,7 +286,7 @@ MediaMetadata::IsPhotoFor (
 {
     uint64_t bytes;
 
-    return PayloadBytes(bytes) && type == MediaType::Photo && pixelFormat == PixelFormat::RGB888 && width == panelWidth &&
+    return PayloadBytes(bytes) && type == MediaType::Photo && pixelFormat == PixelFormat::RGB565 && width == panelWidth &&
            height == panelHeight;
 } // IsPhotoFor
 

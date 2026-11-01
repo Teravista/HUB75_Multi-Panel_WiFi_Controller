@@ -7,7 +7,7 @@
 /**
     Tracks ownership and completion of the shared image frame during uploads.
 
-    It serializes rendering, incoming RGB888 pixel fragments and saved-photo restoration
+    It serializes rendering, incoming RGB565 pixel fragments and saved-photo restoration
     through an atomic ownership state. Upload tokens distinguish the current sender from stale
     callbacks, while completed-frame revisions notify foreground code that the displayed content
     has changed. Fragmented input is assembled into complete pixels before calling the supplied

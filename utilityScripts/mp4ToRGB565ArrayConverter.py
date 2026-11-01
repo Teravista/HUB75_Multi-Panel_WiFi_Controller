@@ -1,7 +1,7 @@
-"""Convert an MP4 into a multi-frame RGB888 C header.
+"""Convert an MP4 into a multi-frame RGB565 C header.
 
 Usage example:
-    python utilityScripts/mp4ToRGB888ArrayConverter.py \
+    python utilityScripts/mp4ToRGB565ArrayConverter.py \
         --input "sample_video.mp4" \
         --output-folder "imagesVideos" \
         --width 128 --height 256 \
@@ -28,7 +28,7 @@ DEFAULT_FRAME_HEIGHT = 256
 #how many frames per second to extract from the source video
 DEFAULT_TARGET_FPS = 2
 DEFAULT_FRAME_STEP = 0
-#how many diferent frames will be created, 38 frames is roughly maximum flash capacity for RGB888 for 4 MB of Raspbery pi pico 2
+# Maximum generated frames; choose a value that fits the available firmware flash.
 DEFAULT_MAX_FRAMES = 38
 #the delay between frames in milliseconds for the animation playback on the device
 DEFAULT_FRAME_DELAY_MS = 200
@@ -182,10 +182,12 @@ def preprocess_frame(
 #
 # @param processed_frame Resized RGB NumPy frame to flatten into bytes.
 #
-# @return value - Flattened row-major RGB888 bytes for the processed frame.
-def processed_frame_to_bytes(processed_frame: np.ndarray) -> bytes:
-    """Return row-major RGB888 bytes: red, green, blue for each pixel."""
-    return processed_frame.tobytes()
+# @return value - Flattened row-major RGB565 bytes for the processed frame.
+def PackFramePixels(processed_frame: np.ndarray) -> bytes:
+    """Return two little-endian bytes per RGB565 pixel."""
+    channels = processed_frame.astype(np.uint16)
+    pixels = (channels[:, :, 0] >> 3) << 11 | (channels[:, :, 1] >> 2) << 5 | channels[:, :, 2] >> 3
+    return pixels.astype("<u2").tobytes()
 
 
 # Extracts and converts video frames at the requested rate and duration.
@@ -198,7 +200,7 @@ def processed_frame_to_bytes(processed_frame: np.ndarray) -> bytes:
 # @param max_frames Maximum number of frames to extract; zero disables this limit.
 # @param trim_bottom Number of source rows to remove from the bottom before resizing.
 #
-# @return tuple - Processed RGB888 frame arrays, source FPS and effective source sampling
+# @return tuple - Processed RGB565 frame arrays, source FPS and effective source sampling
 #                 stride.
 def extract_processed_frames(
     input_path: Path,
@@ -261,7 +263,7 @@ def extract_processed_frames(
 # @param height Image height in pixels.
 # @param delay_ms Delay between generated animation frames, in milliseconds.
 # @param frames Prepared frames or number of frames described by the media header.
-def write_c_header(
+def WriteAnimationHeader(
     output_path: Path,
     input_path: Path,
     var_name: str,
@@ -270,20 +272,20 @@ def write_c_header(
     delay_ms: int,
     frames: list[bytes],
 ) -> None:
-    frame_bytes = width * height * RGB_CHANNEL_COUNT
+    frame_bytes = width * height * 2
 
     with output_path.open("w", encoding="utf-8", newline="\n") as out:
         out.write("#pragma once\n")
         out.write("// Auto-generated animation header.\n")
         out.write(f"// Source video: {input_path.name}\n")
-        out.write(f"// Output format: {width}x{height}, RGB888 bytes in RGB order\n")
+        out.write(f"// Output format: {width}x{height}, little-endian RGB565 pixels\n")
         out.write("// Keep frame count small enough for your available flash.\n\n")
 
         out.write(f"#define GENERATED_ANIMATION_WIDTH {width}\n")
         out.write(f"#define GENERATED_ANIMATION_HEIGHT {height}\n")
         out.write(
             f"#define GENERATED_ANIMATION_FRAME_BYTES (GENERATED_ANIMATION_WIDTH * GENERATED_ANIMATION_HEIGHT * "
-            f"{RGB_CHANNEL_COUNT})\n"
+            f"2)\n"
         )
         out.write(f"#define GENERATED_ANIMATION_FRAME_COUNT {len(frames)}\n")
         out.write(f"#define GENERATED_ANIMATION_FRAME_DELAY_MS {delay_ms}\n")
@@ -350,8 +352,8 @@ def main() -> int:
         trim_bottom=args.trim_bottom,
     )
 
-    frames = [processed_frame_to_bytes(frame) for frame in processed_frames]
-    write_c_header(
+    frames = [PackFramePixels(frame) for frame in processed_frames]
+    WriteAnimationHeader(
         output_path=output_path,
         input_path=input_path,
         var_name=var_name,

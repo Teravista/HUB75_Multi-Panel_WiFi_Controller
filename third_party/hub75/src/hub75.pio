@@ -130,8 +130,7 @@ static inline void hub75_row_inverted_program_init(PIO pio, uint sm, uint offset
 .define BIT_DEPTH 10               ; Placeholder - will be overwritten in hub75_data_rgb_program_init
 .side_set 1
 
-; Each FIFO record consists of a RGB101010 pixel. (This is ok for e.g. an RGB888
-; source which has been gamma-corrected)
+; Each FIFO record consists of a gamma-corrected RGB101010 pixel.
 ;
 ; Even pixels are sent on R0, G0, B0 and odd pixels on R1, G1, B1 (typically
 ; these are for different parts of the screen, NOT for adjacent pixels, so the

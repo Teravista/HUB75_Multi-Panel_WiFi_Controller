@@ -849,36 +849,8 @@ static JRESULT JD_HOT_CODE(mcu_load) (
 /* Output an MCU: Convert YCrCb to RGB and output it in RGB form         */
 /*-----------------------------------------------------------------------*/
 
-#if JD_REUSE_CHROMA && JD_FORMAT == 0 && !JD_USE_SCALE
-/* A 4:2:0 MCU has four Y blocks and one Cb/Cr pair. Compute each chroma
-   contribution once for its four pixels, retaining signed division rounding. */
-static void JD_HOT_CODE(color_420)(JDEC* jd)
-{
-	const int accuracy = (sizeof(int) > 2) ? 1024 : 128;
-	uint8_t* rgb = (uint8_t*)jd->workbuf;
-	for (unsigned int cy = 0; cy < 8; cy++) {
-		const jd_yuv_t* chroma = jd->mcubuf + 256 + cy * 8;
-		const unsigned int ybase = (cy >= 4 ? 128 : 0) + (cy % 4) * 16;
-		for (unsigned int cx = 0; cx < 8; cx++) {
-			const int cb = chroma[cx] - 128, cr = chroma[cx + 64] - 128;
-			const int red = (int)(1.402 * accuracy) * cr / accuracy;
-			const int green = ((int)(0.344 * accuracy) * cb + (int)(0.714 * accuracy) * cr) / accuracy;
-			const int blue = (int)(1.772 * accuracy) * cb / accuracy;
-			const jd_yuv_t* ypixels = jd->mcubuf + ybase + (cx >= 4 ? 64 : 0) + (cx % 4) * 2;
-			uint8_t* output = rgb + (cy * 32 + cx * 2) * 3;
-			for (unsigned int row = 0; row < 2; row++) {
-				const int y0 = ypixels[row * 8], y1 = ypixels[row * 8 + 1];
-				uint8_t* pixels = output + row * 48;
-				pixels[0] = BYTECLIP(y0 + red); pixels[1] = BYTECLIP(y0 - green); pixels[2] = BYTECLIP(y0 + blue);
-				pixels[3] = BYTECLIP(y1 + red); pixels[4] = BYTECLIP(y1 - green); pixels[5] = BYTECLIP(y1 + blue);
-			}
-		}
-	}
-}
-#endif
-
-#if JD_FORMAT == 0 && !JD_USE_SCALE
-/* Clip exactly as the RGB888 path, then quantize without storing RGB888 bytes. */
+#if JD_FORMAT == 1 && !JD_USE_SCALE
+/* Clip the reconstructed channels, then write packed RGB565 pixels directly. */
 JD_FAST_PATH uint16_t pack_rgb565(int red, int green, int blue)
 {
 	const uint16_t pixel = (uint16_t)(((uint16_t)(BYTECLIP(red) & 0xF8) << 8) |
@@ -980,174 +952,15 @@ static JRESULT JD_HOT_CODE(mcu_output) (
 	unsigned int y		/* MCU location in the image */
 )
 {
-	const int CVACC = (sizeof (int) > 2) ? 1024 : 128;	/* Adaptive accuracy for both 16-/32-bit systems */
-	unsigned int ix, iy, mx, my, rx, ry;
-	int yy, cb, cr;
-	jd_yuv_t *py, *pc;
-	uint8_t *pix;
+	unsigned int mx, my, rx, ry;
 	JRECT rect;
 
-
-	mx = jd->msx * 8; my = jd->msy * 8;					/* MCU size (pixel) */
-	rx = (x + mx <= jd->width) ? mx : jd->width - x;	/* Output rectangular size (it may be clipped at right/bottom end of image) */
+	mx = jd->msx * 8; my = jd->msy * 8;
+	rx = (x + mx <= jd->width) ? mx : jd->width - x;
 	ry = (y + my <= jd->height) ? my : jd->height - y;
-	if (JD_USE_SCALE) {
-		rx >>= jd->scale; ry >>= jd->scale;
-		if (!rx || !ry) return JDR_OK;					/* Skip this MCU if all pixel is to be rounded off */
-		x >>= jd->scale; y >>= jd->scale;
-	}
-	rect.left = x; rect.right = x + rx - 1;				/* Rectangular area in the frame buffer */
+	rect.left = x; rect.right = x + rx - 1;
 	rect.top = y; rect.bottom = y + ry - 1;
-
-#if JD_FORMAT == 0 && !JD_USE_SCALE
-	if (jd->output_rgb565) {
-		return mcu_output_rgb565(jd, outfunc, &rect, mx, my, rx, ry);
-	}
-#endif
-
-
-	if (!JD_USE_SCALE || jd->scale != 3) {	/* Not for 1/8 scaling */
-		pix = (uint8_t*)jd->workbuf;
-
-		if (JD_FORMAT != 2) {	/* RGB output (build an RGB MCU from Y/C component) */
-#if JD_REUSE_CHROMA && JD_FORMAT == 0 && !JD_USE_SCALE
-			if (mx == 16 && my == 16) {
-				color_420(jd);
-			} else
-#endif
-			{
-			for (iy = 0; iy < my; iy++) {
-				pc = py = jd->mcubuf;
-				if (my == 16) {		/* Double block height? */
-					pc += 64 * 4 + (iy >> 1) * 8;
-					if (iy >= 8) py += 64;
-				} else {			/* Single block height */
-					pc += mx * 8 + iy * 8;
-				}
-				py += iy * 8;
-				for (ix = 0; ix < mx; ix++) {
-					cb = pc[0] - 128; 	/* Get Cb/Cr component and remove offset */
-					cr = pc[64] - 128;
-					if (mx == 16) {					/* Double block width? */
-						if (ix == 8) py += 64 - 8;	/* Jump to next block if double block heigt */
-						pc += ix & 1;				/* Step forward chroma pointer every two pixels */
-					} else {						/* Single block width */
-						pc++;						/* Step forward chroma pointer every pixel */
-					}
-					yy = *py++;			/* Get Y component */
-					*pix++ = /*R*/ BYTECLIP(yy + ((int)(1.402 * CVACC) * cr) / CVACC);
-					*pix++ = /*G*/ BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
-					*pix++ = /*B*/ BYTECLIP(yy + ((int)(1.772 * CVACC) * cb) / CVACC);
-				}
-			}
-			}
-		} else {	/* Monochrome output (build a grayscale MCU from Y comopnent) */
-			for (iy = 0; iy < my; iy++) {
-				py = jd->mcubuf + iy * 8;
-				if (my == 16) {		/* Double block height? */
-					if (iy >= 8) py += 64;
-				}
-				for (ix = 0; ix < mx; ix++) {
-					if (mx == 16) {					/* Double block width? */
-						if (ix == 8) py += 64 - 8;	/* Jump to next block if double block height */
-					}
-					*pix++ = (uint8_t)*py++;			/* Get and store a Y value as grayscale */
-				}
-			}
-		}
-
-		/* Descale the MCU rectangular if needed */
-		if (JD_USE_SCALE && jd->scale) {
-			unsigned int x, y, r, g, b, s, w, a;
-			uint8_t *op;
-
-			/* Get averaged RGB value of each square correcponds to a pixel */
-			s = jd->scale * 2;	/* Number of shifts for averaging */
-			w = 1 << jd->scale;	/* Width of square */
-			a = (mx - w) * (JD_FORMAT != 2 ? 3 : 1);	/* Bytes to skip for next line in the square */
-			op = (uint8_t*)jd->workbuf;
-			for (iy = 0; iy < my; iy += w) {
-				for (ix = 0; ix < mx; ix += w) {
-					pix = (uint8_t*)jd->workbuf + (iy * mx + ix) * (JD_FORMAT != 2 ? 3 : 1);
-					r = g = b = 0;
-					for (y = 0; y < w; y++) {	/* Accumulate RGB value in the square */
-						for (x = 0; x < w; x++) {
-							r += *pix++;	/* Accumulate R or Y (monochrome output) */
-							if (JD_FORMAT != 2) {	/* RGB output? */
-								g += *pix++;	/* Accumulate G */
-								b += *pix++;	/* Accumulate B */
-							}
-						}
-						pix += a;
-					}							/* Put the averaged pixel value */
-					*op++ = (uint8_t)(r >> s);	/* Put R or Y (monochrome output) */
-					if (JD_FORMAT != 2) {	/* RGB output? */
-						*op++ = (uint8_t)(g >> s);	/* Put G */
-						*op++ = (uint8_t)(b >> s);	/* Put B */
-					}
-				}
-			}
-		}
-
-	} else {	/* For only 1/8 scaling (left-top pixel in each block are the DC value of the block) */
-
-		/* Build a 1/8 descaled RGB MCU from discrete comopnents */
-		pix = (uint8_t*)jd->workbuf;
-		pc = jd->mcubuf + mx * my;
-		cb = pc[0] - 128;		/* Get Cb/Cr component and restore right level */
-		cr = pc[64] - 128;
-		for (iy = 0; iy < my; iy += 8) {
-			py = jd->mcubuf;
-			if (iy == 8) py += 64 * 2;
-			for (ix = 0; ix < mx; ix += 8) {
-				yy = *py;	/* Get Y component */
-				py += 64;
-				if (JD_FORMAT != 2) {
-					*pix++ = /*R*/ BYTECLIP(yy + ((int)(1.402 * CVACC) * cr / CVACC));
-					*pix++ = /*G*/ BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
-					*pix++ = /*B*/ BYTECLIP(yy + ((int)(1.772 * CVACC) * cb / CVACC));
-				} else {
-					*pix++ = yy;
-				}
-			}
-		}
-	}
-
-	/* Squeeze up pixel table if a part of MCU is to be truncated */
-	mx >>= jd->scale;
-	if (rx < mx) {	/* Is the MCU spans rigit edge? */
-		uint8_t *s, *d;
-		unsigned int x, y;
-
-		s = d = (uint8_t*)jd->workbuf;
-		for (y = 0; y < ry; y++) {
-			for (x = 0; x < rx; x++) {	/* Copy effective pixels */
-				*d++ = *s++;
-				if (JD_FORMAT != 2) {
-					*d++ = *s++;
-					*d++ = *s++;
-				}
-			}
-			s += (mx - rx) * (JD_FORMAT != 2 ? 3 : 1);	/* Skip truncated pixels */
-		}
-	}
-
-	/* Convert RGB888 to RGB565 if needed */
-	if (JD_FORMAT == 1) {
-		uint8_t *s = (uint8_t*)jd->workbuf;
-		uint16_t w, *d = (uint16_t*)s;
-		unsigned int n = rx * ry;
-
-		do {
-			w = (*s++ & 0xF8) << 8;		/* RRRRR----------- */
-			w |= (*s++ & 0xFC) << 3;	/* -----GGGGGG----- */
-			w |= *s++ >> 3;				/* -----------BBBBB */
-			*d++ = w;
-		} while (--n);
-	}
-
-	/* Output the rectangular */
-	return outfunc(jd, jd->workbuf, &rect) ? JDR_OK : JDR_INTR;
+	return mcu_output_rgb565(jd, outfunc, &rect, mx, my, rx, ry);
 }
 
 

@@ -4,7 +4,7 @@
 /**
     Measures the frame rates shown in the controller's Summary page.
 
-    It turns cumulative panel-scan and video-presentation counters into a rolling 30-second
+    It turns cumulative panel-scan and video-presentation counters into a rolling 10-second
     average, including a shorter startup window when less history exists. The two rates remain
     separate so a smoothly scanned panel can still report slow video preparation. Core 0 records
     and reads bounded in-memory snapshots; the class does not change playback timing or query
@@ -12,7 +12,7 @@
 */
 class FrameRateTracker {
 public:
-    static constexpr uint32_t WindowMs = 30000;
+    static constexpr uint32_t WindowMs = 10000;
 
     struct Average {
         bool available = false;
@@ -24,7 +24,7 @@ public:
     // Records display and video frame counters for the rolling average.
     void Sample(uint32_t nowMs, uint32_t displayFrames, uint32_t videoFrames);
 
-    // Calculates display and video FPS over the available 30-second window.
+    // Calculates display and video FPS over the available 10-second window.
     Average Read(void) const;
 
 private:

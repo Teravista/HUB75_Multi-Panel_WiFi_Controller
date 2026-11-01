@@ -1,6 +1,6 @@
 # JPEG and compact raw video
 
-The Python uploader supports `--pixel-format rgb565`, `rgb888`, or `jpeg`. New
+The Python uploader supports `--pixel-format rgb565` or `jpeg`. New
 conversions default to RGB565; JPEG uses baseline 4:2:0 at quality 85 by default
 (`--jpeg-quality 1..95`). Prepared `.h75v` files retain their encoding. MP4 decoding,
 resizing and central cropping run on the PC; the Pico decodes one independent JPEG frame
@@ -11,7 +11,7 @@ python utilityScripts/sendVideoOverTCP.py clip.mp4 --ip 192.168.1.48 --pixel-for
 python utilityScripts/sendVideoOverTCP.py clip.mp4 --prepare-only --output clip.h75v --pixel-format rgb565
 ```
 
-RGB565 stores 65,536 bytes per 128 × 256 frame; RGB888 stores 98,304 bytes. JPEG size
+RGB565 stores 65,536 bytes per 128 × 256 frame. JPEG size
 varies with scene and quality and is lossy. Each encoded JPEG is limited to 128 KiB;
 stored dimensions must fit the panel and the complete SD file must remain below 4 GiB.
 FPS is requested timing, not a guarantee of decode speed. Progressive JPEG and
@@ -21,7 +21,7 @@ unsupported dimensions are rejected.
 
 The [32-byte descriptor](MEDIA-METADATA.md) uses format 3 and version 2 for JPEG; bytes
 24–31 carry the exact index-plus-record payload length. All integers below are
-little-endian. Raw RGB888/RGB565 use descriptor version 1.
+little-endian. Raw RGB565 uses descriptor version 1.
 
 For N frames the payload starts with N twelve-byte entries:
 
@@ -47,20 +47,15 @@ stays invalid until full SD readback and all frame checks pass. The previous `LA
 Startup checks the selected header and first frame. Later frames validate their record
 and encoded CRC before publication; a failed frame rejects that slot and allows the
 preceding usable generation to load. Normal and ping-pong playback seek directly to
-independent frames. RGB888/RGB565 and older photo slots remain readable without
-conversion.
+independent frames. Existing RGB565 and JPEG slots remain readable.
 
 TJpgDec uses the shared 24 KiB storage buffer as 12 KiB compressed input and 12 KiB
-aligned workspace. MCU tiles are delivered directly to the existing CPU framebuffer as
-provisional RGB565 or RGB888 rows. RGB565 tiles are reconstructed directly from
-the decoded luminance/chroma samples, using the same clipping and quantization as
-RGB888 conversion followed by packing. The row consumer forwards either format
-without an intermediate RGB888 tile or another pixel allocation. Playback accepts
-one borrowed rectangle per MCU; RGB565 placement validates it once and reuses
-coordinate strides within each panel. Consumers without a tile sink retain the
-same row callbacks. Both decoder cores use this path, and CRC verification still
-controls final publication. Validation-only
-reads parse the encoded stream without pixel reconstruction.
+aligned workspace. It reconstructs little-endian RGB565 directly from luminance and
+chroma samples, without an intermediate full-color pixel tile. Playback receives
+one borrowed rectangle per MCU, validates its placement once, and uses coordinate
+strides within each panel. Consumers without a tile sink receive RGB565 rows.
+Both decoder cores use this path, and CRC verification controls final publication.
+Validation-only reads parse the encoded stream without pixel reconstruction.
 
 A four-KiB index cache retains at most 512 checked entries. The active playback file
 also has a 32 KiB cache with two 16 KiB blocks for sequential, reverse and random access.

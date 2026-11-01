@@ -15,7 +15,7 @@
 
 #define DRIVER_RGB565_RED_BLUE_LEVEL_COUNT 32
 #define DRIVER_RGB565_GREEN_LEVEL_COUNT 64
-#define DRIVER_RGB888_LEVEL_COUNT 256
+#define DRIVER_GAMMA_LEVEL_COUNT 256
 #define DRIVER_RGB_BLUE_CHANNEL_INDEX 2
 
 struct Driver565Tables {
@@ -24,11 +24,11 @@ struct Driver565Tables {
     std::array<uint32_t, DRIVER_RGB565_GREEN_LEVEL_COUNT> green{};
 };
 
-// Expands a graphics RGB565 pixel into an RGB888 color.
+// Expands a graphics RGB565 pixel into separate color channels.
 uint32_t ExpandDriverRGB565(uint16_t stored);
 
 // Builds packed gamma lookup tables for the driver's channel bit depth.
-constexpr Driver565Tables MakeDriver565Tables(const uint16_t (&gamma)[DRIVER_RGB888_LEVEL_COUNT]) {
+constexpr Driver565Tables MakeDriver565Tables(const uint16_t (&gamma)[DRIVER_GAMMA_LEVEL_COUNT]) {
     Driver565Tables table;
 
     for (unsigned index = 0; index < DRIVER_RGB565_RED_BLUE_LEVEL_COUNT; ++index) {

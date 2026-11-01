@@ -128,46 +128,8 @@ PackedPanelFrame::ReadRgb565PixelBits (
         (redBlue565Bits_[blue] << PACKED_PANEL_BLUE_BIT);
 } // ReadRgb565PixelBits
 
-/**
-    Converts one RGB888 source pixel into gamma bits spaced across output planes.
 
-    Graphics RGB888 stores 0xRRGGBB words; raw update_bgr input retains its B/G/R
-    byte order. Both representations use the same channel gamma mapping before
-    sparse secondary-pin ordering is applied by the row packer.
 
-    @param source Borrowed RGB888 graphics words or raw BGR888 byte span.
-    @param index Zero-based physical pixel index.
-
-    @return value - Gamma bits at six-bit intervals, with R/G/B in the lowest positions.
-*/
-uint64_t
-PackedPanelFrame::ReadRgb888PixelBits (
-    const Source& source,
-    size_t index
-    ) const
-{
-    const uint32_t* pixels = nullptr;
-    const uint8_t* bytes = nullptr;
-    uint32_t pixel;
-    uint32_t red;
-    uint32_t green;
-    uint32_t blue;
-
-    if (source.format == SourceFormat::GraphicsRgb888) {
-        pixels = static_cast<const uint32_t*>(source.pixels);
-        pixel = pixels[index];
-        red = (pixel >> PACKED_PANEL_RED_SHIFT) & PACKED_PANEL_BYTE_MASK;
-        green = (pixel >> PACKED_PANEL_GREEN_SHIFT) & PACKED_PANEL_BYTE_MASK;
-        blue = pixel & PACKED_PANEL_BYTE_MASK;
-    } else {
-        bytes = static_cast<const uint8_t*>(source.pixels) + index * PACKED_PANEL_RAW_PIXEL_BYTES;
-        blue = bytes[PACKED_PANEL_BGR_BLUE_BYTE];
-        green = bytes[PACKED_PANEL_BGR_GREEN_BYTE];
-        red = bytes[PACKED_PANEL_BGR_RED_BYTE];
-    }
-    return gammaBits_[red] | (gammaBits_[green] << PACKED_PANEL_GREEN_BIT) |
-        (gammaBits_[blue] << PACKED_PANEL_BLUE_BIT);
-} // ReadRgb888PixelBits
 
 /**
     Writes up to five brightness planes using native 32-bit shifts.
@@ -211,21 +173,16 @@ PackedPanelFrame::WritePlaneGroup (
 /**
     Writes all output planes into an unpublished, capacity-checked scan allocation.
 
-    Each converted column pair is split into two five-plane workspaces. Native
-    32-bit shifts then pack the low and high brightness planes without repeating
-    64-bit shifts for every plane. Both workspaces together use the same forty
-    bytes as the previous five-pair workspace; no image allocation is added.
-    RGB565 dispatches once to its dedicated, inlined-reader loop. RGB888 and
-    BGR888 retain the compatible generic row packing. All formats apply the
-    configured dual-chain mounting correction after shared framebuffer mapping, without
-    changing the stored media. Final-word padding and column counts are identical.
+    Borrows the physical RGB565 frame and prepares both scan outputs without an
+    intermediate image. The existing mounting correction and scan timing remain
+    part of the native packing loop.
 
     @param destination Driver-owned inactive scan allocation.
     @param capacityWords Writable allocation capacity in 32-bit words.
-    @param source Borrowed unmodified physical frame in a supported pixel format.
+    @param source Borrowed physical RGB565 frame.
 
-    @return true - All planes were prepared and may be published by the driver.
-    @return false - Initialization, source format, pointers or capacity are invalid.
+    @return true - All planes were prepared for publication.
+    @return false - Initialization, pointers or allocation capacity are invalid.
 */
 bool
 PackedPanelFrame::Prepare (
@@ -234,95 +191,14 @@ PackedPanelFrame::Prepare (
     const Source& source
     ) const
 {
-    uint32_t lowBits[PACKED_PANEL_PIXELS_PER_WORD];
-    uint32_t highBits[PACKED_PANEL_PIXELS_PER_WORD];
-    uint64_t upper;
-    uint64_t lower;
-    uint64_t pairBits;
-    uint32_t row;
-    uint32_t lane;
-    uint32_t group;
-    uint32_t pair;
-    uint32_t column;
-    uint32_t lowPlaneCount;
-    uint32_t highPlaneCount;
-    size_t firstSourceIndex;
-    size_t secondSourceIndex;
-    size_t sourceOffset;
-    size_t halfPixels;
-    ptrdiff_t sourceColumnStep;
-    ptrdiff_t sourceColumnOffset;
-    size_t destinationIndex;
-    size_t planeStride;
-
-    if (!frameWords_ || !source.pixels || !destination || capacityWords < frameWords_ ||
-        (source.format != SourceFormat::GraphicsRgb565 &&
-         source.format != SourceFormat::GraphicsRgb888 && source.format != SourceFormat::Bgr888)) {
+    if (!frameWords_ || !source.pixels || !destination || capacityWords < frameWords_) {
         return false;
     }
 
-    // Select the normal CPU format once, before entering any per-pixel loop.
-    if (source.format == SourceFormat::GraphicsRgb565) {
-        PrepareRgb565(destination, static_cast<const uint16_t*>(source.pixels));
-        return true;
-    }
-
-    lowPlaneCount = depth_;
-    if (lowPlaneCount > PACKED_PANEL_PLANES_PER_GROUP) {
-        lowPlaneCount = PACKED_PANEL_PLANES_PER_GROUP;
-    }
-    highPlaneCount = depth_ - lowPlaneCount;
-    halfPixels = size_t(rows_) * width_;
-    planeStride = size_t(rows_) * outputs_ * rowWords_;
-    for (row = 0; row < rows_; ++row) {
-        for (lane = 0; lane < outputs_; ++lane) {
-            // Select row halves once; secondary PIO rearranges their sparse GPIO groups.
-            sourceOffset = size_t(row) * width_ + size_t(lane) * columns_;
-            firstSourceIndex = sourceOffset;
-            secondSourceIndex = sourceOffset + halfPixels;
-            sourceColumnStep = 1;
-            if (lane != 0) {
-                firstSourceIndex = sourceOffset + halfPixels;
-                secondSourceIndex = sourceOffset;
-            }
-#if PACKED_PANEL_DUAL_FIRST_OUTPUT_ROTATE_180
-            // The right column uses the primary chain; rotate both panels as one rectangle.
-            if (outputs_ == PACKED_PANEL_MAX_OUTPUTS && lane == 0) {
-                sourceOffset = size_t(rows_ - 1u - row) * width_ + columns_ - 1u;
-                firstSourceIndex = sourceOffset + halfPixels;
-                secondSourceIndex = sourceOffset;
-                sourceColumnStep = -1;
-            }
-#endif
-            sourceColumnOffset = 0;
-
-            for (group = 0; group < rowWords_; ++group) {
-                // Convert each source pair once and split its ten planes into native words.
-                for (pair = 0; pair < PACKED_PANEL_PIXELS_PER_WORD; ++pair) {
-                    pairBits = 0;
-                    column = group * PACKED_PANEL_PIXELS_PER_WORD + pair;
-                    if (column < columns_) {
-                        upper = ReadRgb888PixelBits(source, firstSourceIndex + sourceColumnOffset);
-                        lower = ReadRgb888PixelBits(source, secondSourceIndex + sourceColumnOffset);
-                        pairBits = upper | (lower << PACKED_PANEL_CHANNELS_PER_HALF);
-                        sourceColumnOffset += sourceColumnStep;
-                    }
-                    lowBits[pair] = uint32_t(pairBits);
-                    highBits[pair] = uint32_t(pairBits >> PACKED_PANEL_WORD_BITS);
-                }
-
-                // Preserve the row/plane layout while writing both groups with 32-bit operations.
-                destinationIndex = (size_t(row) * outputs_ + lane) * rowWords_ + group;
-                WritePlaneGroup(destination + destinationIndex, planeStride, lowBits, lowPlaneCount);
-                if (highPlaneCount) {
-                    WritePlaneGroup(destination + destinationIndex + lowPlaneCount * planeStride,
-                        planeStride, highBits, highPlaneCount);
-                }
-            }
-        }
-    }
+    PrepareRgb565(destination, static_cast<const uint16_t*>(source.pixels));
     return true;
 } // Prepare
+
 
 /**
     Builds all scan planes from validated graphics RGB565 pixels.

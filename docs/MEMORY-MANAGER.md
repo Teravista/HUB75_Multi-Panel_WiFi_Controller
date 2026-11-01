@@ -52,8 +52,8 @@ Call storage methods from foreground code. An ownership guard rejects concurrent
 reentrant operations. Names are root filenames containing letters, digits, underscores
 or hyphens, with an optional extension; paths are rejected.
 
-Named and retained photos use checked media headers; legacy 20-byte image headers remain
-readable. Full-panel RGB888 contains 98,304 pixel bytes. Reads validate header, exact
+Named and retained photos require checked media descriptors; descriptor-free image
+headers are unsupported. Full-panel RGB565 contains 65,536 pixel bytes. Reads validate header, exact
 size and payload checksum. See [metadata](MEDIA-METADATA.md) for the current layouts.
 Sink data remains provisional until the complete read succeeds.
 
@@ -81,7 +81,7 @@ retain SD resources and playback state.
 checked file operations and bounded directory pages. See the [saved media
 library](MEDIA-LIBRARY.md) for publication, settings, filenames and migration behavior.
 `SaveLastImage`, `ReadLastImage` and `PhotoPersistence` remain available for retained
-RGB888 compatibility.
+RGB565 storage and transport.
 
 ## Availability lifecycle
 
@@ -119,7 +119,7 @@ Named and retained photos use the version-3 container with a per-photo media des
 and independent header/payload checksums. Existing version-1 named images and version-2
 retained saves remain readable. The optional metadata output of `ReadImage` /
 `ReadLastImage` is published only after successful validation; `SaveLastImage` also
-accepts an explicit full-panel RGB888 photo descriptor. See [media
+accepts an explicit full-panel RGB565 photo descriptor. See [media
 metadata](MEDIA-METADATA.md) for layouts and API details.
 
 ## Raw video transactions
@@ -169,7 +169,7 @@ SPI bus rate is separate from the card's advertised transfer speed.
 ### Bulk reads and RAM
 
 A shared 24 KiB scratch buffer holds bounded storage fragments without allocating
-another full image. Photo chunks contain complete RGB888 pixels and whole-sector
+another full image. Photo chunks contain complete RGB565 pixels and whole-sector
 multiples. FatFs manages the file header offset, partial sectors and cluster boundaries;
 a bulk buffer does not make every underlying transfer one continuous SD command. No
 raw-sector path bypasses the filesystem or its bounds checks. Consumers publish an image

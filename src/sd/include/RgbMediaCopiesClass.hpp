@@ -108,7 +108,7 @@ private:
     // Supplies bounded encoded JPEG bytes for first-frame preview decoding.
     static size_t ReadJpegInput(void* context, uint8_t* bytes, size_t count);
 
-    // Samples decoded RGB888 fragments directly into the small logical preview.
+    // Samples decoded RGB565 fragments directly into the small logical preview.
     static bool ConsumeJpegPixels(void* context, const uint8_t* bytes, size_t count, size_t offset);
 
     // Decodes only the first JPEG frame to prepare a stored logical preview.

@@ -68,8 +68,6 @@ private:
     uint32_t presentedVideoFrames_ = 0;
     FrameBufferController::Token lastPresentedRevision_ = 0;
 
-    // Selects the decoded pixel format used by the CPU framebuffer.
-    static PixelFormat DecodedFormat(void);
 
     // Reads one checked frame after clearing any generated black borders.
     bool ReadFrame(uint32_t frame);

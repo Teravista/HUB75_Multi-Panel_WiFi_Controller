@@ -155,12 +155,12 @@ Start headers:
 The descriptor stores type, format, dimensions, frame count, rational FPS, ping-pong,
 JPEG quality, payload length and optional placement. Exact bytes are documented in
 [media metadata](MEDIA-METADATA.md); use the existing codec rather than sending a C
-struct. For RGB565 use little-endian packed pixels; RGB888 is R,G,B row-major. JPEG is
+struct. For RGB565 use little-endian packed pixels. JPEG is
 the existing indexed baseline-frame stream. Prepared `.h75v` files are 36-byte
 descriptor/CRC followed by payload. A prepared `.h75p` file contains a 1124-byte photo
 header followed by payload.
 
-The Pico supports JPEG/RGB565/RGB888, up to 60 FPS and 600 seconds as upload metadata,
+The Pico supports JPEG/RGB565, up to 60 FPS and 600 seconds as upload metadata,
 with the existing FAT32-compatible file limit. Missing borders are generated as black
 from dimensions/placement; don't send absent border pixels. Crop/fit/zoom/position
 determine the encoded content and placement on the client.

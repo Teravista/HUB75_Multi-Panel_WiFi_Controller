@@ -20,7 +20,7 @@ FrameRateTracker::Sample (
     )
 {
     latest_ = {nowMs, displayFrames, videoFrames};
-    // Keep the snapshot straddling the 30-second boundary for interpolation.
+    // Keep the snapshot straddling the 10-second boundary for interpolation.
     while (count_ > 1 && uint32_t(nowMs - At(1).ms) >= WindowMs) {
         DropOldest();
     }
@@ -35,10 +35,10 @@ FrameRateTracker::Sample (
 } // Sample
 
 /**
-    Calculates display and video FPS over the available 30-second window.
+    Calculates display and video FPS over the available 10-second window.
 
     Uses the oldest retained sample and latest counters to measure a startup window or the most
-    recent 30 seconds. When the window boundary falls between samples, it interpolates the
+    recent 10 seconds. When the window boundary falls between samples, it interpolates the
     excluded fraction instead of counting an entire older interval. Unsigned counter differences
     tolerate clock and frame-counter wrap independently. The calculation uses cached history and
     never waits for another frame.

@@ -1,13 +1,13 @@
 # Media metadata
 
 `MediaMetadata` describes logical pixels before panel mapping: type, dimensions, format,
-frame count and rational FPS. It owns no pixels. It describes RGB888/RGB565 and indexed
-JPEG photos and videos while preserving the original raw TCP photo upload format.
+frame count and rational FPS. It owns no pixels. It describes RGB565 and indexed
+JPEG photos and videos. Raw TCP photo uploads use full-panel RGB565.
 
 | Field | Photo | Video descriptor |
 | --- | --- | --- |
 | Type | `Photo` (1) | `Video` (2) |
-| Format | `RGB888` (1), `RGB565` (2), `JPEG` (3) | `RGB888` (1), `RGB565` (2), `JPEG` (3) |
+| Format | `RGB565` (2), `JPEG` (3) | `RGB565` (2), `JPEG` (3) |
 | Dimensions | Within 128 × 256 for library photos | Positive width and height |
 | Frames | 1 | Positive frame count |
 | FPS | 0/1 | Positive numerator and denominator |
@@ -16,7 +16,7 @@ JPEG photos and videos while preserving the original raw TCP photo upload format
 A one-frame video still needs a positive frame rate. Fractional rates such as 30000/1001
 do not require floating point. Unknown types/formats, empty fields, inconsistent photo
 timing and payload overflow are rejected. The descriptor describes all library formats.
-Legacy named/retained photo APIs and raw TCP photo uploads accept full-panel RGB888;
+Legacy named/retained photo APIs and raw TCP photo uploads accept full-panel RGB565;
 library photo APIs also accept RGB565 and JPEG. Video uses a separate TCP listener and
 checked record container; see [video upload and playback](VIDEO-UPLOAD.md).
 
@@ -38,7 +38,7 @@ completed descriptor under render ownership. The explicit `BeginFrame(bytes, met
 overload validates the photo before claiming it; metadata is published together with a
 completed frame.
 
-Raw TCP photo uploads contain exactly 98,304 RGB bytes and receive their descriptor
+Raw TCP photo uploads contain exactly 65,536 little-endian RGB565 bytes and receive their descriptor
 automatically. Do not prepend a descriptor to this endpoint.
 
 ## Descriptor layout, versions 1 and 2
@@ -67,7 +67,7 @@ publishing its output. Neither operation reads image pixels.
 ## Photo container, version 3
 
 Named images and alternating `LASTA.H75` / `LASTB.H75` saves use a 52-byte header
-followed by the RGB888 photo payload (98,356 bytes total).
+followed by the RGB565 photo payload (65,588 bytes total).
 
 | Offset | Bytes | Field |
 | ---: | ---: | --- |
@@ -84,17 +84,14 @@ CRC-32/ISO-HDLC uses initial state 0xffffffff, reflected polynomial 0xedb88320 a
 inversion. Header validation protects metadata and generation before any payload reaches
 the consumer; payload CRC is checked during streaming.
 
-Legacy `H75I` version-1 named files and `H75L` version-2 alternating saves still load.
-The reader supplies their known photo/RGB888/one-frame/FPS-0/1 metadata without
-rewriting them. Slots with different supported container versions retain generation
-ordering, including counter rollover. Named/retained saves write version 3. Readers that
-only support versions 1/2 cannot load version-3 files.
+Descriptor-free photo containers are unsupported. Named and retained photos use
+version 3 with an explicit format and payload size.
 
 ## Raw video
 
 Video descriptors permit ping-pong looping; photos must leave the flag false. The video
-receiver accepts panel-sized or smaller RGB888, RGB565 or indexed JPEG at 1–60 FPS and a
-total stored file below 4 GiB. Legacy photo APIs remain single-frame RGB888; independent
+receiver accepts panel-sized or smaller RGB565 or indexed JPEG at 1–60 FPS and a
+total stored file below 4 GiB. Legacy photo APIs remain single-frame RGB565; independent
 library photos also support RGB565 and JPEG. See the [video guide](VIDEO-UPLOAD.md) for
 the separate request and version-4 SD layout.
 
@@ -149,7 +146,7 @@ is covered by the existing final library-header CRC.
 | 0 | 4 | `H75C` |
 | 4 | 1 | Extension version 1 |
 | 5 | 1 | Correction flags: bit 0 color order, bit 1 panel layout; both set |
-| 6 | 1 | Native CPU pixel bytes: 2 or 4 |
+| 6 | 1 | Native CPU pixel bytes: 2 |
 | 7 | 1 | Number of packed physical rectangles, 1–18 |
 | 8 | 4 | Current wiring/CPU-format signature |
 | 12 | 4 | Original logical payload CRC32 |
@@ -165,10 +162,9 @@ All integers are little-endian. The preview begins at the next 512-byte boundary
 after the original records and contains 32 × 64 little-endian RGB565 pixels.
 Native frames follow immediately, each consisting of the listed rectangles in
 order, with row-major CPU pixels inside each rectangle, then a four-byte frame
-CRC32. Two-byte native pixels use the graphics framebuffer's byte order; four-byte
-pixels use its packed CPU representation. Consumers must validate the layout
+CRC32. Native pixels use the graphics framebuffer's RGB565 byte order. Consumers must validate the layout
 signature before using these bytes directly. Their encoding is not the original
-RGB565/RGB888 wire format.
+RGB565 wire format.
 
 Regions must be nonoverlapping, fit the physical framebuffer and cover exactly
 the original image's pixel count. File size must match the complete layout.
@@ -184,3 +180,7 @@ exactly after the 4096-byte preview. There is no per-frame derived section.
 
 Version-1 JPEG containers with native rectangles remain readable for preview,
 but playback always uses the encoded original.
+
+Only format IDs 2 (RGB565) and 3 (JPEG) are supported. Other stored format IDs
+are unavailable and can be deleted from the library. Re-upload those source files
+to use them with this firmware. Format IDs are never reassigned.

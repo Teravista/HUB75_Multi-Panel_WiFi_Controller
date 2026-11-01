@@ -61,7 +61,7 @@ struct FrameWork {
     void* context;
     MemoryManager::FrameReadTiming* timing;
     bool accepted = true;
-    size_t pixelBytes = RGB888_PIXEL_BYTES;
+    size_t pixelBytes = RGB565_PIXEL_BYTES;
 
     // Verifies and delivers a buffered raw frame fragment to its pixel sink.
     void ProcessPendingFramePixels(size_t maximum, bool overlapping = false);
@@ -166,7 +166,6 @@ struct ParallelDecode {
     int& error;
     JpegFrameDecoder::Profile* stages;
     JpegFrameDecoder::Clock clock;
-    bool rgb565;
     bool decoded = false;
     uint64_t elapsedUs = 0;
     uint64_t waitUs = 0;
@@ -180,12 +179,12 @@ struct ParallelDecode {
 };
 
 // Overlaps SD input reads with JPEG decoding on an available Core 1.
-bool DecodeJpegParallel(JpegStream& stream, uint16_t width, uint16_t height, int& error, JpegFrameDecoder::Profile* stages, JpegFrameDecoder::Clock clock, bool rgb565, uint64_t& decodeUs, uint64_t& waitUs, uint32_t& pipelineBytes);
+bool DecodeJpegParallel(JpegStream& stream, uint16_t width, uint16_t height, int& error, JpegFrameDecoder::Profile* stages, JpegFrameDecoder::Clock clock, uint64_t& decodeUs, uint64_t& waitUs, uint32_t& pipelineBytes);
 
 #endif
 
 // Decodes and checks a bounded JPEG record already positioned by the storage manager.
-FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, bool outputRGB565, uint32_t* payloadCrc = nullptr, ImageTile::Sink tileSink = nullptr);
+FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, uint32_t* payloadCrc = nullptr, ImageTile::Sink tileSink = nullptr);
 
 // Checks whether a file is the active playback handle using the prefetch cache.
 bool IsPrefetchedPlaybackFile(FIL& file);
@@ -230,10 +229,6 @@ struct PreviewSamplingContext {
 // Adds managed library files to logical and allocated storage totals.
 int MeasureLibraryStorageUsage(MemoryManager::StorageUsage& usage, uint64_t clusterBytes);
 
-inline constexpr size_t HeaderBytes = PHOTO_HEADER_BYTES;
-
-inline constexpr size_t LegacyLastHeaderBytes = SAVED_PHOTO_HEADER_BYTES;
-
 inline constexpr size_t LastHeaderBytes = METADATA_PHOTO_HEADER_BYTES;
 
 inline constexpr size_t MaximumNameLength = STORAGE_MAXIMUM_NAME_LENGTH;
@@ -270,8 +265,6 @@ void WriteUnsigned32LittleEndian(uint8_t* p, uint32_t value);
 // Reads a 32-bit unsigned value in little-endian byte order.
 uint32_t ReadUnsigned32LittleEndian(const uint8_t* p);
 
-// Builds a photo storage header with dimensions and payload checksum.
-void BuildPhotoStorageHeader(uint8_t* header, uint32_t checksum);
 
 enum class SlotState { Missing, Invalid, Valid, IoError };
 
@@ -393,7 +386,7 @@ struct JpegIndexEntry {
 bool LoadJpegIndexWindow(FIL& file, const SavedPhotoSlot& slot, uint32_t index, int& result);
 
 // Validates an indexed JPEG record before completing provisional frame output.
-SavedFrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, MemoryManager::ImageSink sink, void* context, bool inspecting, bool verifying = false, MemoryManager::FrameReadTiming* timing = nullptr, bool outputRGB565 = false, ImageTile::Sink tileSink = nullptr);
+SavedFrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, MemoryManager::ImageSink sink, void* context, bool inspecting, bool verifying = false, MemoryManager::FrameReadTiming* timing = nullptr, ImageTile::Sink tileSink = nullptr);
 
 inline constexpr size_t LibraryHeaderBytes = 1536;
 

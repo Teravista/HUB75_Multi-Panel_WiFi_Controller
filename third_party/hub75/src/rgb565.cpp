@@ -1,6 +1,6 @@
 #include "rgb565.hpp"
 
-// Expands a graphics RGB565 pixel into an RGB888 color.
+// Expands a graphics RGB565 pixel into separate color channels.
 uint32_t ExpandDriverRGB565(uint16_t stored) {
     // PicoGraphics stores RGB565 words in the opposite byte order to wire RGB565.
     const uint16_t pixel = uint16_t((stored << BITS_PER_BYTE) | (stored >> BITS_PER_BYTE));
@@ -15,7 +15,7 @@ uint32_t ExpandDriverRGB565(uint16_t stored) {
     const uint32_t expandedBlue =
         (blue << RGB565_RED_BLUE_EXPAND_SHIFT) | (blue >> RGB565_RED_BLUE_REPLICATE_SHIFT);
 
-    return (expandedRed << RGB888_RED_SHIFT) | (expandedGreen << RGB888_GREEN_SHIFT) | expandedBlue;
+    return (expandedRed << COLOR_RED_SHIFT) | (expandedGreen << COLOR_GREEN_SHIFT) | expandedBlue;
 }
 
 // Maps a graphics RGB565 pixel through the driver's gamma lookup tables.

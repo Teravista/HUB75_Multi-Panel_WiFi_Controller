@@ -144,7 +144,7 @@ PanelRenderer::ConvertLogicalToPhysicalCoordinates (
     display pipeline performs that later.
 
     @param graphics Destination graphics framebuffer for the panel chain.
-    @param imageData Read-only logical RGB888 source frame bytes.
+    @param imageData Read-only logical RGB565 source frame bytes.
 */
 void
 PanelRenderer::RenderLogicalImageToGraphics (
@@ -157,9 +157,9 @@ PanelRenderer::RenderLogicalImageToGraphics (
     int logicalX;
     int logicalY;
     int imageByteIndex;
-    int redDiodeValue;
-    int greenDiodeValue;
-    int blueDiodeValue;
+    uint16_t packed;
+    uint32_t color;
+    uint8_t channels[RGB_CHANNEL_COUNT];
 
     // Clear pixels that are not overwritten by the current logical image.
     graphics.set_pen(BLACK_COLOR_VALUE, BLACK_COLOR_VALUE, BLACK_COLOR_VALUE);
@@ -167,17 +167,18 @@ PanelRenderer::RenderLogicalImageToGraphics (
 
     for (logicalY = 0; logicalY < LOGICAL_IMAGE_HEIGHT; logicalY++) {
         for (logicalX = 0; logicalX < LOGICAL_IMAGE_WIDTH; logicalX++) {
-            // Locate the three color bytes for this logical image pixel.
-            imageByteIndex = (logicalY * LOGICAL_IMAGE_WIDTH + logicalX) * IMAGE_BYTES_PER_PIXEL;
+            imageByteIndex = (logicalY * LOGICAL_IMAGE_WIDTH + logicalX) * RGB565_PIXEL_BYTES;
+            packed = uint16_t(imageData[imageByteIndex]) |
+                uint16_t(uint16_t(imageData[imageByteIndex + 1]) << BITS_PER_BYTE);
+            color = CpuFrame::ExpandRgb565Channels(packed);
+            channels[0] = uint8_t(color >> COLOR_RED_SHIFT);
+            channels[1] = uint8_t(color >> COLOR_GREEN_SHIFT);
+            channels[RGB_PIXEL_BLUE_INDEX] = uint8_t(color);
 
-            // physical color wirieng is broken so the need for shifting
-            redDiodeValue = imageData[imageByteIndex + IMAGE_RED_BYTE_OFFSET];
-            greenDiodeValue = imageData[imageByteIndex + IMAGE_GREEN_BYTE_OFFSET];
-            blueDiodeValue = imageData[imageByteIndex + IMAGE_BLUE_BYTE_OFFSET];
-
+            // Apply the hardware channel correction after reading canonical pixels.
             ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, physicalX, physicalY);
-
-            graphics.set_pen(redDiodeValue, greenDiodeValue, blueDiodeValue);
+            graphics.set_pen(channels[IMAGE_RED_BYTE_OFFSET], channels[IMAGE_GREEN_BYTE_OFFSET],
+                channels[IMAGE_BLUE_BYTE_OFFSET]);
             graphics.set_pixel(pimoroni::Point(physicalX, physicalY));
         }
     }
@@ -552,7 +553,7 @@ PanelRenderer::DrawHotspotDeviceDots (
     const uint8_t* hotspotDevices
     )
 {
-    uint8_t activeColor[IMAGE_BYTES_PER_PIXEL]{};
+    uint8_t activeColor[RGB_CHANNEL_COUNT]{};
     int top;
     int left;
     int x;

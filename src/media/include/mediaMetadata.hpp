@@ -3,14 +3,11 @@
 #include <cstdint>
 
 
-// Logical media, before panel mapping/wiring correction. RGB888 means one
-// unsigned byte each for R, G and B; RGB565 is defined below. Both are
-// uncompressed and row-major. Legacy photo endpoints remain RGB888; the photo
-// library supports RGB888, RGB565 and a single indexed JPEG frame.
-// JPEG video contains an index and independently encoded baseline JPEG frames.
+// Logical media before panel mapping and hardware channel correction.
+// Raw pixels are little-endian RGB565; JPEG frames decode to that same format.
 enum class MediaType : uint8_t { Photo = 1, Video = 2 };
 // RGB565 uses little-endian 16-bit words: R[15:11], G[10:5], B[4:0].
-enum class PixelFormat : uint8_t { RGB888 = 1, RGB565 = 2, JPEG = 3 };
+enum class PixelFormat : uint8_t { RGB565 = 2, JPEG = 3 };
 
 /**
     Describes stored or transferred media consistently across uploads and playback.
@@ -23,7 +20,7 @@ enum class PixelFormat : uint8_t { RGB888 = 1, RGB565 = 2, JPEG = 3 };
 */
 struct MediaMetadata {
     MediaType type = MediaType::Photo;
-    PixelFormat pixelFormat = PixelFormat::RGB888;
+    PixelFormat pixelFormat = PixelFormat::RGB565;
     bool pingPong = false;
     uint8_t jpegQuality = 0; // Encoder setting 1..95; 0 means unknown/legacy.
     uint16_t width = 0;
@@ -49,7 +46,7 @@ struct MediaMetadata {
     // Returns the readable name of the stored pixel format.
     const char* FormatName(void) const;
 
-    // Creates metadata for a single RGB888 photo.
+    // Creates metadata for a single RGB565 photo.
     static MediaMetadata Photo(uint16_t width, uint16_t height);
 
     // Returns the byte count of one raw pixel, or zero for JPEG.

@@ -43,7 +43,7 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 <label for="photo">Photo</label>
 <input id="photo" type="file" accept="image/*">
 <label for="photo-name">Photo name</label><input id="photo-name" type="text" maxlength="63" placeholder="Use filename">
-<div class="options"><div><label for="photo-format">Photo format</label><select id="photo-format"><option value="rgb565">RGB565</option><option value="jpeg">JPEG</option><option value="rgb888">RGB888</option></select></div><div><label for="photo-jpeg-quality">JPEG quality</label><input id="photo-jpeg-quality" type="number" min="1" max="95" value="85" disabled></div></div>
+<div class="options"><div><label for="photo-format">Photo format</label><select id="photo-format"><option value="rgb565">RGB565</option><option value="jpeg">JPEG</option></select></div><div><label for="photo-jpeg-quality">JPEG quality</label><input id="photo-jpeg-quality" type="number" min="1" max="95" value="85" disabled></div></div>
 <div class="options"><div><label for="photo-sizing">Sizing</label><select id="photo-sizing"><option value="crop">Fill / crop</option><option value="fit">Fit</option><option value="manual">Manual zoom</option></select></div><div><label for="photo-zoom">Zoom %</label><input id="photo-zoom" type="number" min="1" max="500" step="1" value="100" disabled></div></div>
 <div id="photo-editor" class="preview-editor"><canvas id="preview" tabindex="0" width="128" height="256" aria-label="Photo preview" hidden></canvas><div id="photo-outline" class="content-outline" hidden></div></div><p id="photo-drag-hint" class="drag-hint"></p>
 <button id="upload" type="button" disabled>Save and show photo</button>
@@ -55,7 +55,7 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 <label for="video-name">Video name</label><input id="video-name" type="text" maxlength="63" placeholder="Use filename">
 <div class="options"><div><label for="video-fps">FPS</label><input id="video-fps" type="number" min="1" max="60" step="1" value="20"></div>
 <div><label for="video-seconds">Maximum seconds</label><input id="video-seconds" type="number" min="0.1" max="600" step="0.1" value="10"></div>
-<div><label for="video-format">Format</label><select id="video-format"><option value="rgb565">RGB565</option><option value="jpeg">JPEG</option><option value="rgb888">RGB888</option></select></div>
+<div><label for="video-format">Format</label><select id="video-format"><option value="rgb565">RGB565</option><option value="jpeg">JPEG</option></select></div>
 <div><label for="jpeg-quality">JPEG quality</label><input id="jpeg-quality" type="number" min="1" max="95" step="1" value="85" disabled></div></div>
 <label class="check" for="video-pingpong"><input id="video-pingpong" type="checkbox">Ping-pong</label>
 <div class="options"><div><label for="video-sizing">Sizing</label><select id="video-sizing"><option value="crop">Fill / crop</option><option value="fit">Fit</option><option value="manual">Manual zoom</option></select></div><div><label for="video-zoom">Zoom %</label><input id="video-zoom" type="number" min="1" max="500" step="1" value="100" disabled></div></div>
@@ -574,31 +574,22 @@ const VideoCodec = (() => {
       Encodes canvas pixels in the selected raw transfer format.
 
       Drops the already-composited alpha channel. RGB565 uses little-endian
-      R5G6B5 words, while RGB888 preserves the browser red/green/blue byte order.
+      R5G6B5 words.
 
       @param rgba Source canvas pixels in RGBA byte order.
       @param format Stored pixel format selected for the prepared media.
 
-      @return value - RGB888 or little-endian RGB565 bytes converted from canvas RGBA pixels.
+      @return value - Little-endian RGB565 bytes converted from canvas RGBA pixels.
   */
   function encodeFramePixels(rgba, format) {
-    let pixelBytes;
-    if (format === 'rgb565') {
-      pixelBytes = 2;
-    } else {
-      pixelBytes = 3;
+    if (format !== 'rgb565' || rgba.length % 4 !== 0) {
+      throw new Error('Raw pixels must use RGB565');
     }
-    const out = new Uint8Array(rgba.length / 4 * pixelBytes);
+    const out = new Uint8Array(rgba.length / 4 * 2);
     for (let s = 0, d = 0; s < rgba.length; s += 4) {
-      if (format === 'rgb565') {
-        const p = ((rgba[s] >> 3) << 11) | ((rgba[s + 1] >> 2) << 5) | (rgba[s + 2] >> 3);
-        out[d++] = p & 255;
-        out[d++] = p >>> 8;
-      } else {
-        out[d++] = rgba[s];
-        out[d++] = rgba[s + 1];
-        out[d++] = rgba[s + 2];
-      }
+      const p = ((rgba[s] >> 3) << 11) | ((rgba[s + 1] >> 2) << 5) | (rgba[s + 2] >> 3);
+      out[d++] = p & 255;
+      out[d++] = p >>> 8;
     }
 
     return out;
@@ -662,7 +653,7 @@ const VideoCodec = (() => {
       Progressive or mismatched dimensions are rejected before upload; the Pico
       decoder and stored checksums validate the actual encoded frame content.
 
-      @param frame Raw RGB888 frame or encoded JPEG frame being processed.
+      @param frame Raw RGB565 frame or encoded JPEG frame being processed.
       @param width Image width in pixels.
       @param height Image height in pixels.
 
@@ -727,6 +718,9 @@ const VideoCodec = (() => {
 function encodeMediaDescriptor(
     frames, fps, format, pingpong, bytes, checksum, quality = 0, width = WIDTH, height = HEIGHT,
     left = Math.floor((WIDTH - width) / 2), top = Math.floor((HEIGHT - height) / 2)) {
+  if (!['rgb565', 'jpeg'].includes(format)) {
+    throw new Error('Unsupported pixel format.');
+  }
   const out = new Uint8Array(36);
 
   // Write the fixed binary fields explicitly; the controller expects little-endian values.
@@ -766,7 +760,7 @@ function encodeMediaDescriptor(
     loopFlag = 0;
   }
   out.set([
-    72, 55, 53, 77, version, 2, {rgb888: 1, rgb565: 2, jpeg: 3}[format],
+    72, 55, 53, 77, version, 2, {rgb565: 2, jpeg: 3}[format],
     (savedQuality << 1) | loopFlag
   ]);
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > WIDTH ||
@@ -1182,7 +1176,7 @@ function readVideoUploadOptions() {
     if (!Number.isFinite(seconds) || seconds < 0.1 || seconds > 600) {
         throw new Error('Choose a duration from 0.1 to 600 seconds.');
     }
-    if (!['rgb565', 'rgb888', 'jpeg'].includes(format)) {
+    if (!['rgb565', 'jpeg'].includes(format)) {
         throw new Error('Choose a supported format.');
     }
     if (format === 'jpeg' && (!Number.isInteger(quality) || quality < 1 || quality > 95)) {
@@ -1256,10 +1250,7 @@ async function prepareBrowserVideo(file, options, signal) {
             options.zoom, options.position);
         const encodedCanvas = createStoredPreviewCanvas(videoCanvas, area);
         const encodedContext = encodedCanvas.getContext('2d', {willReadFrequently: true});
-        let rawPixelBytes = 3;
-        if (options.format === 'rgb565') {
-            rawPixelBytes = 2;
-        }
+        const rawPixelBytes = 2;
         if (options.format !== 'jpeg' && frames * area.width * area.height * rawPixelBytes > records.limit) {
             await records.spill();
         }
@@ -1607,14 +1598,14 @@ function redrawVideoPreview() {
 
     @param canvas Full logical-panel preview canvas.
     @param area Visible stored rectangle in panel coordinates.
-    @param format Selected RGB565, RGB888 or JPEG format.
+    @param format Selected RGB565 or JPEG format.
     @param quality JPEG encoder quality from 1 to 95.
     @param name Optional photo name or filename-derived fallback.
 
     @return Promise<object> - Named start header and complete photo payload bytes.
 */
 async function preparePhotoPayload(canvas, area, format, quality, name) {
-    if (!['rgb565', 'rgb888', 'jpeg'].includes(format) ||
+    if (!['rgb565', 'jpeg'].includes(format) ||
         (format === 'jpeg' && (!Number.isInteger(quality) || quality < 1 || quality > 95))) {
         throw new Error('Choose a valid photo format and JPEG quality.');
     }
@@ -2744,7 +2735,7 @@ function renderFrameRates(snapshot) {
     }
     return;
   }
-  if (!Number.isInteger(fps.windowMillis) || fps.windowMillis <= 0 || fps.windowMillis > 30000 ||
+  if (!Number.isInteger(fps.windowMillis) || fps.windowMillis <= 0 || fps.windowMillis > 10000 ||
       ![fps.displayTenths, fps.videoTenths].every(n => Number.isInteger(n) && n >= 0 && n <= 0xffffffff)) {
     activeFps.hidden = true;
     activeFps.textContent = '';
@@ -2763,7 +2754,7 @@ function renderFrameRates(snapshot) {
     activeFps.textContent = text;
   }
   activeFps.title =
-      'Actual frame rates averaged over the latest 30 seconds; a shorter window is used just after startup.';
+      'Actual frame rates averaged over the latest 10 seconds; a shorter window is used just after startup.';
 }
 </script>
 </body>

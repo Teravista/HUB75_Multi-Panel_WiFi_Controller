@@ -2,7 +2,7 @@
 #include "../../../third_party/tjpgd/tjpgd.h"
 #include "config/defines.h"
 
-#define JPEG_DECODER_OUTPUT_RGB888 0
+#define JPEG_DECODER_OUTPUT_RGB565 1
 #define JPEG_FAST_DECODE_MODE 2
 #define JPEG_WORK_ALIGNMENT 4
 
@@ -14,7 +14,6 @@ struct Context {
     void* outputContext;
     uint16_t width;
     uint16_t height;
-    bool outputRGB565 = false;
     ImageTile::Sink tileOutput = nullptr;
     JpegFrameDecoder::Clock clock = nullptr;
     void* clockContext = nullptr;
@@ -94,7 +93,7 @@ ReadEncodedJpegBytes (
     Validates the decoder's MCU rectangle and translates its rows to byte offsets within the
     logical image. A tile sink receives the entire borrowed MCU rectangle once,
     including clipped edge dimensions. Without that sink, the established row
-    callback receives the same tightly packed RGB888 or RGB565 fragments as before.
+    callback receives the same tightly packed RGB565 fragments as before.
     Neither path copies the decoded pixels; rejection immediately stops decoding.
 
     @param context Caller-owned state passed unchanged to the callback.
@@ -123,10 +122,7 @@ DeliverDecodedTile (
         return 0;
     }
     // The MCU is already in its requested format; keep rows tightly packed and borrowed.
-    pixelBytes = RGB888_PIXEL_BYTES;
-    if (context.outputRGB565) {
-        pixelBytes = RGB565_PIXEL_BYTES;
-    }
+    pixelBytes = RGB565_PIXEL_BYTES;
     rowBytes = size_t(rect->right - rect->left + 1) * pixelBytes;
     pixels = static_cast<const uint8_t*>(bitmap);
 
@@ -197,7 +193,7 @@ WriteDecodedJpegPixels (
     Decodes or validates one JPEG frame using bounded input and output callbacks.
 
     Prepares the caller-provided decoder workspace from encoded-input callbacks and rejects
-    unsupported dimensions before reconstruction. An output callback receives logical RGB888 or
+    unsupported dimensions before reconstruction. An output callback receives logical
     little-endian RGB565 fragments in MCU order; offsets can be nonmonotonic and the callback must
     consume each borrowed fragment synchronously.
 
@@ -218,7 +214,6 @@ WriteDecodedJpegPixels (
     @param profile Optional output counters for individual JPEG decoder stages.
     @param clock Optional monotonic profiling clock returning microseconds.
     @param clockContext Caller-owned state passed to the profiling clock.
-    @param outputRGB565 Whether decoded output uses RGB565 rather than RGB888 pixels.
     @param tileOutput Optional whole-tile sink, preferred over the compatible row sink.
 
     @return true - The baseline JPEG decoded completely and its output was accepted.
@@ -239,7 +234,6 @@ JpegFrameDecoder::Decode (
     Profile* profile,
     Clock clock,
     void* clockContext,
-    bool outputRGB565,
     ImageTile::Sink tileOutput
     )
 {
@@ -250,7 +244,7 @@ JpegFrameDecoder::Decode (
     uint64_t prepared;
     decltype(&WriteDecodedJpegPixels) outputCallback;
 
-    static_assert(JD_FORMAT == JPEG_DECODER_OUTPUT_RGB888 && JD_FASTDECODE == JPEG_FAST_DECODE_MODE && !JD_USE_SCALE,
+    static_assert(JD_FORMAT == JPEG_DECODER_OUTPUT_RGB565 && JD_FASTDECODE == JPEG_FAST_DECODE_MODE && !JD_USE_SCALE,
                   "JPEG output/working memory configuration changed");
     error = JDR_PAR;
     if (profile) {
@@ -265,7 +259,6 @@ JpegFrameDecoder::Decode (
 
     // Connect bounded input and output callbacks without allocating a complete decoded image.
     context = {input, inputContext, output, outputContext, width, height};
-    context.outputRGB565 = outputRGB565;
     context.tileOutput = tileOutput;
     if (profile) {
         context.clock = clock;
@@ -312,7 +305,6 @@ JpegFrameDecoder::Decode (
     }
 
     // Select native reconstruction after prepare initializes the decoder state.
-    decoder.output_rgb565 = outputRGB565;
 
     // Decode into row callbacks, or validate the stream when no pixel consumer is supplied.
     error = jd_decomp(&decoder, outputCallback, 0);
