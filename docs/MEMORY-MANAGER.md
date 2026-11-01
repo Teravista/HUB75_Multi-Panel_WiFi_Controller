@@ -39,8 +39,6 @@ shutdown releases only those channels and its SPI resources.
 - `IsReady()` and `GetLastError()` report availability and operation failures.
 - `SaveImage(name, pixels, bytes)` creates a new file, preserving existing files.
 - `ReadImage(name, sink, context)` streams bounded fragments and checks the file.
-- `RunReadWriteCheck(pixels, bytes)` saves an unused temporary file, compares
-  every byte after reading it, then removes that test file.
 
 Call storage methods from foreground code. An ownership guard rejects concurrent or
 reentrant operations. Names are root filenames containing letters, digits, underscores
