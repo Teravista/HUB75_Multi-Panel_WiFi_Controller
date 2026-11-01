@@ -25,6 +25,9 @@ public:
     // Returns metadata for the currently open saved media.
     MediaMetadata GetPlaybackMetadata(void) const;
 
+    // Returns the representation used by the last successfully verified saved frame.
+    const char* GetFrameSourceName(void) const;
+
     // Closes playback while preserving the last submitted display frame.
     void Stop(void);
 
@@ -88,6 +91,8 @@ private:
     MediaMetadata metadata_;
     uint32_t epochMs_ = 0;
     uint32_t lastFrame_ = 0;
+    bool correctedCopy_ = false;
+    bool readingCorrectedCopy_ = false;
     bool active_ = false;
     bool reload_ = false;
 };

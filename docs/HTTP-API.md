@@ -48,6 +48,31 @@ numbers as media IDs. IDs are independent for photos and videos. Selection is st
 immediately, while `mode`/`displayed` describe the frame actually published to the
 panel; they may update on the next render iteration.
 
+`/status` and `/settings` include `displaySource`: `corrected` when the last
+verified saved frame used the prepared color/panel-corrected copy, `original`
+when it used raw/JPEG original data, or `none` for non-stored content. This
+reports the playback path without reading SD files during status requests.
+
+Each photo/video list item includes stored-representation availability:
+
+```json
+"copies": {"original": true, "preview": true, "display": true, "displayReady": true}
+```
+
+`original` indicates a checked logical-original descriptor. `preview` and `display`
+indicate stored derived sections; `displayReady` additionally requires the current
+CPU format, wiring signature and playback policy. Newly saved
+JPEG items report `original: true`, `preview: true`, `display: false` and
+`displayReady: false`; their `displaySource` is always `original`. Older JPEG
+display sections may still report `display: true`, but are never used and
+report `displayReady: false`. Original-only RGB/JPEG items report only
+`original: true` and retain normal playback and generated-preview support. A stale
+native signature leaves `display: true` but sets `displayReady: false`; playback
+uses the original. Clients must also honor the item's `valid` flag. These fields
+describe header/layout availability, not an additional full-payload readback;
+checksums are validated when the data is used. Existing item `bytes` remains the
+original payload size; managed SD usage includes all stored representations.
+
 Thumbnail `pixels` is base64, little-endian RGB565, row-major. Current previews are
 32×64. Use the returned width/height rather than assuming a size.
 Status/settings reads do not read the SD card.

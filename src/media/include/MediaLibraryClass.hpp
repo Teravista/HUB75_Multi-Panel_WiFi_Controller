@@ -115,6 +115,9 @@ public:
 private:
     FrameRateTracker frameRates_;
 
+    // Adds stored-copy presence and display compatibility to a library item.
+    static void AppendMediaCopiesJson(JsonWriter& out, const MemoryManager::MediaCopyStatus& copies);
+
     // Adds RAM capacity and usage fields to a JSON response.
     static void AppendRamUsageJson(JsonWriter& out, const MemoryManager::RamUsage& ram);
 
