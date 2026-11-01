@@ -131,6 +131,7 @@ struct JpegStream {
     uint16_t lastWord = 0;
     bool accepted = true;
     uint32_t* payloadCrc = nullptr;
+    ImageTile::Sink tileSink = nullptr;
     static constexpr size_t BufferBytes = JpegStreamBufferBytes;
 
     // Refills the bounded encoded JPEG input buffer from storage.
@@ -141,6 +142,9 @@ struct JpegStream {
 
     // Forwards decoded JPEG fragments to the frame's pixel sink.
     static bool WriteDecodedJpegPixels(void* context, const uint8_t* bytes, size_t count, size_t offset);
+
+    // Forwards a complete borrowed JPEG tile and records consumer acceptance.
+    static bool WriteDecodedJpegTile(void* context, const ImageTile& tile);
 
 };
 
@@ -181,7 +185,7 @@ bool DecodeJpegParallel(JpegStream& stream, uint16_t width, uint16_t height, int
 #endif
 
 // Decodes and checks a bounded JPEG record already positioned by the storage manager.
-FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, bool outputRGB565, uint32_t* payloadCrc = nullptr);
+FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, bool outputRGB565, uint32_t* payloadCrc = nullptr, ImageTile::Sink tileSink = nullptr);
 
 // Checks whether a file is the active playback handle using the prefetch cache.
 bool IsPrefetchedPlaybackFile(FIL& file);
@@ -389,7 +393,7 @@ struct JpegIndexEntry {
 bool LoadJpegIndexWindow(FIL& file, const SavedPhotoSlot& slot, uint32_t index, int& result);
 
 // Validates an indexed JPEG record before completing provisional frame output.
-SavedFrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, MemoryManager::ImageSink sink, void* context, bool inspecting, bool verifying = false, MemoryManager::FrameReadTiming* timing = nullptr, bool outputRGB565 = false);
+SavedFrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, MemoryManager::ImageSink sink, void* context, bool inspecting, bool verifying = false, MemoryManager::FrameReadTiming* timing = nullptr, bool outputRGB565 = false, ImageTile::Sink tileSink = nullptr);
 
 inline constexpr size_t LibraryHeaderBytes = 1536;
 

@@ -408,7 +408,7 @@ MediaPlayer::ReadFrame (
 {
     readingCorrectedCopy_ = false;
     upload_.PrepareStoredFrame(metadata_);
-    if (!memory_.ReadMediaFrame(frame, Consume, this, nullptr, DecodedFormat(), ConsumePrepared)) {
+    if (!memory_.ReadMediaFrame(frame, Consume, this, nullptr, DecodedFormat(), ConsumePrepared, ConsumeTile)) {
         return false;
     }
 
@@ -505,3 +505,29 @@ MediaPlayer::ConsumePrepared (
     player->readingCorrectedCopy_ = true;
     return player->upload_.WritePreparedFramePixels(bytes, count, offset, layout);
 } // ConsumePrepared
+
+/**
+    Places a provisional decoded JPEG tile in the owned CPU framebuffer.
+
+    The selected decoder core borrows the player while render ownership excludes
+    uploads. Tile placement never reads storage or publishes a partial image;
+    ReadFrame retains responsibility for final verification and publication.
+
+    @param context Borrowed player with immutable placement metadata for this read.
+    @param tile Tightly packed decoded pixels valid only for this callback.
+
+    @return true - The tile was mapped into the current framebuffer.
+    @return false - Tile bounds, format or placement were invalid.
+*/
+bool
+MediaPlayer::ConsumeTile (
+    void* context,
+    const ImageTile& tile
+    )
+{
+    MediaPlayer* player = nullptr;
+
+    player = static_cast<MediaPlayer*>(context);
+    return player->upload_.WriteStoredFrameTile(tile, player->metadata_.width,
+        player->metadata_.height, player->metadata_.offsetX, player->metadata_.offsetY);
+} // ConsumeTile

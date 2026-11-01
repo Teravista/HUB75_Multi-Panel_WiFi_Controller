@@ -948,6 +948,7 @@ MemoryManager::OpenLastMedia (
     @param timing Optional output counters for this frame read.
     @param jpegOutput Requested JPEG pixel format; raw media retains its stored format.
     @param preparedSink Optional native consumer; omitting it always reads the logical original.
+    @param tileSink Optional JPEG rectangle consumer; raw media retains its fragment sink.
 
     @return true - The requested frame and its CRC passed verification.
     @return false - The request, I/O, consumer or checksum failed.
@@ -959,7 +960,8 @@ MemoryManager::ReadMediaFrame (
     void* context,
     FrameReadTiming* timing,
     PixelFormat jpegOutput,
-    PreparedImageSink preparedSink
+    PreparedImageSink preparedSink,
+    ImageTile::Sink tileSink
     )
 {
     MemoryStorage::SavedFrameResult read;
@@ -997,7 +999,7 @@ MemoryManager::ReadMediaFrame (
             native, frameIndex, MemoryStorage::PreparedSinkContext::DeliverPreparedPixels, &nativeConsumer, timing);
         read = {nativeResult.complete, int(nativeResult.result), nativeResult.error};
     } else if (MemoryStorage::managerState.playback.description.indexedJpeg) {
-        read = MemoryStorage::ReadAndVerifyJpegFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, false, timing, jpegOutput == PixelFormat::RGB565);
+        read = MemoryStorage::ReadAndVerifyJpegFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, false, timing, jpegOutput == PixelFormat::RGB565, tileSink);
     } else {
         read = MemoryStorage::ReadAndVerifyRawVideoFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, timing);
     }

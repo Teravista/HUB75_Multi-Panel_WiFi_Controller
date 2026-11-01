@@ -26,6 +26,13 @@
 
 #include "tjpgd.h"
 
+#if JD_HOT_CODE_IN_RAM && defined(PICO_ON_DEVICE) && PICO_ON_DEVICE && defined(PICO_RP2350) && PICO_RP2350
+#include <pico.h>
+#define JD_HOT_CODE(name) __not_in_flash_func(name)
+#else
+#define JD_HOT_CODE(name) name
+#endif
+
 #if JD_INLINE_ENTROPY && JD_FASTDECODE == 2 && defined(__GNUC__)
 #define JD_SLOW_PATH __attribute__((noinline))
 #define JD_FAST_PATH static inline __attribute__((always_inline))
@@ -287,7 +294,7 @@ static JRESULT create_huffman_tbl (	/* 0:OK, !0:Failed */
 /* Extract a huffman decoded data from input stream                      */
 /*-----------------------------------------------------------------------*/
 
-static JD_SLOW_PATH int huffext_slow (	/* >=0: decoded data, <0: error code */
+static JD_SLOW_PATH int JD_HOT_CODE(huffext_slow) (	/* >=0: decoded data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int id,	/* Table ID (0:Y, 1:C) */
 	unsigned int cls	/* Table class (0:DC, 1:AC) */
@@ -407,6 +414,16 @@ static JD_SLOW_PATH int huffext_slow (	/* >=0: decoded data, <0: error code */
 		nc = *hb++;
 		if (nc) {
 			d = w >> (wbit - bl);
+#if JD_CANONICAL_LOOKUP
+			/* Canonical codes of one length are consecutive. Subtraction indexes
+			   them directly; 16-bit wrapping matches the stored code-word table. */
+			const unsigned int index = (uint16_t)(d - *hc);
+			if (index < nc) {
+				jd->dbit = wbit - bl;
+				return hd[index];
+			}
+			hc += nc; hd += nc;
+#else
 			do {	/* Search the code word in this bit length */
 				if (d == *hc++) {		/* Matched? */
 					jd->dbit = wbit - bl;	/* Snip the huffman code */
@@ -414,6 +431,7 @@ static JD_SLOW_PATH int huffext_slow (	/* >=0: decoded data, <0: error code */
 				}
 				hd++;
 			} while (--nc);
+#endif
 		}
 	}
 #endif
@@ -448,7 +466,7 @@ JD_FAST_PATH int huffext(JDEC* jd, unsigned int id, unsigned int cls)
 /* Extract N bits from input stream                                      */
 /*-----------------------------------------------------------------------*/
 
-static JD_SLOW_PATH int bitext_slow (	/* >=0: extracted data, <0: error code */
+static JD_SLOW_PATH int JD_HOT_CODE(bitext_slow) (	/* >=0: extracted data, <0: error code */
 	JDEC* jd,			/* Pointer to the decompressor object */
 	unsigned int nbit	/* Number of bits to extract (1 to 16) */
 )
@@ -618,7 +636,7 @@ static JRESULT restart (
 /* Apply Inverse-DCT in Arai Algorithm (see also aa_idct.png)            */
 /*-----------------------------------------------------------------------*/
 
-static void block_idct (
+static void JD_HOT_CODE(block_idct) (
 	int32_t* src,	/* Input block data (de-quantized and pre-scaled for Arai Algorithm) */
 	jd_yuv_t* dst	/* Pointer to the destination to store the block as byte array */
 )
@@ -741,7 +759,7 @@ static void block_idct (
 /* Load all blocks in an MCU into working buffer                         */
 /*-----------------------------------------------------------------------*/
 
-static JRESULT mcu_load (
+static JRESULT JD_HOT_CODE(mcu_load) (
 	JDEC* jd		/* Pointer to the decompressor object */
 )
 {
@@ -834,7 +852,7 @@ static JRESULT mcu_load (
 #if JD_REUSE_CHROMA && JD_FORMAT == 0 && !JD_USE_SCALE
 /* A 4:2:0 MCU has four Y blocks and one Cb/Cr pair. Compute each chroma
    contribution once for its four pixels, retaining signed division rounding. */
-static void color_420(JDEC* jd)
+static void JD_HOT_CODE(color_420)(JDEC* jd)
 {
 	const int accuracy = (sizeof(int) > 2) ? 1024 : 128;
 	uint8_t* rgb = (uint8_t*)jd->workbuf;
@@ -859,7 +877,103 @@ static void color_420(JDEC* jd)
 }
 #endif
 
-static JRESULT mcu_output (
+#if JD_FORMAT == 0 && !JD_USE_SCALE
+/* Clip exactly as the RGB888 path, then quantize without storing RGB888 bytes. */
+JD_FAST_PATH uint16_t pack_rgb565(int red, int green, int blue)
+{
+	const uint16_t pixel = (uint16_t)(((uint16_t)(BYTECLIP(red) & 0xF8) << 8) |
+		((uint16_t)(BYTECLIP(green) & 0xFC) << 3) | (BYTECLIP(blue) >> 3));
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	return (uint16_t)((pixel << 8) | (pixel >> 8));
+#else
+	return pixel;
+#endif
+}
+
+/* Reuse each chroma contribution for a 2x2 group, writing packed pixels directly. */
+#if JD_REUSE_CHROMA
+static void JD_HOT_CODE(color_420_rgb565)(JDEC* jd)
+{
+	const int accuracy = (sizeof(int) > 2) ? 1024 : 128;
+	uint16_t* rgb = (uint16_t*)jd->workbuf;
+	for (unsigned int cy = 0; cy < 8; cy++) {
+		const jd_yuv_t* chroma = jd->mcubuf + 256 + cy * 8;
+		const unsigned int ybase = (cy >= 4 ? 128 : 0) + (cy % 4) * 16;
+		for (unsigned int cx = 0; cx < 8; cx++) {
+			const int cb = chroma[cx] - 128, cr = chroma[cx + 64] - 128;
+			const int red = (int)(1.402 * accuracy) * cr / accuracy;
+			const int green = ((int)(0.344 * accuracy) * cb + (int)(0.714 * accuracy) * cr) / accuracy;
+			const int blue = (int)(1.772 * accuracy) * cb / accuracy;
+			const jd_yuv_t* ypixels = jd->mcubuf + ybase + (cx >= 4 ? 64 : 0) + (cx % 4) * 2;
+			uint16_t* output = rgb + cy * 32 + cx * 2;
+			for (unsigned int row = 0; row < 2; row++) {
+				const int y0 = ypixels[row * 8], y1 = ypixels[row * 8 + 1];
+				uint16_t* pixels = output + row * 16;
+				pixels[0] = pack_rgb565(y0 + red, y0 - green, y0 + blue);
+				pixels[1] = pack_rgb565(y1 + red, y1 - green, y1 + blue);
+			}
+		}
+	}
+}
+#endif
+
+/* Keep the existing MCU layout, clipping, arithmetic and callback rectangle.
+   Only output storage changes; workbuf is already aligned for uint16_t access. */
+static JRESULT JD_HOT_CODE(mcu_output_rgb565)(
+	JDEC* jd, int (*outfunc)(JDEC*, void*, JRECT*), JRECT* rect,
+	unsigned int mx, unsigned int my, unsigned int rx, unsigned int ry)
+{
+	const int accuracy = (sizeof(int) > 2) ? 1024 : 128;
+	uint16_t* output = (uint16_t*)jd->workbuf;
+	unsigned int ix, iy;
+	jd_yuv_t *py, *pc;
+	int yy, cb, cr;
+
+#if JD_REUSE_CHROMA
+	if (mx == 16 && my == 16) {
+		color_420_rgb565(jd);
+	} else
+#endif
+	{
+		for (iy = 0; iy < my; iy++) {
+			pc = py = jd->mcubuf;
+			if (my == 16) {
+				pc += 64 * 4 + (iy >> 1) * 8;
+				if (iy >= 8) py += 64;
+			} else {
+				pc += mx * 8 + iy * 8;
+			}
+			py += iy * 8;
+			for (ix = 0; ix < mx; ix++) {
+				cb = pc[0] - 128;
+				cr = pc[64] - 128;
+				if (mx == 16) {
+					if (ix == 8) py += 64 - 8;
+					pc += ix & 1;
+				} else {
+					pc++;
+				}
+				yy = *py++;
+				*output++ = pack_rgb565(yy + (int)(1.402 * accuracy) * cr / accuracy,
+					yy - ((int)(0.344 * accuracy) * cb + (int)(0.714 * accuracy) * cr) / accuracy,
+					yy + (int)(1.772 * accuracy) * cb / accuracy);
+			}
+		}
+	}
+
+	/* A clipped right edge must remain tightly packed for the existing row consumer. */
+	if (rx < mx) {
+		uint16_t *source = (uint16_t*)jd->workbuf, *target = source;
+		for (iy = 0; iy < ry; iy++) {
+			for (ix = 0; ix < rx; ix++) *target++ = *source++;
+			source += mx - rx;
+		}
+	}
+	return outfunc(jd, jd->workbuf, rect) ? JDR_OK : JDR_INTR;
+}
+#endif
+
+static JRESULT JD_HOT_CODE(mcu_output) (
 	JDEC* jd,			/* Pointer to the decompressor object */
 	int (*outfunc)(JDEC*, void*, JRECT*),	/* RGB output function */
 	unsigned int x,		/* MCU location in the image */
@@ -884,6 +998,12 @@ static JRESULT mcu_output (
 	}
 	rect.left = x; rect.right = x + rx - 1;				/* Rectangular area in the frame buffer */
 	rect.top = y; rect.bottom = y + ry - 1;
+
+#if JD_FORMAT == 0 && !JD_USE_SCALE
+	if (jd->output_rgb565) {
+		return mcu_output_rgb565(jd, outfunc, &rect, mx, my, rx, ry);
+	}
+#endif
 
 
 	if (!JD_USE_SCALE || jd->scale != 3) {	/* Not for 1/8 scaling */
@@ -1196,7 +1316,7 @@ JRESULT jd_prepare (
 /* Start to decompress the JPEG picture                                  */
 /*-----------------------------------------------------------------------*/
 
-JRESULT jd_decomp (
+JRESULT JD_HOT_CODE(jd_decomp) (
 	JDEC* jd,								/* Initialized decompression object */
 	int (*outfunc)(JDEC*, void*, JRECT*),	/* RGB output function */
 	uint8_t scale							/* Output de-scaling factor (0 to 3) */

@@ -4,7 +4,6 @@
 
 #define JPEG_DECODER_OUTPUT_RGB888 0
 #define JPEG_FAST_DECODE_MODE 2
-#define JPEG_MCU_MAX_WIDTH 16
 #define JPEG_WORK_ALIGNMENT 4
 
 namespace {
@@ -16,6 +15,7 @@ struct Context {
     uint16_t width;
     uint16_t height;
     bool outputRGB565 = false;
+    ImageTile::Sink tileOutput = nullptr;
     JpegFrameDecoder::Clock clock = nullptr;
     void* clockContext = nullptr;
     uint64_t inputUs = 0;
@@ -89,13 +89,13 @@ ReadEncodedJpegBytes (
 } // ReadEncodedJpegBytes
 
 /**
-    Converts a decoded JPEG tile into logical pixel row fragments.
+    Delivers one decoded JPEG tile or its compatible logical row fragments.
 
     Validates the decoder's MCU rectangle and translates its rows to byte offsets within the
-    logical image. RGB888 rows are forwarded directly; RGB565 output is packed into a small row
-    scratch buffer before each synchronous sink call. Offsets can arrive in tile order rather than
-    full-row order, and sink rejection immediately stops decoding without allocating a full
-    decoded image.
+    logical image. A tile sink receives the entire borrowed MCU rectangle once,
+    including clipped edge dimensions. Without that sink, the established row
+    callback receives the same tightly packed RGB888 or RGB565 fragments as before.
+    Neither path copies the decoded pixels; rejection immediately stops decoding.
 
     @param context Caller-owned state passed unchanged to the callback.
     @param bitmap Decoded MCU pixel block supplied by the JPEG decoder.
@@ -105,63 +105,60 @@ ReadEncodedJpegBytes (
     @return 0 - The output callback rejected the rectangle.
 */
 int
-WriteDecodedTileRows (
+DeliverDecodedTile (
     Context& context,
     void* bitmap,
     JRECT* rect
     )
 {
     size_t rowBytes;
+    size_t pixelBytes;
     const uint8_t* pixels = nullptr;
     size_t y;
     size_t pixelOffset;
-    uint8_t packed[JPEG_MCU_MAX_WIDTH * RGB565_PIXEL_BYTES];
-    size_t x;
-    uint16_t p;
+    ImageTile tile;
 
     if (rect->right < rect->left || rect->bottom < rect->top || rect->right >= context.width ||
         rect->bottom >= context.height) {
         return 0;
     }
+    // The MCU is already in its requested format; keep rows tightly packed and borrowed.
+    pixelBytes = RGB888_PIXEL_BYTES;
+    if (context.outputRGB565) {
+        pixelBytes = RGB565_PIXEL_BYTES;
+    }
+    rowBytes = size_t(rect->right - rect->left + 1) * pixelBytes;
+    pixels = static_cast<const uint8_t*>(bitmap);
+
+    // A tile-capable consumer receives the complete rectangle through one borrowed callback.
+    if (context.tileOutput) {
+        tile.pixels = pixels;
+        tile.left = rect->left;
+        tile.top = rect->top;
+        tile.width = rect->right - rect->left + 1;
+        tile.height = rect->bottom - rect->top + 1;
+        tile.pixelBytes = uint8_t(pixelBytes);
+        tile.bytes = rowBytes * tile.height;
+        if (!context.tileOutput(context.outputContext, tile)) {
+            return 0;
+        }
+        return 1;
+    }
     if (!context.output) {
         return 1;
     }
 
-    // The decoder emits small MCU tiles; forward each tile as correctly positioned framebuffer rows.
-    rowBytes = size_t(rect->right - rect->left + 1) * RGB888_PIXEL_BYTES;
-    pixels = static_cast<const uint8_t*>(bitmap);
+    // Legacy consumers retain their existing row offsets and output representation.
     for (y = rect->top; y <= rect->bottom; ++y) {
-        pixelOffset = y * context.width + rect->left;
-        if (context.outputRGB565) {
-            // Preserve the optimized RGB888 MCU reconstruction, then pack a tiny
-            // row directly for the 16-bit frame; never allocate a full RGB image.
-            if (rowBytes > JPEG_MCU_MAX_WIDTH * RGB888_PIXEL_BYTES) {
-                return 0;
-            }
-            for (x = 0; x < rowBytes / RGB888_PIXEL_BYTES; ++x) {
-                p = uint16_t(
-                    (uint16_t(pixels[x * RGB888_PIXEL_BYTES] & RGB565_RED_BLUE_SOURCE_MASK)
-                     << RGB565_RED_PACK_SHIFT) |
-                    (uint16_t(pixels[x * RGB888_PIXEL_BYTES + 1] & RGB565_GREEN_SOURCE_MASK)
-                     << RGB565_GREEN_PACK_SHIFT) |
-                    (pixels[x * RGB888_PIXEL_BYTES + RGB_PIXEL_BLUE_INDEX] >> RGB565_RED_BLUE_REDUCE_SHIFT));
-                packed[x * RGB565_PIXEL_BYTES] = uint8_t(p);
-                packed[x * RGB565_PIXEL_BYTES + 1] = uint8_t(p >> BITS_PER_BYTE);
-            }
-            if (!context.output(context.outputContext, packed,
-                                rowBytes / RGB888_PIXEL_BYTES * RGB565_PIXEL_BYTES,
-                                pixelOffset * RGB565_PIXEL_BYTES)) {
-                return 0;
-            }
-        } else if (!context.output(context.outputContext, pixels, rowBytes,
-                                   pixelOffset * RGB888_PIXEL_BYTES)) {
+        pixelOffset = (y * context.width + rect->left) * pixelBytes;
+        if (!context.output(context.outputContext, pixels, rowBytes, pixelOffset)) {
             return 0;
         }
         pixels += rowBytes;
     }
 
     return 1;
-} // WriteDecodedTileRows
+} // DeliverDecodedTile
 
 /**
     Delivers a decoded JPEG tile and accounts for output callback time.
@@ -186,10 +183,10 @@ WriteDecodedJpegPixels (
 
     context = &(*static_cast<Context*>(decoder->device));
     if (!context->clock) {
-        return WriteDecodedTileRows((*context), bitmap, rect);
+        return DeliverDecodedTile((*context), bitmap, rect);
     }
     started = context->GetDecodeTimeUs();
-    result = WriteDecodedTileRows((*context), bitmap, rect);
+    result = DeliverDecodedTile((*context), bitmap, rect);
     context->outputUs += context->GetDecodeTimeUs() - started;
     return result;
 } // WriteDecodedJpegPixels
@@ -204,7 +201,7 @@ WriteDecodedJpegPixels (
     little-endian RGB565 fragments in MCU order; offsets can be nonmonotonic and the callback must
     consume each borrowed fragment synchronously.
 
-    A null output validates the complete entropy stream without IDCT/color output, which supports
+    With neither output sink, validation consumes the entropy stream without IDCT/color output, which supports
     faster SD save verification. No full-frame allocation is made. Optional profiling subtracts
     callback work from decoder time and can collect internal decoder stages using the supplied
     clock.
@@ -222,6 +219,7 @@ WriteDecodedJpegPixels (
     @param clock Optional monotonic profiling clock returning microseconds.
     @param clockContext Caller-owned state passed to the profiling clock.
     @param outputRGB565 Whether decoded output uses RGB565 rather than RGB888 pixels.
+    @param tileOutput Optional whole-tile sink, preferred over the compatible row sink.
 
     @return true - The baseline JPEG decoded completely and its output was accepted.
     @return false - Input, dimensions, workspace, decoding or output acceptance failed; error
@@ -241,7 +239,8 @@ JpegFrameDecoder::Decode (
     Profile* profile,
     Clock clock,
     void* clockContext,
-    bool outputRGB565
+    bool outputRGB565,
+    ImageTile::Sink tileOutput
     )
 {
     Context context;
@@ -251,7 +250,7 @@ JpegFrameDecoder::Decode (
     uint64_t prepared;
     decltype(&WriteDecodedJpegPixels) outputCallback;
 
-    static_assert(JD_FORMAT == JPEG_DECODER_OUTPUT_RGB888 && JD_FASTDECODE == JPEG_FAST_DECODE_MODE,
+    static_assert(JD_FORMAT == JPEG_DECODER_OUTPUT_RGB888 && JD_FASTDECODE == JPEG_FAST_DECODE_MODE && !JD_USE_SCALE,
                   "JPEG output/working memory configuration changed");
     error = JDR_PAR;
     if (profile) {
@@ -267,6 +266,7 @@ JpegFrameDecoder::Decode (
     // Connect bounded input and output callbacks without allocating a complete decoded image.
     context = {input, inputContext, output, outputContext, width, height};
     context.outputRGB565 = outputRGB565;
+    context.tileOutput = tileOutput;
     if (profile) {
         context.clock = clock;
     } else {
@@ -305,11 +305,14 @@ JpegFrameDecoder::Decode (
         decoder.profile = nullptr;
     }
     outputCallback = {};
-    if (output) {
+    if (output || tileOutput) {
         outputCallback = WriteDecodedJpegPixels;
     } else {
         outputCallback = nullptr;
     }
+
+    // Select native reconstruction after prepare initializes the decoder state.
+    decoder.output_rgb565 = outputRGB565;
 
     // Decode into row callbacks, or validate the stream when no pixel consumer is supplied.
     error = jd_decomp(&decoder, outputCallback, 0);

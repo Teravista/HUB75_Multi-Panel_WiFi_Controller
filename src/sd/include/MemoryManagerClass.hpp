@@ -1,4 +1,6 @@
 #pragma once
+#include <include/imageTile.hpp>
+
 #include <include/preparedFrame.hpp>
 
 #include <cstddef>
@@ -181,7 +183,7 @@ public:
     };
 
     // Reads and verifies one frame from the selected saved media.
-    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context, FrameReadTiming* timing = nullptr, PixelFormat jpegOutput = PixelFormat::RGB888, PreparedImageSink preparedSink = nullptr);
+    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context, FrameReadTiming* timing = nullptr, PixelFormat jpegOutput = PixelFormat::RGB888, PreparedImageSink preparedSink = nullptr, ImageTile::Sink tileSink = nullptr);
 
     // Closes the active playback file and clears its runtime state.
     void CloseMediaPlayback(void);

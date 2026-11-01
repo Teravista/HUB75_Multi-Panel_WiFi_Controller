@@ -7,10 +7,6 @@
 #include "network/include/clientActivity.hpp"
 #include <cstdio>
 
-#define RGB888_RED_CHANNEL_INDEX 0
-#define RGB888_GREEN_CHANNEL_INDEX 1
-#define RGB888_BLUE_CHANNEL_INDEX 2
-
 /**
     Returns elapsed boot time in milliseconds for transport deadlines.
 
@@ -806,13 +802,61 @@ FrameBufferController::ClearStoredFrame (
     m_receiver.ClearStoredFrame();
 } // ClearStoredFrame
 
+#if CPU_FRAME_RGB565
+/**
+    Reorders one little-endian RGB565 pixel into native panel colour and byte order.
+
+    Five-bit channels promoted to green replicate their top bit; reducing green
+    drops its lowest bit. This preserves the existing RGB888 expansion/repacking
+    result while sharing the same inlined conversion between fragments and tiles.
+
+    @param destination Writable native CPU pixel, including unaligned buffers.
+    @param source Borrowed two-byte little-endian RGB565 pixel.
+*/
+FRAMEBUFFER_ALWAYS_INLINE void
+FrameBufferController::StorePanelRgb565Pixel (
+    uint8_t* destination,
+    const uint8_t* source
+    )
+{
+    uint16_t value;
+    uint16_t fiveBitChannels[FRAMEBUFFER_RGB_CHANNEL_COUNT];
+    uint16_t sixBitChannels[FRAMEBUFFER_RGB_CHANNEL_COUNT];
+
+    // Reorder native channels without expanding, repacking or calling a pixel writer.
+    value = uint16_t(source[0]) | uint16_t(uint16_t(source[1]) << BITS_PER_BYTE);
+    fiveBitChannels[FRAMEBUFFER_RGB_RED_CHANNEL] = value >> RGB565_RED_SHIFT;
+    sixBitChannels[FRAMEBUFFER_RGB_GREEN_CHANNEL] =
+        (value >> RGB565_GREEN_SHIFT) & RGB565_GREEN_MASK;
+    fiveBitChannels[FRAMEBUFFER_RGB_BLUE_CHANNEL] = value & RGB565_BLUE_MASK;
+    fiveBitChannels[FRAMEBUFFER_RGB_GREEN_CHANNEL] =
+        sixBitChannels[FRAMEBUFFER_RGB_GREEN_CHANNEL] >> FRAMEBUFFER_565_CHANNEL_WIDTH_DIFFERENCE;
+    sixBitChannels[FRAMEBUFFER_RGB_RED_CHANNEL] =
+        (fiveBitChannels[FRAMEBUFFER_RGB_RED_CHANNEL] << FRAMEBUFFER_565_CHANNEL_WIDTH_DIFFERENCE) |
+        (fiveBitChannels[FRAMEBUFFER_RGB_RED_CHANNEL] >> FRAMEBUFFER_565_EXTRA_GREEN_BIT_SHIFT);
+    sixBitChannels[FRAMEBUFFER_RGB_BLUE_CHANNEL] =
+        (fiveBitChannels[FRAMEBUFFER_RGB_BLUE_CHANNEL] << FRAMEBUFFER_565_CHANNEL_WIDTH_DIFFERENCE) |
+        (fiveBitChannels[FRAMEBUFFER_RGB_BLUE_CHANNEL] >> FRAMEBUFFER_565_EXTRA_GREEN_BIT_SHIFT);
+    value = uint16_t((fiveBitChannels[IMAGE_RED_BYTE_OFFSET] << RGB565_RED_SHIFT) |
+        (sixBitChannels[IMAGE_GREEN_BYTE_OFFSET] << RGB565_GREEN_SHIFT) |
+        fiveBitChannels[IMAGE_BLUE_BYTE_OFFSET]);
+    value = uint16_t((value << BITS_PER_BYTE) | (value >> BITS_PER_BYTE));
+    std::memcpy(destination, &value, sizeof(value));
+} // StorePanelRgb565Pixel
+#endif
+
 /**
     Converts stored pixels and places them in the CPU framebuffer.
 
     Validates pixel alignment, source bounds and placement before mapping each logical image
     region into the panel-chain framebuffer. Within a panel-row run, a constant signed destination
-    stride avoids recalculating coordinates per pixel. RGB565 input is expanded before conversion
-    to the compiled CPU-frame format. The caller already owns the destination frame; this helper
+    stride avoids recalculating coordinates per pixel. With an RGB565 CPU frame,
+    RGB565 input is reordered directly at its five/six-bit precision. A five-bit
+    channel promoted to green replicates its top bit; green reduced to five bits
+    drops its lowest bit. This matches expansion to RGB888 and repacking exactly,
+    including alternative channel wiring, without doing that intermediate work.
+    Other input/output combinations retain the general conversion path.
+    The caller already owns the destination frame; this helper
     neither claims that ownership nor publishes a completed image.
 
     @param helpers Logical-to-physical pixel mapping and display overlay helpers.
@@ -909,22 +953,30 @@ FrameBufferController::MapStoredPixels (
                 (ptrdiff_t(nextY - y) * MATRIX_PANEL_WIDTH + nextX - x) * ptrdiff_t(CpuFrame::PixelBytes);
         }
         for (i = 0; i < run; ++i) {
-            rgb = bytes;
+#if CPU_FRAME_RGB565
             if (Format == PixelFormat::RGB565) {
-                value = uint16_t(bytes[0]) | uint16_t(uint16_t(bytes[1]) << BITS_PER_BYTE);
-                red = uint8_t(value >> RGB565_RED_SHIFT);
-                green = uint8_t((value >> RGB565_GREEN_SHIFT) & RGB565_GREEN_MASK);
-                blue = uint8_t(value & RGB565_BLUE_MASK);
-                decoded[0] =
-                    uint8_t((red << RGB565_RED_BLUE_EXPAND_SHIFT) | (red >> RGB565_RED_BLUE_REPLICATE_SHIFT));
-                decoded[1] =
-                    uint8_t((green << RGB565_GREEN_EXPAND_SHIFT) | (green >> RGB565_GREEN_REPLICATE_SHIFT));
-                decoded[RGB_PIXEL_BLUE_INDEX] = uint8_t((blue << RGB565_RED_BLUE_EXPAND_SHIFT) |
-                                                        (blue >> RGB565_RED_BLUE_REPLICATE_SHIFT));
-                rgb = decoded;
+                StorePanelRgb565Pixel(buffer + dest, bytes);
+            } else
+#endif
+            {
+                // Retain full RGB888 handling and the wider CPU-frame fallback.
+                rgb = bytes;
+                if (Format == PixelFormat::RGB565) {
+                    value = uint16_t(bytes[0]) | uint16_t(uint16_t(bytes[1]) << BITS_PER_BYTE);
+                    red = uint8_t(value >> RGB565_RED_SHIFT);
+                    green = uint8_t((value >> RGB565_GREEN_SHIFT) & RGB565_GREEN_MASK);
+                    blue = uint8_t(value & RGB565_BLUE_MASK);
+                    decoded[0] =
+                        uint8_t((red << RGB565_RED_BLUE_EXPAND_SHIFT) | (red >> RGB565_RED_BLUE_REPLICATE_SHIFT));
+                    decoded[1] =
+                        uint8_t((green << RGB565_GREEN_EXPAND_SHIFT) | (green >> RGB565_GREEN_REPLICATE_SHIFT));
+                    decoded[RGB_PIXEL_BLUE_INDEX] = uint8_t((blue << RGB565_RED_BLUE_EXPAND_SHIFT) |
+                                                            (blue >> RGB565_RED_BLUE_REPLICATE_SHIFT));
+                    rgb = decoded;
+                }
+                CpuFrame::StoreRgbPixel(buffer + dest, rgb[IMAGE_RED_BYTE_OFFSET], rgb[IMAGE_GREEN_BYTE_OFFSET],
+                                        rgb[IMAGE_BLUE_BYTE_OFFSET]);
             }
-            CpuFrame::StoreRgbPixel(buffer + dest, rgb[IMAGE_RED_BYTE_OFFSET], rgb[IMAGE_GREEN_BYTE_OFFSET],
-                                    rgb[IMAGE_BLUE_BYTE_OFFSET]);
             dest += stride;
             bytes += PixelBytes;
         }
@@ -1060,3 +1112,136 @@ FrameBufferController::WritePreparedFramePixels (
 
     return count == 0;
 } // WritePreparedFramePixels
+
+/**
+    Maps a complete decoded JPEG tile after checking its format, bounds and placement once.
+
+    RGB565 CPU output splits the tile only where it crosses a physical panel's
+    logical boundary. Each rectangle calculates one origin and two signed pixel
+    strides, then reuses them for every row. Rotation and flipped panels therefore
+    retain the fragment path's exact coordinates without per-row divisions or
+    validation. Other pixel combinations use the compatible fragment mapper.
+    The caller retains render ownership and publishes only after frame verification.
+
+    @param tile Borrowed, tightly packed rectangle inside the logical source image.
+    @param width Complete source image width in pixels.
+    @param height Complete source image height in pixels.
+    @param left Horizontal source-image placement; AutoOffset selects centering.
+    @param top Vertical source-image placement; AutoOffset selects centering.
+
+    @return true - Every tile pixel was mapped into the CPU framebuffer.
+    @return false - The tile, image geometry, format or placement was invalid.
+*/
+bool
+FrameBufferController::WriteStoredFrameTile (
+    const ImageTile& tile,
+    uint16_t width,
+    uint16_t height,
+    uint16_t left,
+    uint16_t top
+    )
+{
+    size_t rowBytes;
+    size_t offset;
+    uint32_t row;
+    PixelFormat format;
+#if CPU_FRAME_RGB565
+    uint32_t tileX;
+    uint32_t tileY;
+    uint32_t column;
+    uint32_t blockWidth;
+    uint32_t blockHeight;
+    int logicalX;
+    int logicalY;
+    int physicalX;
+    int physicalY;
+    int adjacentX;
+    int adjacentY;
+    ptrdiff_t origin;
+    ptrdiff_t destination;
+    ptrdiff_t columnStride;
+    ptrdiff_t rowStride;
+    const uint8_t* source = nullptr;
+#endif
+
+    // Check the whole borrowed rectangle before touching any destination pixels.
+    if (!m_panelRenderer || !m_frameBuffer || !tile.pixels || !width || !height ||
+        width > LOGICAL_IMAGE_WIDTH || height > LOGICAL_IMAGE_HEIGHT ||
+        !tile.width || !tile.height ||
+        (tile.pixelBytes != RGB565_PIXEL_BYTES && tile.pixelBytes != RGB888_PIXEL_BYTES) ||
+        tile.left > width || tile.width > width - tile.left ||
+        tile.top > height || tile.height > height - tile.top ||
+        tile.bytes != size_t(tile.width) * tile.height * tile.pixelBytes) {
+        return false;
+    }
+    if (left == MediaMetadata::AutoOffset) {
+        left = (LOGICAL_IMAGE_WIDTH - width) / CENTER_ALIGNMENT_DIVISOR;
+    }
+    if (top == MediaMetadata::AutoOffset) {
+        top = (LOGICAL_IMAGE_HEIGHT - height) / CENTER_ALIGNMENT_DIVISOR;
+    }
+    if (left > LOGICAL_IMAGE_WIDTH - width || top > LOGICAL_IMAGE_HEIGHT - height) {
+        return false;
+    }
+
+#if CPU_FRAME_RGB565
+    if (tile.pixelBytes == RGB565_PIXEL_BYTES) {
+        // Each block stays inside one panel, where both coordinate strides are constant.
+        tileY = 0;
+        while (tileY < tile.height) {
+            logicalY = top + tile.top + tileY;
+            blockHeight = std::min(uint32_t(tile.height) - tileY,
+                uint32_t(LOGICAL_PANEL_HEIGHT - logicalY % LOGICAL_PANEL_HEIGHT));
+            tileX = 0;
+            while (tileX < tile.width) {
+                logicalX = left + tile.left + tileX;
+                blockWidth = std::min(uint32_t(tile.width) - tileX,
+                    uint32_t(LOGICAL_PANEL_WIDTH - logicalX % LOGICAL_PANEL_WIDTH));
+                m_panelRenderer->ConvertLogicalToPhysicalCoordinates(logicalX, logicalY, physicalX, physicalY);
+                origin = (ptrdiff_t(physicalY) * MATRIX_PANEL_WIDTH + physicalX) * CpuFrame::PixelBytes;
+                columnStride = 0;
+                rowStride = 0;
+                if (blockWidth > 1) {
+                    m_panelRenderer->ConvertLogicalToPhysicalCoordinates(logicalX + 1, logicalY, adjacentX, adjacentY);
+                    columnStride = (ptrdiff_t(adjacentY - physicalY) * MATRIX_PANEL_WIDTH + adjacentX - physicalX) *
+                        ptrdiff_t(CpuFrame::PixelBytes);
+                }
+                if (blockHeight > 1) {
+                    m_panelRenderer->ConvertLogicalToPhysicalCoordinates(logicalX, logicalY + 1, adjacentX, adjacentY);
+                    rowStride = (ptrdiff_t(adjacentY - physicalY) * MATRIX_PANEL_WIDTH + adjacentX - physicalX) *
+                        ptrdiff_t(CpuFrame::PixelBytes);
+                }
+
+                // Convert directly from the decoder's tile without copying a row scratch buffer.
+                for (row = 0; row < blockHeight; ++row) {
+                    source = tile.pixels + ((size_t(tileY + row) * tile.width) + tileX) * RGB565_PIXEL_BYTES;
+                    destination = origin + ptrdiff_t(row) * rowStride;
+                    for (column = 0; column < blockWidth; ++column) {
+                        StorePanelRgb565Pixel(m_frameBuffer + destination, source);
+                        destination += columnStride;
+                        source += RGB565_PIXEL_BYTES;
+                    }
+                }
+                tileX += blockWidth;
+            }
+            tileY += blockHeight;
+        }
+        return true;
+    }
+#endif
+
+    // Wider output/input combinations keep the established mapper and byte-order handling.
+    format = PixelFormat::RGB888;
+    if (tile.pixelBytes == RGB565_PIXEL_BYTES) {
+        format = PixelFormat::RGB565;
+    }
+    rowBytes = size_t(tile.width) * tile.pixelBytes;
+    for (row = 0; row < tile.height; ++row) {
+        offset = ((size_t(tile.top) + row) * width + tile.left) * tile.pixelBytes;
+        if (!WriteStoredFramePixels(tile.pixels + row * rowBytes, rowBytes, offset,
+            format, width, height, left, top)) {
+            return false;
+        }
+    }
+    return true;
+} // WriteStoredFrameTile

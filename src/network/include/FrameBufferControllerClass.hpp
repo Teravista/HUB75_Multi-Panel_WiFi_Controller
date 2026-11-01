@@ -1,4 +1,5 @@
 #pragma once
+#include <include/imageTile.hpp>
 #include <include/preparedFrame.hpp>
 #include "display/include/PanelRendererClass.hpp"
 #include <cstddef>
@@ -7,6 +8,19 @@
 #include "config/defines.h"
 #include "network/include/FrameReceiverClass.hpp"
 #include "media/include/mediaMetadata.hpp"
+
+#define FRAMEBUFFER_RGB_RED_CHANNEL 0u
+#define FRAMEBUFFER_RGB_GREEN_CHANNEL 1u
+#define FRAMEBUFFER_RGB_BLUE_CHANNEL 2u
+#define FRAMEBUFFER_RGB_CHANNEL_COUNT 3u
+#define FRAMEBUFFER_565_CHANNEL_WIDTH_DIFFERENCE 1u
+#define FRAMEBUFFER_565_EXTRA_GREEN_BIT_SHIFT 4u
+
+#if defined(__GNUC__)
+#define FRAMEBUFFER_ALWAYS_INLINE __attribute__((always_inline)) inline
+#else
+#define FRAMEBUFFER_ALWAYS_INLINE inline
+#endif
 
 /**
     Connects photo reception and saved-media playback to the shared CPU framebuffer.
@@ -93,10 +107,18 @@ public:
     // Copies prepared native rectangles into the CPU framebuffer without pixel conversion.
     bool WritePreparedFramePixels(const uint8_t* bytes, size_t count, size_t offset, const PreparedFrameLayout& layout);
 
+    // Maps a complete decoded JPEG tile after checking its format, bounds and placement once.
+    bool WriteStoredFrameTile(const ImageTile& tile, uint16_t width = LOGICAL_IMAGE_WIDTH, uint16_t height = LOGICAL_IMAGE_HEIGHT, uint16_t left = MediaMetadata::AutoOffset, uint16_t top = MediaMetadata::AutoOffset);
+
     // Clears the framebuffer before writing a saved image with placement metadata.
     void PrepareStoredFrame(const MediaMetadata& metadata);
 
 private:
+#if CPU_FRAME_RGB565
+    // Reorders one little-endian RGB565 pixel into native panel colour and byte order.
+    static void StorePanelRgb565Pixel(uint8_t* destination, const uint8_t* source);
+#endif
+
     // Converts stored pixels and places them in the CPU framebuffer.
     template <PixelFormat Format> static bool MapStoredPixels(PanelRenderer& helpers, uint8_t* buffer, const uint8_t* bytes, size_t count, size_t offset, uint16_t width, uint16_t height, uint16_t left, uint16_t top);
 

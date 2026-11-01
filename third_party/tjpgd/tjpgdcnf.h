@@ -41,3 +41,13 @@
 #define JD_REUSE_CHROMA 1
 #endif
 
+
+/* Direct canonical-code indexing replaces linear long-code searches. */
+#ifndef JD_CANONICAL_LOOKUP
+#define JD_CANONICAL_LOOKUP 1
+#endif
+
+/* RP2350 only: keep the small active decoder loop in SRAM. */
+#ifndef JD_HOT_CODE_IN_RAM
+#define JD_HOT_CODE_IN_RAM 1
+#endif

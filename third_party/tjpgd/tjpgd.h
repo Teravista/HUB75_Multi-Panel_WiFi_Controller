@@ -62,6 +62,7 @@ struct JDEC {
 	uint8_t dbit;				/* Number of bits availavble in wreg or reading bit mask */
 	uint8_t scale;				/* Output scaling ratio */
 	uint8_t validate_only;       /* Parse every block; skip pixel reconstruction when output is NULL. */
+	uint8_t output_rgb565;       /* JD_FORMAT=0, full-size output: reconstruct little-endian RGB565 directly. */
 	uint8_t msx, msy;			/* MCU size in unit of block (width, height) */
 	uint8_t qtid[3];			/* Quantization table ID of each component, Y, Cb, Cr */
 	uint8_t ncomp;				/* Number of color components 1:grayscale, 3:color */
