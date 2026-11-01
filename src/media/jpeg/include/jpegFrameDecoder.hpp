@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <include/imageTile.hpp>
 
 namespace JpegFrameDecoder {
 using Input = size_t (*)(void* context, uint8_t* bytes, size_t count);
@@ -19,6 +20,6 @@ struct Profile {
 };
 
 // Decodes or validates one JPEG frame using bounded input and output callbacks.
-bool Decode(Input input, void* inputContext, Output output, void* outputContext, uint16_t width, uint16_t height, void* work, size_t workBytes, int& error, Profile* profile = nullptr, Clock clock = nullptr, void* clockContext = nullptr, bool outputRGB565 = false);
+bool Decode(Input input, void* inputContext, Output output, void* outputContext, uint16_t width, uint16_t height, void* work, size_t workBytes, int& error, Profile* profile = nullptr, Clock clock = nullptr, void* clockContext = nullptr, bool outputRGB565 = false, ImageTile::Sink tileOutput = nullptr);
 
 } // namespace JpegFrameDecoder

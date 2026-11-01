@@ -83,6 +83,9 @@ private:
     // Passes one verified-read fragment into the caller-owned framebuffer.
     static bool Consume(void* context, const uint8_t* bytes, size_t count, size_t offset);
 
+    // Places a provisional decoded JPEG tile in the owned CPU framebuffer.
+    static bool ConsumeTile(void* context, const ImageTile& tile);
+
     // Copies one checked native-layout fragment without repeating panel or color mapping.
     static bool ConsumePrepared(void* context, const uint8_t* bytes, size_t count, size_t offset, const PreparedFrameLayout& layout);
 

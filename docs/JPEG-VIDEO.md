@@ -52,12 +52,18 @@ conversion.
 
 TJpgDec uses the shared 24 KiB storage buffer as 12 KiB compressed input and 12 KiB
 aligned workspace. MCU tiles are delivered directly to the existing CPU framebuffer as
-provisional RGB565 or RGB888 rows. RGB565 output packs small tile rows without allocating
-a complete RGB888 image. Validation-only reads parse the encoded stream without pixel
-reconstruction.
+provisional RGB565 or RGB888 rows. RGB565 tiles are reconstructed directly from
+the decoded luminance/chroma samples, using the same clipping and quantization as
+RGB888 conversion followed by packing. The row consumer forwards either format
+without an intermediate RGB888 tile or another pixel allocation. Playback accepts
+one borrowed rectangle per MCU; RGB565 placement validates it once and reuses
+coordinate strides within each panel. Consumers without a tile sink retain the
+same row callbacks. Both decoder cores use this path, and CRC verification still
+controls final publication. Validation-only
+reads parse the encoded stream without pixel reconstruction.
 
 A four-KiB index cache retains at most 512 checked entries. The active playback file
-also has a 64 KiB cache with two 32 KiB blocks for sequential, reverse and random access.
+also has a 32 KiB cache with two 16 KiB blocks for sequential, reverse and random access.
 Adjacent forward records reuse their logical cursor. Closing or changing the playback
 file invalidates both caches; upload readback verification uses independent uncached
 reads.
@@ -79,3 +85,9 @@ available-bit fast paths; zero selects the checked reference helpers.
 4:2:0 MCU output, preserving coefficients, rounding and clipping; zero uses the
 reference colour path. Other MCU layouts retain their generic converter. Neither option
 allocates another frame or changes stored JPEG quality.
+
+`JD_CANONICAL_LOOKUP=1` indexes consecutive long Huffman codes by range instead
+of searching each code word. Zero restores the linear search. On RP2350,
+`JD_HOT_CODE_IN_RAM=1` places the active reconstruction and entropy routines in
+SRAM; table preparation stays in flash. Zero retains flash execution. The
+transform, decoded pixels, stored JPEGs and quality settings are unchanged.

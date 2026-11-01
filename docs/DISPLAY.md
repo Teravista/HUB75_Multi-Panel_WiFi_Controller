@@ -27,7 +27,9 @@ dedicated typed loop with inlined gamma reads and plane extraction. On Pico buil
 `PACKED_PANEL_HOT_CODE_IN_RAM=1` places that loop in SRAM; zero retains flash
 execution. RGB888/BGR888 keep the generic fallback. Both paths produce the same
 scan words and allocate no additional image buffers. Native RGB565
-gamma indices use an additional 768-byte lookup.
+gamma indices use an additional 768-byte lookup. JPEG output and original RGB565
+playback reorder five/six-bit channels directly into the CPU framebuffer, preserving
+the exact colours of the RGB888 expansion/repacking path.
 Scan timing follows the driver's configured row order, bit-plane
 schedule and clock.
 

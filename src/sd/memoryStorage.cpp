@@ -695,6 +695,42 @@ JpegStream::WriteDecodedJpegPixels (
     return stream->accepted;
 } // WriteDecodedJpegPixels
 
+/**
+    Forwards a complete borrowed JPEG tile and records consumer acceptance.
+
+    The callback runs synchronously on the selected decoder core and performs no
+    storage work. Its pixels remain provisional until the enclosing encoded CRC
+    and JPEG record pass verification; a rejected tile stops reconstruction.
+
+    @param context Borrowed stream retaining the consumer and current frame state.
+    @param tile Tightly packed decoded pixels valid only for this callback.
+
+    @return true - The consumer accepted the tile, or no tile consumer was supplied.
+    @return false - The consumer rejected the tile.
+*/
+bool
+JpegStream::WriteDecodedJpegTile (
+    void* context,
+    const ImageTile& tile
+    )
+{
+    JpegStream* stream = nullptr;
+    uint64_t started;
+
+    stream = static_cast<JpegStream*>(context);
+    if (!stream->tileSink) {
+        return true;
+    }
+    started = 0;
+    if (stream->timing) {
+        started = to_us_since_boot(get_absolute_time());
+    }
+    stream->accepted = stream->tileSink(stream->context, tile);
+    if (stream->timing) {
+        stream->timing->consumerUs += to_us_since_boot(get_absolute_time()) - started;
+    }
+    return stream->accepted;
+} // WriteDecodedJpegTile
 
 #if JPEG_PARALLEL_READER
 /**
@@ -735,13 +771,17 @@ ParallelDecode::DecodeJpegOnWorker (
     )
 {
     uint64_t started;
+    ImageTile::Sink tileOutput = nullptr;
 
     ParallelDecode* job = &(*static_cast<ParallelDecode*>(state));
+    if (job->stream.tileSink) {
+        tileOutput = JpegStream::WriteDecodedJpegTile;
+    }
     started = to_us_since_boot(get_absolute_time());
     job->decoded = JpegFrameDecoder::Decode(ReadEncodedJpegInput, &(*job), JpegStream::WriteDecodedJpegPixels,
                                            &job->stream, job->width, job->height,
                                            readBuffer + JpegStream::BufferBytes, JpegStream::BufferBytes,
-                                           job->error, job->stages, job->clock, nullptr, job->rgb565);
+                                           job->error, job->stages, job->clock, nullptr, job->rgb565, tileOutput);
     job->elapsedUs = to_us_since_boot(get_absolute_time()) - started;
 } // DecodeJpegOnWorker
 
@@ -945,6 +985,8 @@ DecodeJpegParallel (
     @param outputRGB565 True selects little-endian RGB565 output; false selects RGB888.
     @param payloadCrc Optional running payload CRC receiving every encoded frame byte.
 
+    @param tileSink Optional whole-tile consumer; row delivery remains the fallback.
+
     @return result - Completion flag, filesystem result and failure description.
 */
 FrameResult
@@ -957,7 +999,8 @@ DecodeEncodedJpegFrame (
     void* context,
     MemoryManager::FrameReadTiming* timing,
     bool outputRGB565,
-    uint32_t* payloadCrc
+    uint32_t* payloadCrc,
+    ImageTile::Sink tileSink
     )
 {
     FrameResult result;
@@ -970,9 +1013,11 @@ DecodeEncodedJpegFrame (
     uint64_t waitUs;
     uint32_t pipelineBytes;
     decltype(&JpegStream::WriteDecodedJpegPixels) outputCallback;
+    ImageTile::Sink tileOutput = nullptr;
     JpegStream stream{file, result, sink, context, timing, bytes};
 
     stream.payloadCrc = payloadCrc;
+    stream.tileSink = tileSink;
     result = {};
     decoderError = 0;
     usedCore1 = false;
@@ -984,7 +1029,7 @@ DecodeEncodedJpegFrame (
 
     // Reservation precedes the first pipe read, avoiding circular waits with networking.
     #if JPEG_PARALLEL_READER
-    if (sink && ReserveJpegDecodeWorker()) {
+    if ((sink || tileSink) && ReserveJpegDecodeWorker()) {
         usedCore1 = true;
         decoded = DecodeJpegParallel(stream, metadata.width, metadata.height, decoderError,
                                      nullptr, nullptr, outputRGB565, decodeUs, waitUs, pipelineBytes);
@@ -992,14 +1037,17 @@ DecodeEncodedJpegFrame (
     #endif
     {
         outputCallback = nullptr;
-        if (sink) {
+        if (sink || tileSink) {
             outputCallback = JpegStream::WriteDecodedJpegPixels;
+        }
+        if (tileSink) {
+            tileOutput = JpegStream::WriteDecodedJpegTile;
         }
         decodeStarted = to_us_since_boot(get_absolute_time());
         decoded = JpegFrameDecoder::Decode(JpegStream::ReadEncodedJpegInput, &stream,
                                           outputCallback, &stream, metadata.width, metadata.height,
                                           readBuffer + JpegStream::BufferBytes, JpegStream::BufferBytes,
-                                          decoderError, nullptr, nullptr, nullptr, outputRGB565);
+                                          decoderError, nullptr, nullptr, nullptr, outputRGB565, tileOutput);
         decodeUs = to_us_since_boot(get_absolute_time()) - decodeStarted;
     }
 
@@ -1939,6 +1987,8 @@ InspectSavedMediaSlot (
     @param timing Optional output counters for the bounded frame read.
     @param outputRGB565 True selects RGB565 JPEG pixels; false selects RGB888.
 
+    @param tileSink Optional whole-tile consumer; row delivery remains the fallback.
+
     @return result - Completion, filesystem status and a stable failure description.
 */
 SavedFrameResult
@@ -1950,7 +2000,8 @@ ReadAndVerifyJpegFrame (
     bool inspecting,
     bool verifying,
     MemoryManager::FrameReadTiming* timing,
-    bool outputRGB565
+    bool outputRGB565,
+    ImageTile::Sink tileSink
     )
 {
     SavedFrameResult read;
@@ -2036,7 +2087,7 @@ ReadAndVerifyJpegFrame (
 
     // Decode and checksum encoded bytes while preserving the existing strict index validation.
     decoded = MemoryStorage::DecodeEncodedJpegFrame(*file, slot.metadata, length, expectedCrc,
-                                                   sink, context, timing, outputRGB565);
+                                                   sink, context, timing, outputRGB565, nullptr, tileSink);
     read = {decoded.complete, int(decoded.result), decoded.error};
     return read;
 } // ReadAndVerifyJpegFrame
