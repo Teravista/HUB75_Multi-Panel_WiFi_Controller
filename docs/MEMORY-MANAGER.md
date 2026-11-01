@@ -12,6 +12,14 @@ All manager instances share one guarded storage session, the 24 KiB scratch buff
 and the 32 KiB active-playback cache. The helpers keep filesystem details behind
 the manager API; callers retain the same chunked read/write interfaces.
 
+`RgbMediaCopies` prepares library previews and raw RGB native display sections using
+the existing scratch buffer plus a 4 KiB preview and small progress records.
+Original bytes remain unchanged. Preparation and complete readback finish before
+publication; no extra full-frame buffer is allocated. `ReadMediaFrame` with no
+prepared callback still returns logical pixels. The optional prepared consumer
+receives checked physical rectangles for direct CPU-buffer copies. See the
+[RGB representations](MEDIA-LIBRARY.md#rgb-originals-previews-and-prepared-display-frames).
+
 ## Wiring
 
 | Reader | Pico GPIO | Physical pin |

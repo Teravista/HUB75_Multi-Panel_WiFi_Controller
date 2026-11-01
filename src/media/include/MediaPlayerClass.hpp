@@ -80,6 +80,9 @@ private:
     // Passes one verified-read fragment into the caller-owned framebuffer.
     static bool Consume(void* context, const uint8_t* bytes, size_t count, size_t offset);
 
+    // Copies one checked native-layout fragment without repeating panel or color mapping.
+    static bool ConsumePrepared(void* context, const uint8_t* bytes, size_t count, size_t offset, const PreparedFrameLayout& layout);
+
     MemoryManager& memory_;
     FrameBufferController& upload_;
     MediaMetadata metadata_;

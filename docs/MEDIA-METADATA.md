@@ -136,3 +136,51 @@ Width is 1–128, height 1–256, and offsets must keep the rectangle inside the
 dimensions with centered placement; centered browser uploads keep those compatible
 versions. The C++ codec uses version 4 for explicit offsets. Container versions and
 their existing header/payload checksums are unchanged.
+
+## Prepared RGB copy extension
+
+New RGB/JPEG library photos/videos retain their original descriptor and payload.
+Raw frame CRCs and JPEG encoded indexes/records/checksums keep their existing layout. The full library header additionally contains a 192-byte `H75C`
+version-1 descriptor at `headerBytes - 256`. The descriptor has its own CRC32 and
+is covered by the existing final library-header CRC.
+
+| Descriptor offset | Bytes | Field |
+| ---: | ---: | --- |
+| 0 | 4 | `H75C` |
+| 4 | 1 | Extension version 1 |
+| 5 | 1 | Correction flags: bit 0 color order, bit 1 panel layout; both set |
+| 6 | 1 | Native CPU pixel bytes: 2 or 4 |
+| 7 | 1 | Number of packed physical rectangles, 1–18 |
+| 8 | 4 | Current wiring/CPU-format signature |
+| 12 | 4 | Original logical payload CRC32 |
+| 16 | 4 | Preview RGB565 byte checksum |
+| 20 | 4 | Native bytes per frame, excluding its CRC |
+| 24 | 8 | Absolute preview file offset |
+| 32 | 8 | Absolute native-frame section offset |
+| 40 | 144 | Up to eighteen rectangles: uint16 x, y, width, height |
+| 184 | 4 | Reserved zero |
+| 188 | 4 | CRC32 of descriptor bytes 0–187 |
+
+All integers are little-endian. The preview begins at the next 512-byte boundary
+after the original records and contains 32 × 64 little-endian RGB565 pixels.
+Native frames follow immediately, each consisting of the listed rectangles in
+order, with row-major CPU pixels inside each rectangle, then a four-byte frame
+CRC32. Two-byte native pixels use the graphics framebuffer's byte order; four-byte
+pixels use its packed CPU representation. Consumers must validate the layout
+signature before using these bytes directly. Their encoding is not the original
+RGB565/RGB888 wire format.
+
+Regions must be nonoverlapping, fit the physical framebuffer and cover exactly
+the original image's pixel count. File size must match the complete layout.
+Signature mismatch falls back to the unchanged logical original; original-only
+files have no extension. Older firmware without extension support rejects the
+larger container. Retained non-library containers do not use this extension.
+
+JPEG uses a preview-only `H75C` version-2 descriptor at the same location, protected
+by the same descriptor/header CRCs. Flags, native pixel bytes, region count, wiring
+signature, native frame bytes, native offset and bytes 40–187 are zero. Only the
+source CRC, preview CRC and aligned preview offset are populated. The file ends
+exactly after the 4096-byte preview. There is no per-frame derived section.
+
+Version-1 JPEG containers with native rectangles remain readable for preview,
+but playback always uses the encoded original.

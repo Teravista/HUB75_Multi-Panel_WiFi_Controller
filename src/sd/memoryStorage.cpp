@@ -286,6 +286,12 @@ FrameWork::ProcessPendingFramePixels (
         return;
     }
     part = std::min(maximum, count - done);
+    // DMA overlap can stop mid-buffer; never split RGB888, RGB565 or a native
+    // four-byte CPU pixel when handing a fragment to its synchronous consumer.
+    part -= part % pixelBytes;
+    if (!part) {
+        return;
+    }
 
     if (timing) {
         start = nowUs();
@@ -451,6 +457,10 @@ ReadAndVerifyRawVideoFrame (
     }
     frameBytes = slot.metadata.FrameBytes();
     pixelBytes = slot.metadata.PixelBytes();
+    if (slot.preparedFrameBytes) {
+        frameBytes = slot.preparedFrameBytes;
+        pixelBytes = slot.preparedPixelBytes;
+    }
     checksumBytes = {};
     if (slot.frameChecksums) {
         checksumBytes = uint64_t(FRAME_CHECKSUM_BYTES);
@@ -469,6 +479,7 @@ ReadAndVerifyRawVideoFrame (
         initialChecksum = slot.crcSeed;
     }
     pending = {nullptr, 0, 0, 0, initialChecksum, sink, context, timing};
+    pending.pixelBytes = pixelBytes;
     static_assert(PlaybackChunkBytes % SD_SECTOR_BYTES == 0 && PlaybackChunkBytes % RGB888_PIXEL_BYTES == 0);
     nextBuffer = 0;
     count = 0;
@@ -683,6 +694,7 @@ JpegStream::WriteDecodedJpegPixels (
     }
     return stream->accepted;
 } // WriteDecodedJpegPixels
+
 
 #if JPEG_PARALLEL_READER
 /**
@@ -1698,6 +1710,7 @@ DiscardIncompleteMediaSave (
     }
     managerState.mediaFile = {};
     managerState.save = {};
+    managerState.rgbCopies.Reset();
     return int(result);
 } // DiscardIncompleteMediaSave
 
@@ -1880,6 +1893,7 @@ InspectSavedMediaSlot (
 
         // Check the first frame without loading the whole clip; later frames are checked during playback.
         slot.generation = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_GENERATION_OFFSET);
+        slot.checksum = ReadUnsigned32LittleEndian(header + VIDEO_PAYLOAD_CRC_OFFSET);
         slot.dataOffset = sizeof(header);
         slot.frameChecksums = true;
         slot.indexedJpeg = jpeg;
@@ -2682,7 +2696,10 @@ InspectPhotoLibraryFile (
                 frameChecksumBytes = FRAME_CHECKSUM_BYTES;
             }
             fileSizeMatches =
-                bool(uint64_t(f_size(&managerState.imageFile)) == LibraryHeaderBytes + payload + frameChecksumBytes);
+                RgbMediaCopies::DecodeDescriptor(header, LibraryHeaderBytes, slot.metadata,
+                    ReadUnsigned32LittleEndian(header + STORAGE_HEADER_PAYLOAD_CRC_OFFSET),
+                    LibraryHeaderBytes + payload + frameChecksumBytes,
+                    f_size(&managerState.imageFile), slot.prepared);
         } else {
             fileSizeMatches = false;
         }
@@ -2698,6 +2715,10 @@ InspectPhotoLibraryFile (
             photo->checksum = ReadUnsigned32LittleEndian(header + STORAGE_HEADER_PAYLOAD_CRC_OFFSET);
             photo->metadata = slot.metadata;
             photo->bytes = payload;
+            photo->copies.original = true;
+            photo->copies.preview = slot.prepared.present;
+            photo->copies.display = slot.prepared.displayPresent;
+            photo->copies.displayReady = slot.prepared.compatible;
             std::memcpy(photo->name, header + LIBRARY_NAME_OFFSET, sizeof(photo->name));
         }
         if (thumbnail) {
@@ -2919,6 +2940,7 @@ InspectLibraryVideo (
             video->metadata = slot.metadata;
             video->checksum = slot.checksum;
             slot.metadata.PayloadBytes(video->bytes);
+            video->copies.original = true;
             std::snprintf(video->name, sizeof(video->name), "Restored video %lu",
                           static_cast<unsigned long>(id));
         }
@@ -2969,7 +2991,10 @@ InspectLibraryVideo (
                 frameChecksumBytes = uint64_t(slot.metadata.frameCount) * FRAME_CHECKSUM_BYTES;
             }
             fileSizeMatches =
-                bool(uint64_t(f_size(&managerState.imageFile)) == VideoLibraryHeaderBytes + payload + frameChecksumBytes);
+                RgbMediaCopies::DecodeDescriptor(header, VideoLibraryHeaderBytes, slot.metadata,
+                    ReadUnsigned32LittleEndian(header + STORAGE_HEADER_PAYLOAD_CRC_OFFSET),
+                    VideoLibraryHeaderBytes + payload + frameChecksumBytes,
+                    f_size(&managerState.imageFile), slot.prepared);
         } else {
             fileSizeMatches = false;
         }
@@ -2983,6 +3008,10 @@ InspectLibraryVideo (
             video->valid = true;
             video->metadata = slot.metadata;
             video->bytes = payload;
+            video->copies.original = true;
+            video->copies.preview = slot.prepared.present;
+            video->copies.display = slot.prepared.displayPresent;
+            video->copies.displayReady = slot.prepared.compatible;
             video->checksum = slot.checksum;
             video->maxSecondsMillis = ReadUnsigned32LittleEndian(header + LIBRARY_EXTRA_DATA_OFFSET);
             std::memcpy(video->name, header + LIBRARY_NAME_OFFSET, sizeof(video->name));
@@ -3040,6 +3069,7 @@ BuildLibraryPublicationHeader (
     } else {
         WriteUnsigned32LittleEndian(header + LIBRARY_EXTRA_DATA_OFFSET, managerState.save.maxSecondsMillis);
     }
+    managerState.rgbCopies.EncodeDescriptor(header, managerState.save.headerBytes);
     WriteUnsigned32LittleEndian(header + managerState.save.headerBytes - FRAME_CHECKSUM_BYTES,
                                ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header,
                                                 managerState.save.headerBytes - FRAME_CHECKSUM_BYTES));
@@ -3130,5 +3160,30 @@ MeasureLibraryStorageUsage (
         return true;
     });
 } // MeasureLibraryStorageUsage
+
+/**
+    Forwards provisional native pixels with their checked rectangle layout.
+
+    @param opaque Borrowed callback context retained for the complete frame read.
+    @param bytes Native CPU pixels already corrected for the panels.
+    @param count Number of complete-pixel bytes.
+    @param offset Byte position in the packed native frame.
+
+    @return true - The display consumer accepted the provisional fragment.
+    @return false - The display consumer rejected the fragment.
+*/
+bool
+PreparedSinkContext::DeliverPreparedPixels (
+    void* opaque,
+    const uint8_t* bytes,
+    size_t count,
+    size_t offset
+    )
+{
+    PreparedSinkContext* state = nullptr;
+
+    state = static_cast<PreparedSinkContext*>(opaque);
+    return state->sink(state->context, bytes, count, offset, *state->layout);
+} // DeliverPreparedPixels
 
 } // namespace MemoryStorage

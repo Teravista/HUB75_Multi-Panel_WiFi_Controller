@@ -388,7 +388,7 @@ MediaPlayer::ReadFrame (
     )
 {
     upload_.PrepareStoredFrame(metadata_);
-    return memory_.ReadMediaFrame(frame, Consume, this, nullptr, DecodedFormat());
+    return memory_.ReadMediaFrame(frame, Consume, this, nullptr, DecodedFormat(), ConsumePrepared);
 } // ReadFrame
 
 /**
@@ -451,3 +451,30 @@ MediaPlayer::RecordFramePresented (
     lastPresentedRevision_ = revision;
     ++presentedVideoFrames_;
 } // RecordFramePresented
+
+/**
+    Copies one checked native-layout fragment without repeating panel or color mapping.
+
+    @param context Borrowed player retaining render ownership for this read.
+    @param bytes Provisional native CPU pixels.
+    @param count Number of complete-pixel bytes.
+    @param offset Byte position within the prepared frame.
+    @param layout Validated native rectangle layout.
+
+    @return true - The framebuffer accepted the fragment.
+    @return false - The fragment or destination layout was invalid.
+*/
+bool
+MediaPlayer::ConsumePrepared (
+    void* context,
+    const uint8_t* bytes,
+    size_t count,
+    size_t offset,
+    const PreparedFrameLayout& layout
+    )
+{
+    MediaPlayer* player = nullptr;
+
+    player = static_cast<MediaPlayer*>(context);
+    return player->upload_.WritePreparedFramePixels(bytes, count, offset, layout);
+} // ConsumePrepared
