@@ -250,12 +250,6 @@ struct StorageGuard {
 
 };
 
-struct CompareContext {
-    const uint8_t* expected;
-    size_t compared = 0;
-    bool mismatch = false;
-};
-
 // Validates a root filename and builds its SD filesystem path.
 bool BuildValidatedImagePath(const char* name, char* path);
 
@@ -270,9 +264,6 @@ uint32_t ReadUnsigned32LittleEndian(const uint8_t* p);
 
 // Builds a photo storage header with dimensions and payload checksum.
 void BuildPhotoStorageHeader(uint8_t* header, uint32_t checksum);
-
-// Compares readback pixels against the source used by the storage self-check.
-bool CompareSavedImageBytes(void* context, const uint8_t* bytes, size_t count, size_t offset);
 
 enum class SlotState { Missing, Invalid, Valid, IoError };
 

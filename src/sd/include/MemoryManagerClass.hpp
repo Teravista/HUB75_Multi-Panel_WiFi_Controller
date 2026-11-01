@@ -113,9 +113,6 @@ public:
     // Streams a named RGB888 photo and validates its metadata and checksum.
     bool ReadImage(const char* name, ImageSink sink, void* context, MediaMetadata* metadata = nullptr);
 
-    // Saves, rereads, and removes an unused temporary test image.
-    bool RunReadWriteCheck(const uint8_t* pixels, size_t bytes);
-
     // Starts an unpublished raw or indexed-JPEG video save while retaining the previous valid slot.
     bool BeginMediaSave(const MediaMetadata& metadata, uint32_t payloadChecksum);
 

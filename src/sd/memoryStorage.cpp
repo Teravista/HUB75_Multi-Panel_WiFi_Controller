@@ -1188,40 +1188,6 @@ BuildPhotoStorageHeader (
 } // BuildPhotoStorageHeader
 
 /**
-    Compares readback pixels against the source used by the storage self-check.
-
-    Requires contiguous chunk offsets and compares each readback fragment against the original
-    caller-owned image. A differing byte or unexpected offset records a mismatch and stops the
-    enclosing read. The source image must remain stable until the complete self-check returns.
-
-    @param context Caller-owned state passed unchanged to the callback.
-    @param bytes Read-only input byte buffer.
-    @param count Number of bytes to process.
-    @param offset Byte offset within the source image or file.
-
-    @return true - The saved bytes match the original image in this chunk.
-    @return false - At least one saved byte differs from the original image.
-*/
-bool
-CompareSavedImageBytes (
-    void* context,
-    const uint8_t* bytes,
-    size_t count,
-    size_t offset
-    )
-{
-    CompareContext* check = nullptr;
-
-    check = &(*static_cast<CompareContext*>(context));
-    if (offset != check->compared || std::memcmp(check->expected + offset, bytes, count)) {
-        check->mismatch = true;
-        return false;
-    }
-    check->compared += count;
-    return true;
-} // CompareSavedImageBytes
-
-/**
     Builds a saved-photo header with its generation and checksum.
 
     Encodes the photo's generation, media descriptor and expected payload CRC into the fixed
