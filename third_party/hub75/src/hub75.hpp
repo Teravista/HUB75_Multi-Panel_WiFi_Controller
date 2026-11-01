@@ -83,6 +83,15 @@
 #define TEMPORAL_DITHERING false
 #endif
 
+// Both output counts use prepared scan bits and overlapped display timing for
+// the controller's supported two-row panels. Other upstream mappings retain
+// their existing scanner path.
+#if defined(HUB75_MULTIPLEX_2_ROWS) && TEMPORAL_DITHERING == false
+#define HUB75_PREPARED_SCAN 1
+#else
+#define HUB75_PREPARED_SCAN 0
+#endif
+
 #ifndef SM_CLOCKDIV_FACTOR
 // To prevent flicker or ghosting it might be worth a try to reduce state machine speed.
 // For panels with height less or equal to 16 rows try a factor of 8.0f

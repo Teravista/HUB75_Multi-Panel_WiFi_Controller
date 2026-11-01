@@ -28,6 +28,8 @@ and timing hooks.
 The HUB75 driver core is derived from JuPFu hub75:
 https://github.com/JuPfu/hub75
 
+Local changes integrate packed scan data and synchronized one/two-output PIO/DMA refresh.
+
 MIT License
 
 Copyright (c) 2025 Jürgen
@@ -80,7 +82,8 @@ SOFTWARE.
 
 ## Raspberry Pi
 
-`third_party/hub75/src/hub75.pio` includes software from Raspberry Pi Ltd.
+`third_party/hub75/src/hub75.pio` and the adapted row sequencer in
+`src/display/parallelPanelData.pio` include software from Raspberry Pi Ltd.
 
 BSD 3-Clause License
 

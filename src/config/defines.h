@@ -3,6 +3,12 @@
 #include <cstddef>
 #include <cstdint>
 
+// Select one four-panel output (0) or two two-panel outputs (1).
+// Both modes use prepared scan bits and overlapped loading/display.
+#ifndef DOUBLE_PIO_DRIVE
+#define DOUBLE_PIO_DRIVE 1
+#endif
+
 // is single frame flashed as base image or the animation used as default display
 #define USE_ANIMATION 0
 
@@ -18,8 +24,15 @@
 #endif
 
 #define LOGICAL_IMAGE_WIDTH 128
-#define LOGICAL_IMAGE_HEIGHT 256
 #define LOGICAL_PANEL_COUNT_X 2
+
+#if DOUBLE_PIO_DRIVE
+#define DISPLAY_PIO_OUTPUT_COUNT 2
+#else
+#define DISPLAY_PIO_OUTPUT_COUNT 1
+#endif
+#define DISPLAY_PIXELS_PER_OUTPUT (MATRIX_PANEL_WIDTH / DISPLAY_PIO_OUTPUT_COUNT)
+#define LOGICAL_IMAGE_HEIGHT 256
 #define LOGICAL_PANEL_COUNT_Y 2
 #define LOGICAL_PANEL_WIDTH 64
 #define LOGICAL_PANEL_HEIGHT 128
