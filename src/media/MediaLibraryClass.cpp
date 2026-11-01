@@ -1249,6 +1249,54 @@ MediaLibrary::CalculateVideoDurationMs (
 } // CalculateVideoDurationMs
 
 /**
+    Adds stored-copy presence and display compatibility to a library item.
+
+    These flags describe header-checked stored sections, not a fresh readback of
+    every frame. A stored native copy may be present but unusable with the current
+    wiring/CPU configuration; callers can then choose the unchanged original.
+
+    @param out Bounded writer receiving fields inside the current item object.
+    @param copies Representation presence and current display compatibility.
+*/
+void
+MediaLibrary::AppendMediaCopiesJson (
+    JsonWriter& out,
+    const MemoryManager::MediaCopyStatus& copies
+    )
+{
+    const char* original;
+    const char* preview;
+    const char* display;
+    const char* displayReady;
+
+    // Keep presence separate from compatibility so stale copies remain visible.
+    if (copies.original) {
+        original = "true";
+    } else {
+        original = "false";
+    }
+    if (copies.preview) {
+        preview = "true";
+    } else {
+        preview = "false";
+    }
+    if (copies.display) {
+        display = "true";
+    } else {
+        display = "false";
+    }
+    if (copies.displayReady) {
+        displayReady = "true";
+    } else {
+        displayReady = "false";
+    }
+
+    out.AppendFormattedText(
+        ",\"copies\":{\"original\":%s,\"preview\":%s,\"display\":%s,\"displayReady\":%s}",
+        original, preview, display, displayReady);
+} // AppendMediaCopiesJson
+
+/**
     Formats one page of saved videos and their metadata as JSON.
 
     Loads a bounded video page and encodes per-item format, dimensions, frame rate, duration, loop
@@ -1336,7 +1384,7 @@ MediaLibrary::VideoOverview (
         out.AppendFormattedText(
             ",\"revision\":%lu,\"valid\":%s,\"format\":\"%s\",\"jpegQuality\":%u,\"width\":%u,\"height\":"
             "%u,\"left\":%u,\"top\":%u,\"frames\":%lu,\"fpsNumerator\":%lu,\"fpsDenominator\":%lu,"
-            "\"durationMillis\":%llu,\"maxSecondsMillis\":%lu,\"pingPong\":%s,\"bytes\":%llu}",
+            "\"durationMillis\":%llu,\"maxSecondsMillis\":%lu,\"pingPong\":%s,\"bytes\":%llu",
             static_cast<unsigned long>(video->checksum), valid, format,
             unsigned(m->jpegQuality), unsigned(m->width), unsigned(m->height),
             unsigned(m->Left(LOGICAL_IMAGE_WIDTH)), unsigned(m->Top(LOGICAL_IMAGE_HEIGHT)),
@@ -1345,6 +1393,8 @@ MediaLibrary::VideoOverview (
             static_cast<unsigned long long>(CalculateVideoDurationMs((*m))),
             static_cast<unsigned long>(video->maxSecondsMillis), pingPong,
             static_cast<unsigned long long>(video->bytes));
+        AppendMediaCopiesJson(out, video->copies);
+        out.AppendFormattedText("}");
     }
 
     out.AppendFormattedText("],\"error\":");
@@ -1458,11 +1508,13 @@ MediaLibrary::Overview (
         }
         out.AppendFormattedText(
             ",\"format\":\"%s\",\"jpegQuality\":%u,\"width\":%u,\"height\":%u,\"left\":%u,\"top\":%u,"
-            "\"frames\":1,\"bytes\":%llu,\"valid\":%s}",
+            "\"frames\":1,\"bytes\":%llu,\"valid\":%s",
             format, unsigned(photo->metadata.jpegQuality), unsigned(photo->metadata.width),
             unsigned(photo->metadata.height), unsigned(photo->metadata.Left(LOGICAL_IMAGE_WIDTH)),
             unsigned(photo->metadata.Top(LOGICAL_IMAGE_HEIGHT)), static_cast<unsigned long long>(photo->bytes),
             valid);
+        AppendMediaCopiesJson(out, photo->copies);
+        out.AppendFormattedText("}");
     }
 
     out.AppendFormattedText("],\"displayedName\":");
@@ -1596,6 +1648,7 @@ MediaLibrary::PlaybackStatus (
     const char* storageReadyText = nullptr;
     uint32_t effectiveNumerator;
     uint32_t effectiveDenominator;
+    const char* displaySource;
 
     out = {json, capacity};
     video = player_.IsPlayingVideo();
@@ -1641,6 +1694,12 @@ MediaLibrary::PlaybackStatus (
         "\"effectiveFpsDenominator\":%lu,",
         static_cast<unsigned long>(settings_.maxFps), static_cast<unsigned long>(settings_.brightness),
         static_cast<unsigned long>(effectiveNumerator), static_cast<unsigned long>(effectiveDenominator));
+    // Report the last verified playback path without opening or rereading SD files.
+    displaySource = "none";
+    if (upload_.GetUploadedFrameData() && upload_.IsStoredFrame()) {
+        displaySource = player_.GetFrameSourceName();
+    }
+    out.AppendFormattedText("\"displaySource\":\"%s\",", displaySource);
     out.AppendFormattedText("\"displayedName\":");
     out.AppendEscapedString(displayedName_);
     out.AppendFormattedText(",");

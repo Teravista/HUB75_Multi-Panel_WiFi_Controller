@@ -1774,6 +1774,11 @@ function renderPlaybackStatus(status, forcePreview = false) {
         } else {
             detail += ' · Loop';
         }
+        if (status.displaySource === 'corrected') {
+            detail += ' · Corrected copy';
+        } else if (status.displaySource === 'original') {
+            detail += ' · Original';
+        }
     }
     const detailElement = document.getElementById('active-mode-detail');
     if (detailElement.textContent !== detail) {
@@ -1976,6 +1981,61 @@ async function refreshSummaryPreview(status, force = false) {
 }
 
 /**
+    Describes which stored representations are available for a library item.
+
+    Presence is independent of the upload format. Older RGB and JPEG items can
+    still use their original for playback and sampled previews. An incompatible
+    display copy is reported explicitly instead of claiming all copies are ready.
+
+    @param item Library metadata including optional copy availability flags.
+
+    @return string - Concise representation status for the item's metadata line.
+*/
+function DescribeMediaCopies (
+    item
+    )
+{
+    let copies;
+    let preview;
+    let display;
+
+    if (item.valid === false) {
+        return 'Unavailable';
+    }
+    copies = item.copies;
+    if (!copies) {
+        return 'Copy status unknown';
+    }
+    if (!copies.original) {
+        return 'Original unavailable';
+    }
+    if (item.format === 'JPEG') {
+        if (copies.preview) {
+            return 'Preview ready · Original playback';
+        }
+        return 'Original only';
+    }
+    if (!copies.preview && !copies.display) {
+        return 'Original only';
+    }
+
+    // A stored preview is usable across wiring changes; the display copy is not.
+    if (copies.preview) {
+        preview = 'Preview ready';
+    } else {
+        preview = 'Preview missing';
+    }
+    if (copies.displayReady) {
+        display = 'Display ready';
+    } else if (copies.display) {
+        display = 'Display outdated';
+    } else {
+        display = 'Display missing';
+    }
+    return preview + ' · ' + display;
+} // DescribeMediaCopies
+
+/**
     Creates a text-only saved-item card with explicit show and delete actions.
 
     Metadata names are assigned through textContent. Encoded names and other
@@ -2018,7 +2078,8 @@ function createLibraryCard(kind, item, displayed) {
             text += ' · Loop';
         }
     }
-    metadata.textContent = text + ' · ' + formatStorageBytes(item.bytes);
+    metadata.textContent = text + ' · ' + formatStorageBytes(item.bytes) +
+        ' · ' + DescribeMediaCopies(item);
     const show = document.createElement('button');
     show.type = 'button';
     show.textContent = 'Show';

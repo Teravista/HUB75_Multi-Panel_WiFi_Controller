@@ -59,6 +59,23 @@ MediaPlayer::GetPlaybackMetadata (
 } // GetPlaybackMetadata
 
 /**
+    Returns the representation used by the last successfully verified saved frame.
+
+    @return "corrected" - Playback used the prepared color/panel-corrected display copy.
+    @return "original" - Playback mapped raw original pixels or decoded original JPEG data.
+*/
+const char*
+MediaPlayer::GetFrameSourceName (
+    void
+    ) const
+{
+    if (correctedCopy_) {
+        return "corrected";
+    }
+    return "original";
+} // GetFrameSourceName
+
+/**
     Closes playback while preserving the last submitted display frame.
 */
 void
@@ -376,6 +393,8 @@ MediaPlayer::ShowLibraryPhoto (
 
     The caller holds render ownership. A reduced stored rectangle contains no border
     pixels; those are regenerated locally before the stored data is mapped.
+    Source reporting changes only after the complete frame passes verification;
+    provisional corrected fragments cannot relabel the previous valid frame.
 
     @param frame Zero-based stored frame to read.
 
@@ -387,8 +406,15 @@ MediaPlayer::ReadFrame (
     uint32_t frame
     )
 {
+    readingCorrectedCopy_ = false;
     upload_.PrepareStoredFrame(metadata_);
-    return memory_.ReadMediaFrame(frame, Consume, this, nullptr, DecodedFormat(), ConsumePrepared);
+    if (!memory_.ReadMediaFrame(frame, Consume, this, nullptr, DecodedFormat(), ConsumePrepared)) {
+        return false;
+    }
+
+    // Publish the observed read path only when its full frame was accepted.
+    correctedCopy_ = readingCorrectedCopy_;
+    return true;
 } // ReadFrame
 
 /**
@@ -476,5 +502,6 @@ MediaPlayer::ConsumePrepared (
     MediaPlayer* player = nullptr;
 
     player = static_cast<MediaPlayer*>(context);
+    player->readingCorrectedCopy_ = true;
     return player->upload_.WritePreparedFramePixels(bytes, count, offset, layout);
 } // ConsumePrepared

@@ -69,6 +69,12 @@ versioned descriptor records the wiring/format signature, regions, offsets and
 checksums. Incompatible raw copies fall back to the original. Original-only files
 remain playable and their previews are sampled when requested.
 
+Photo/video lists expose `copies` for original, preview and display availability.
+JPEG cards show `Preview ready · Original playback`; their Summary source is
+`Original`. Raw cards show preview/display readiness, including `Display outdated`
+for an incompatible signature. Availability comes from checked headers and bounds;
+payload checksums are validated during use.
+
 JPEG storage overhead is one 4096-byte preview plus up to 511 bytes of alignment,
 per item rather than per frame. Raw items additionally store native pixels and
 frame CRCs. Containers must remain below 4 GiB. Deletion removes the entire item;
