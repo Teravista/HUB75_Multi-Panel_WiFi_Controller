@@ -29,6 +29,14 @@ existing FAT/exFAT filesystem. The pinned SPI driver supports SDHC/SDXC cards; l
 SDSC cards up to 2 GB are not supported. The SPI driver claims two free DMA channels;
 shutdown releases only those channels and its SPI resources.
 
+`HUB75_SD_HARDWARE_CRC=ON` calculates SD read CRC16 on the existing receive DMA
+channel while bytes arrive. It adds no DMA channel or image buffer. Sector checks
+remain enabled, and file/frame CRC32 validation is unchanged. The shared checksum
+engine is reserved without waiting; a busy engine uses software CRC16. A hardware
+result that disagrees with a software-valid block disables further hardware checks
+and retains software validation. `-DHUB75_SD_HARDWARE_CRC=OFF` selects the software
+path for the complete build. Display timing and SPI clock selection are independent.
+
 ## API
 
 - `Initialize()` enables monitoring and mounts the card; `Shutdown()` releases hardware

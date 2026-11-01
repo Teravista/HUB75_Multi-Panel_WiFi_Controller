@@ -173,6 +173,7 @@
 #include <stdarg.h>
 //
 #include "crc.h"
+#include <SPI/sd_dma_crc.h>
 #include "diskio.h" /* Declarations of disk functions */  // Needed for STA_NOINIT, ...
 #include "hw_config.h"  // Hardware Configuration of the SPI and SD Card "objects"
 #include "my_debug.h"
@@ -768,26 +769,76 @@ static bool chk_crc16(uint8_t *buffer, size_t length, uint16_t crc) {
     return true;
 }
 
+/**
+    Validates a received SD block using DMA CRC16 or the software fallback.
+
+    A mismatching hardware result never bypasses validation: software rechecks
+    the received buffer. If software agrees with the card, later DMA checks are
+    disabled without classifying the card as failed. Real data corruption still
+    returns a CRC error through the existing retry and recovery path.
+
+    @param buffer Completed received bytes to validate.
+    @param length Number of data bytes, excluding the card's checksum bytes.
+    @param expected Checksum received from the card.
+    @param hardwareAvailable Whether the completed DMA produced a valid checksum.
+    @param hardwareChecksum Completed CRC16, seeded with zero and not reflected.
+
+    @return true - The received block passed enabled checksum validation.
+    @return false - The received block failed checksum validation.
+*/
+static bool
+CheckReceivedSdCrc16 (
+    uint8_t* buffer,
+    size_t length,
+    uint16_t expected,
+    bool hardwareAvailable,
+    uint16_t hardwareChecksum
+    )
+{
+    bool softwareValid;
+
+    if (!crc_on) {
+        return true;
+    }
+    if (hardwareAvailable && hardwareChecksum == expected) {
+        return true;
+    }
+
+    // Retain software validation for a busy engine, transfer failure or discrepancy.
+    softwareValid = chk_crc16(buffer, length, expected);
+    if (softwareValid && hardwareAvailable) {
+        DisableSdDmaCrc16();
+    }
+    return softwareValid;
+} // CheckReceivedSdCrc16
+
 #define SPI_START_BLOCK (0xFE) /* For Single Block Read/Write and Multiple Block Read */
 
 static block_dev_err_t stop_wr_tran(sd_card_t *sd_card_p);
 
 static block_dev_err_t read_bytes(sd_card_t *sd_card_p, uint8_t *buffer, uint32_t length) {
     uint16_t crc;
+    uint16_t hardwareChecksum = 0;
+    bool hardwareAvailable;
+    SdDmaCrc16 dmaCrc = {0};
 
     // read until start byte (0xFE)
     if (false == sd_wait_token(sd_card_p, SPI_START_BLOCK)) {
         DBG_PRINTF("%s:%d Read timeout\n", __func__, __LINE__);
         return SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
     }
+    if (crc_on) {
+        BeginSdDmaCrc16(&dmaCrc, sd_card_p->spi_if_p->spi);
+    }
     bool ok = sd_spi_transfer(sd_card_p, NULL, buffer, length);
+    hardwareAvailable = FinishSdDmaCrc16(&dmaCrc, ok, &hardwareChecksum);
     if (!ok) return SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
 
     // Read the CRC16 checksum for the data block
     crc = (sd_spi_read(sd_card_p) << 8);
     crc |= sd_spi_read(sd_card_p);
 
-    if (!chk_crc16(buffer, length, crc)) {
+    if (!CheckReceivedSdCrc16(buffer, length, crc, hardwareAvailable, hardwareChecksum)) {
         DBG_PRINTF("%s: Invalid CRC received: 0x%" PRIx16 "\n", __func__, crc);
         return SD_BLOCK_DEVICE_ERROR_CRC;
     }
@@ -878,6 +929,11 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
     uint16_t prev_block_crc = 0;
     uint8_t *prev_buffer_addr = 0;
     uint32_t blk_cnt = num_rd_blks;
+    uint16_t previousHardwareChecksum = 0;
+    uint16_t currentHardwareChecksum = 0;
+    bool previousHardwareAvailable = false;
+    bool currentHardwareAvailable;
+    SdDmaCrc16 dmaCrc = {0};
 
     // receive the data : one block at a time
     while (blk_cnt) {
@@ -891,6 +947,9 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
         }
         // read data
         stage = profile ? time_us_64() : 0;
+        if (crc_on) {
+            BeginSdDmaCrc16(&dmaCrc, sd_card_p->spi_if_p->spi);
+        }
         sd_spi_transfer_start(sd_card_p, NULL, buffer, sd_block_size);
 
         if (sd_card_p->spi_if_p->read_work)
@@ -901,7 +960,8 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
         if (prev_buffer_addr) {
             // Check previous block's CRC:
             const uint64_t crc_start = profile ? time_us_64() : 0;
-            crc_ok = chk_crc16(prev_buffer_addr, sd_block_size, prev_block_crc);
+            crc_ok = CheckReceivedSdCrc16(prev_buffer_addr, sd_block_size,
+                prev_block_crc, previousHardwareAvailable, previousHardwareChecksum);
             if (profile) profile->crc_us += time_us_64() - crc_start;
             if (!crc_ok) {
                 DBG_PRINTF("%s: Invalid CRC received: 0x%" PRIx16 "\n", __func__,
@@ -911,6 +971,7 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
         
         uint32_t timeout = calculate_transfer_time_ms(sd_card_p->spi_if_p->spi, sd_block_size);
         bool ok = sd_spi_transfer_wait_complete(sd_card_p, timeout);
+        currentHardwareAvailable = FinishSdDmaCrc16(&dmaCrc, ok, &currentHardwareChecksum);
         if (profile) profile->transfer_us += time_us_64() - stage;
         if (!ok) return SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
         // Finish the active DMA before propagating a previous-sector CRC
@@ -922,6 +983,8 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
         prev_block_crc = sd_spi_read(sd_card_p) << 8;
         prev_block_crc |= sd_spi_read(sd_card_p);
         prev_buffer_addr = buffer;
+        previousHardwareAvailable = currentHardwareAvailable;
+        previousHardwareChecksum = currentHardwareChecksum;
         buffer += sd_block_size;
         --blk_cnt;
     }
@@ -935,7 +998,8 @@ static block_dev_err_t in_sd_read_blocks(sd_card_t *sd_card_p, uint8_t *buffer,
     }
     // Check final block's CRC:
     stage = profile ? time_us_64() : 0;
-    bool final_crc_ok = chk_crc16(prev_buffer_addr, sd_block_size, prev_block_crc);
+    bool final_crc_ok = CheckReceivedSdCrc16(prev_buffer_addr, sd_block_size,
+        prev_block_crc, previousHardwareAvailable, previousHardwareChecksum);
     if (profile) profile->crc_us += time_us_64() - stage;
     if (!final_crc_ok) {
         DBG_PRINTF("%s: Invalid CRC received: 0x%" PRIx16 "\n", __func__, prev_block_crc);

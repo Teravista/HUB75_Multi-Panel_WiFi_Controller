@@ -34,6 +34,7 @@ include(pico_sdk_import.cmake)
 
 project(hub75 C CXX ASM)
 option(HUB75_VERBOSE_LOGS "Enable verbose diagnostics and the startup serial delay" OFF)
+option(HUB75_SD_HARDWARE_CRC "Compute SD read CRC16 with the existing receive DMA" ON)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -128,6 +129,7 @@ add_subdirectory(third_party/hub75/common)
 add_subdirectory(third_party/hub75/libraries)
 add_subdirectory(third_party/fatfs_sd/src)
 target_compile_definitions(no-OS-FatFS-SD-SDIO-SPI-RPi-Pico INTERFACE
+    SD_SPI_HARDWARE_CRC16=$<BOOL:${HUB75_SD_HARDWARE_CRC}>
     USE_PRINTF=$<BOOL:${HUB75_VERBOSE_LOGS}>
     USE_DBG_PRINTF=$<BOOL:${HUB75_VERBOSE_LOGS}>)
 
