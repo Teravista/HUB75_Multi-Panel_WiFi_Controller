@@ -1,4 +1,5 @@
 #pragma once
+#include <include/preparedFrame.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -83,6 +84,9 @@ public:
     // Pixel fragments are provisional until the complete read succeeds. JPEG
     // sinks may run on the reserved worker and must not perform storage I/O.
     using ImageSink = bool (*)(void* context, const uint8_t* pixels, size_t bytes, size_t offset);
+
+    // Accepts provisional native pixels with their checked physical rectangle layout.
+    using PreparedImageSink = bool (*)(void* context, const uint8_t* pixels, size_t bytes, size_t offset, const PreparedFrameLayout& layout);
 
     using ImageSource = bool (*)(void* context, uint8_t* pixels, size_t bytes, size_t offset);
 
@@ -177,7 +181,7 @@ public:
     };
 
     // Reads and verifies one frame from the selected saved media.
-    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context, FrameReadTiming* timing = nullptr, PixelFormat jpegOutput = PixelFormat::RGB888);
+    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context, FrameReadTiming* timing = nullptr, PixelFormat jpegOutput = PixelFormat::RGB888, PreparedImageSink preparedSink = nullptr);
 
     // Closes the active playback file and clears its runtime state.
     void CloseMediaPlayback(void);
@@ -196,6 +200,20 @@ public:
     static constexpr size_t PhotoNameBytes = 64;
     static constexpr size_t ThumbnailBytes = 16 * 32 * 2;
 
+    /**
+        Reports stored representations without reading their full pixel payloads.
+
+        Presence comes from the checked container header and section extents.
+        Display readiness additionally requires the current CPU format and wiring
+        signature. Payload checksums are still validated when data is consumed.
+    */
+    struct MediaCopyStatus {
+        bool original = false;
+        bool preview = false;
+        bool display = false;
+        bool displayReady = false;
+    };
+
     struct LibraryPhoto {
         uint32_t id = 0;
         uint32_t checksum = 0;
@@ -203,6 +221,7 @@ public:
         MediaMetadata metadata;
         uint64_t bytes = 0;
         char name[PhotoNameBytes]{};
+        MediaCopyStatus copies;
     };
 
     struct LibraryVideo {
@@ -213,6 +232,7 @@ public:
         MediaMetadata metadata;
         uint64_t bytes = 0;
         char name[PhotoNameBytes]{};
+        MediaCopyStatus copies;
     };
 
     static constexpr uint32_t DefaultBrightness = 80;
@@ -284,7 +304,7 @@ public:
     static constexpr size_t PreviewHeight = 64;
     static constexpr size_t PreviewBytes = PreviewWidth * PreviewHeight * RGB565_PIXEL_BYTES;
 
-    // Builds a verified first-frame preview without replacing active playback.
+    // Reads a stored RGB preview or samples a legacy/JPEG frame without replacing playback.
     bool ReadLibraryPreview(uint32_t id, bool video, uint8_t* pixels, size_t capacity);
 
 private:

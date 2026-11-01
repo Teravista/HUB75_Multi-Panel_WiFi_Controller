@@ -554,6 +554,7 @@ MemoryManager::BeginMediaSave (
     // Initialize transaction counters while keeping the preceding generation available.
     latest = MemoryStorage::FindNewestSavedPhoto(slots);
     MemoryStorage::managerState.save = {};
+    MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.save.metadata = metadata;
     MemoryStorage::managerState.save.expectedCrc = payloadChecksum;
     metadata.PayloadBytes(MemoryStorage::managerState.save.total);
@@ -733,8 +734,10 @@ MemoryManager::VerifyMediaSaveStep (
     char stagingPath[LIBRARY_PATH_BYTES];
     char finalPath[LIBRARY_PATH_BYTES];
     bool jpegFinished;
+    bool copiesComplete;
     const char* savedType = nullptr;
     uint32_t savedId;
+    unsigned savedCopies;
 
     complete = false;
     MemoryStorage::StorageGuard guard;
@@ -745,7 +748,9 @@ MemoryManager::VerifyMediaSaveStep (
 
     // Advance format-specific readback while preserving the invalid staging header.
     if (MemoryStorage::managerState.save.metadata.pixelFormat == PixelFormat::JPEG) {
-        if (!VerifyJpegSaveStep(jpegFinished)) {
+        if (MemoryStorage::managerState.rgbCopies.HasStarted()) {
+            jpegFinished = true;
+        } else if (!VerifyJpegSaveStep(jpegFinished)) {
             return false;
         }
         if (!jpegFinished) {
@@ -782,6 +787,26 @@ MemoryManager::VerifyMediaSaveStep (
         if (~MemoryStorage::managerState.save.verifyCrc != MemoryStorage::managerState.save.expectedCrc) {
             return ReportStorageFailure("stored video checksum mismatch");
         }
+
+        // Uploaded originals stay intact; append and verify the small preview and native frames
+        // before the original invalid staging header can become a published library item.
+        if (MemoryStorage::managerState.save.libraryId || MemoryStorage::managerState.save.videoId) {
+            if (!MemoryStorage::managerState.rgbCopies.HasStarted() &&
+                !MemoryStorage::managerState.rgbCopies.Begin(MemoryStorage::managerState.mediaFile,
+                    MemoryStorage::managerState.save.open, MemoryStorage::BuildActiveSaveFilePath(stagingPath),
+                    MemoryStorage::managerState.save.metadata, MemoryStorage::managerState.save.headerBytes,
+                    MemoryStorage::managerState.save.expectedCrc, MemoryStorage::managerState.readBuffer,
+                    MemoryStorage::ChunkBytes, result)) {
+                return ReportStorageFailure("Media copies preparation failed", result);
+            }
+            if (!MemoryStorage::managerState.rgbCopies.Advance(copiesComplete, result)) {
+                return ReportStorageFailure("Media copies verification failed", result);
+            }
+            if (!copiesComplete) {
+                return true;
+            }
+        }
+
         header = MemoryStorage::managerState.readBuffer;
         MemoryStorage::BuildLibraryPublicationHeader(header);
         result = f_lseek(&MemoryStorage::managerState.mediaFile, 0);
@@ -814,10 +839,19 @@ MemoryManager::VerifyMediaSaveStep (
             savedType = "photo";
             savedId = MemoryStorage::managerState.save.libraryId;
         }
-        std::printf("[save] %s id=%lu format=%s frames=%lu verified\n", savedType,
+        savedCopies = RGB_COPIES_ORIGINAL_COUNT;
+        if (MemoryStorage::managerState.rgbCopies.HasStarted()) {
+            savedCopies = RGB_COPIES_PREPARED_COUNT;
+            if (MemoryStorage::managerState.save.metadata.pixelFormat == PixelFormat::JPEG) {
+                savedCopies = RGB_COPIES_PREVIEW_COUNT;
+            }
+        }
+        std::printf("[save] %s id=%lu format=%s frames=%lu copies=%u verified\n", savedType,
                     static_cast<unsigned long>(savedId), MemoryStorage::managerState.save.metadata.FormatName(),
-                    static_cast<unsigned long>(MemoryStorage::managerState.save.metadata.frameCount));
+                    static_cast<unsigned long>(MemoryStorage::managerState.save.metadata.frameCount),
+                    savedCopies);
         MemoryStorage::managerState.save = {};
+        MemoryStorage::managerState.rgbCopies.Reset();
         MemoryStorage::managerState.rejectedSlot = SAVED_PHOTO_NO_SLOT;
         complete = true;
     }
@@ -913,6 +947,7 @@ MemoryManager::OpenLastMedia (
     @param context Borrowed consumer state for this read.
     @param timing Optional output counters for this frame read.
     @param jpegOutput Requested JPEG pixel format; raw media retains its stored format.
+    @param preparedSink Optional native consumer; omitting it always reads the logical original.
 
     @return true - The requested frame and its CRC passed verification.
     @return false - The request, I/O, consumer or checksum failed.
@@ -923,13 +958,17 @@ MemoryManager::ReadMediaFrame (
     ImageSink sink,
     void* context,
     FrameReadTiming* timing,
-    PixelFormat jpegOutput
+    PixelFormat jpegOutput,
+    PreparedImageSink preparedSink
     )
 {
     MemoryStorage::SavedFrameResult read;
     uint64_t started;
     PlaybackPrefetch::Stats before;
     PlaybackPrefetch::Stats after;
+    MemoryStorage::Slot native;
+    MemoryStorage::FrameResult nativeResult;
+    MemoryStorage::PreparedSinkContext nativeConsumer;
 
     if (timing) {
         *timing = {};
@@ -946,7 +985,18 @@ MemoryManager::ReadMediaFrame (
     // Direction guides read-ahead without changing the selected frame or validation.
     before = MemoryStorage::playbackPrefetch.GetStats();
     MemoryStorage::playbackPrefetch.SetBackwards(MemoryStorage::managerState.hasPlaybackFrame && frameIndex < MemoryStorage::managerState.lastPlaybackFrame);
-    if (MemoryStorage::managerState.playback.description.indexedJpeg) {
+    if (preparedSink && MemoryStorage::managerState.playback.description.metadata.pixelFormat != PixelFormat::JPEG &&
+        MemoryStorage::managerState.playback.description.prepared.compatible) {
+        native.metadata = MemoryStorage::managerState.playback.description.metadata;
+        native.dataOffset = MemoryStorage::managerState.playback.description.prepared.displayOffset;
+        native.frameChecksums = true;
+        native.preparedFrameBytes = MemoryStorage::managerState.playback.description.prepared.frameBytes;
+        native.preparedPixelBytes = MemoryStorage::managerState.playback.description.prepared.pixelBytes;
+        nativeConsumer = {preparedSink, context, &MemoryStorage::managerState.playback.description.prepared};
+        nativeResult = MemoryStorage::ReadAndVerifyRawVideoFrame(MemoryStorage::managerState.playbackFile,
+            native, frameIndex, MemoryStorage::PreparedSinkContext::DeliverPreparedPixels, &nativeConsumer, timing);
+        read = {nativeResult.complete, int(nativeResult.result), nativeResult.error};
+    } else if (MemoryStorage::managerState.playback.description.indexedJpeg) {
         read = MemoryStorage::ReadAndVerifyJpegFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, false, timing, jpegOutput == PixelFormat::RGB565);
     } else {
         read = MemoryStorage::ReadAndVerifyRawVideoFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, timing);
@@ -1129,6 +1179,9 @@ MemoryManager::BeginLibraryPhoto (
          metadata.encodedBytes > MediaTransfer::MaximumJpegBytes + JPEG_SINGLE_PHOTO_OVERHEAD_BYTES)) {
         return ReportStorageFailure("invalid photo metadata");
     }
+    if (!RgbMediaCopies::FitsFileSize(metadata, MemoryStorage::LibraryHeaderBytes)) {
+        return ReportStorageFailure("Media copies exceed filesystem file-size limit");
+    }
 
     // Validate the root filename and image inputs before opening a file.
     lookup = FR_OK;
@@ -1141,6 +1194,7 @@ MemoryManager::BeginLibraryPhoto (
     }
     MemoryStorage::CloseSavedMediaPlayback();
     MemoryStorage::managerState.save = MemoryStorage::SaveSession{};
+    MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.save.libraryId = target;
     MemoryStorage::managerState.save.headerBytes = MemoryStorage::LibraryHeaderBytes;
     MemoryStorage::managerState.save.metadata = metadata;
@@ -1162,6 +1216,7 @@ MemoryManager::BeginLibraryPhoto (
     result = f_open(&MemoryStorage::managerState.mediaFile, path, FA_WRITE | FA_CREATE_ALWAYS);
     if (result != FR_OK) {
         MemoryStorage::managerState.save = {};
+        MemoryStorage::managerState.rgbCopies.Reset();
         return ReportStorageFailure("photo create failed", result);
     }
     MemoryStorage::managerState.save.open = true;
@@ -1742,6 +1797,9 @@ MemoryManager::BeginLibraryVideo (
     if (!name || !MediaTransfer::IsSupportedVideo(metadata, LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) {
         return ReportStorageFailure("invalid video metadata");
     }
+    if (!RgbMediaCopies::FitsFileSize(metadata, MemoryStorage::VideoLibraryHeaderBytes)) {
+        return ReportStorageFailure("Media copies exceed filesystem file-size limit");
+    }
 
     // Validate the root filename and image inputs before opening a file.
     lookup = FR_OK;
@@ -1754,6 +1812,7 @@ MemoryManager::BeginLibraryVideo (
     }
     MemoryStorage::CloseSavedMediaPlayback();
     MemoryStorage::managerState.save = MemoryStorage::SaveSession{};
+    MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.save.videoId = target;
     MemoryStorage::managerState.save.headerBytes = MemoryStorage::VideoLibraryHeaderBytes;
     MemoryStorage::managerState.save.metadata = metadata;
@@ -1778,6 +1837,7 @@ MemoryManager::BeginLibraryVideo (
     result = f_open(&MemoryStorage::managerState.mediaFile, path, FA_WRITE | FA_CREATE_ALWAYS);
     if (result != FR_OK) {
         MemoryStorage::managerState.save = {};
+        MemoryStorage::managerState.rgbCopies.Reset();
         return ReportStorageFailure("video library create failed", result);
     }
     MemoryStorage::managerState.save.open = true;
@@ -2146,10 +2206,11 @@ MemoryManager::ImportLastVideo (
 } // ImportLastVideo
 
 /**
-    Builds a verified first-frame preview without replacing active playback.
+    Reads a stored RGB preview or samples a legacy/JPEG frame without replacing playback.
 
-    Inspects the selected photo/video using its own metadata, then reads and verifies its first
-    frame through a temporary handle and a small sampling sink. The preview is initialized to
+    Inspects the selected item without closing the active playback file. New RGB items read
+    their checked 32x64 preview directly; legacy and JPEG items stream their first frame
+    through a temporary handle and a small sampling sink. The preview is initialized to
     black before content pixels are sampled in their saved placement. It keeps the current
     playback handle, index cache and CPU framebuffer untouched, but synchronous reading or JPEG
     decoding can still delay foreground work.
@@ -2230,7 +2291,11 @@ MemoryManager::ReadLibraryPreview (
     // Use a separate file handle and no playback JPEG index cache. Existing
     // playback position, selection, profiling and displayed pixels stay intact.
     read = {};
-    if (slot.indexedJpeg) {
+    if (slot.prepared.present) {
+        read.complete = RgbMediaCopies::ReadPreview(MemoryStorage::managerState.imageFile, slot.prepared,
+            pixels, capacity, read.result);
+        read.error = "stored preview checksum/read failed";
+    } else if (slot.indexedJpeg) {
         read = MemoryStorage::ReadAndVerifyJpegFrame(slot, 0, MemoryStorage::PreviewSamplingContext::SamplePreviewPixels, &preview, true);
     } else {
         read = MemoryStorage::ReadAndVerifyRawVideoFrame(slot, 0, MemoryStorage::PreviewSamplingContext::SamplePreviewPixels, &preview, true);
@@ -2521,6 +2586,7 @@ MemoryManager::DiscardSession (
     )
 {
     MemoryStorage::managerState.save = {};
+    MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.playback = {};
     MemoryStorage::managerState.mediaFile = {};
     MemoryStorage::managerState.playbackFile = {};

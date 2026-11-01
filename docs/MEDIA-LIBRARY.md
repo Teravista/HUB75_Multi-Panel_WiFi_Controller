@@ -29,7 +29,8 @@ belongs to `MediaLibrary::Remove` / `RemoveVideo`.
 `BeginLibraryVideo` accepts metadata, payload CRC, name and duration limit. Both
 allocate an ID and create an unpublished `.TMP` file. `AppendMediaBytes`,
 `StartMediaVerification` and repeated `VerifyMediaSaveStep` calls use the shared 24 KiB
-scratch buffer. Only a completely verified and closed file is renamed to `.H75`. Abort
+scratch buffer. RGB saves also prepare and read back their preview and native-display sections.
+Only a completely verified and closed file is renamed to `.H75`. Abort
 removes the incomplete staging file and preserves existing items. A returned allocation
 ID is not confirmation that the save has completed.
 
@@ -46,6 +47,33 @@ publish independent library items. Completion selects the newly saved item. Lega
 direct storage APIs remain available. A retained legacy video can be adopted once by
 rename; `VLIB.H75` records that migration so deleting the imported item remains
 permanent.
+
+## RGB originals, previews and prepared display frames
+
+RGB565 and RGB888 library items retain three representations in one file:
+
+1. The unchanged original logical pixel payload, metadata and checksums.
+2. A 32 × 64 logical RGB565 preview, including black placement borders. Videos
+   use their first frame. Preview requests read these 4096 bytes directly.
+3. Native CPU pixels with color wiring, panel rotation and chain ordering already
+   applied. Packed rectangles omit generated borders and copy directly during playback.
+
+JPEG photos/videos retain only their unchanged compressed original and the small
+preview. Playback always decodes the original JPEG, including files that still
+contain a display copy from an earlier layout. JPEG is never recompressed and no
+corrected JPEG or uncompressed playback copy is generated. Preview preparation
+decodes only the first frame into sample callbacks using the existing scratch.
+
+Raw native copies follow the configured CPU format, currently RGB565. Their
+versioned descriptor records the wiring/format signature, regions, offsets and
+checksums. Incompatible raw copies fall back to the original. Original-only files
+remain playable and their previews are sampled when requested.
+
+JPEG storage overhead is one 4096-byte preview plus up to 511 bytes of alignment,
+per item rather than per frame. Raw items additionally store native pixels and
+frame CRCs. Containers must remain below 4 GiB. Deletion removes the entire item;
+managed SD usage includes all representations. See the
+[extension layout](MEDIA-METADATA.md#prepared-rgb-copy-extension).
 
 ## Selection, slideshow and settings
 
@@ -76,11 +104,12 @@ deleted, including removal of a damaged header. Photo controls also enable the s
 and edit its interval. Each upload retains its own format and
 [placement](../web/README.md#upload-placement).
 
-`ReadLibraryPreview` verifies and samples a photo or the first video frame into 32 × 64
-RGB565 pixels. A separate file handle avoids changing the active frame position or JPEG
-index cache. Preview requests generate black borders from placement metadata and reject
-corrupted payloads. `Thumbnail` encodes this sample as bounded base64 JSON; the original
-16 × 32 on-disk thumbnail remains compatible.
+`ReadLibraryPreview` reads the checked 32 × 64 RGB565 preview stored with prepared RGB/JPEG
+items. Original-only RGB and JPEG items are sampled from the photo or first video frame.
+A separate handle preserves active playback position and JPEG index state.
+`Thumbnail` returns the same width, height and base64 pixel JSON for both paths,
+including logical placement borders. The legacy 16 × 32 photo thumbnail remains
+available to older internal callers.
 
 `GetStorageUsage` measures logical managed-file bytes, cluster-rounded allocated bytes
 and filesystem data capacity. This includes the collections, settings, retained copies

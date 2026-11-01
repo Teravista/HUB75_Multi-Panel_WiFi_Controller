@@ -1,4 +1,5 @@
 #pragma once
+#include <include/preparedFrame.hpp>
 #include "display/include/PanelRendererClass.hpp"
 #include <cstddef>
 #include <cstdint>
@@ -88,6 +89,9 @@ public:
 
     // Maps a stored pixel fragment into the placed CPU framebuffer region.
     bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset, PixelFormat format = PixelFormat::RGB888, uint16_t width = LOGICAL_IMAGE_WIDTH, uint16_t height = LOGICAL_IMAGE_HEIGHT, uint16_t left = MediaMetadata::AutoOffset, uint16_t top = MediaMetadata::AutoOffset);
+
+    // Copies prepared native rectangles into the CPU framebuffer without pixel conversion.
+    bool WritePreparedFramePixels(const uint8_t* bytes, size_t count, size_t offset, const PreparedFrameLayout& layout);
 
     // Clears the framebuffer before writing a saved image with placement metadata.
     void PrepareStoredFrame(const MediaMetadata& metadata);

@@ -990,3 +990,73 @@ FrameBufferController::PrepareStoredFrame (
         std::memset(m_frameBuffer, 0, FRAME_BUFFER_SIZE_BYTES);
     }
 } // PrepareStoredFrame
+
+/**
+    Copies prepared native rectangles into the CPU framebuffer without pixel conversion.
+
+    The storage reader already checked the layout signature. Each packed rectangle
+    is copied as row spans into its physical framebuffer position, with no channel
+    conversion, per-pixel coordinate mapping or additional complete-frame buffer.
+    The caller retains render ownership and publishes only after the frame CRC passes.
+
+    @param bytes Provisional pixels in the exact configured CPU representation.
+    @param count Number of complete-pixel bytes in this fragment.
+    @param offset Byte position within the packed prepared frame.
+    @param layout Validated native rectangles and pixel representation.
+
+    @return true - All fragment bytes were copied to valid framebuffer positions.
+    @return false - The fragment, layout, alignment or destination bounds are invalid.
+*/
+bool
+FrameBufferController::WritePreparedFramePixels (
+    const uint8_t* bytes,
+    size_t count,
+    size_t offset,
+    const PreparedFrameLayout& layout
+    )
+{
+    size_t index;
+    size_t regionBytes;
+    size_t rowBytes;
+    size_t span;
+    size_t localPixel;
+    size_t destination;
+    const PreparedFrameRegion* region = nullptr;
+
+    if (!bytes || !layout.compatible || layout.pixelBytes != CpuFrame::PixelBytes ||
+        !layout.regionCount || layout.regionCount > PREPARED_FRAME_MAX_REGIONS ||
+        offset > layout.frameBytes || count > layout.frameBytes - offset ||
+        offset % CpuFrame::PixelBytes || count % CpuFrame::PixelBytes) {
+        return false;
+    }
+
+    for (index = 0; index < layout.regionCount && count; ++index) {
+        region = &layout.regions[index];
+        if (!region->width || !region->height ||
+            uint32_t(region->x) + region->width > MATRIX_PANEL_WIDTH ||
+            uint32_t(region->y) + region->height > MATRIX_PANEL_HEIGHT) {
+            return false;
+        }
+        regionBytes = size_t(region->width) * region->height * CpuFrame::PixelBytes;
+        if (offset >= regionBytes) {
+            offset -= regionBytes;
+            continue;
+        }
+
+        // Native row spans preserve gaps between panels and generated black borders.
+        rowBytes = size_t(region->width) * CpuFrame::PixelBytes;
+        while (offset < regionBytes && count) {
+            localPixel = offset / CpuFrame::PixelBytes;
+            span = std::min(count, rowBytes - offset % rowBytes);
+            destination = ((size_t(region->y) + localPixel / region->width) * MATRIX_PANEL_WIDTH +
+                region->x + localPixel % region->width) * CpuFrame::PixelBytes;
+            std::memcpy(m_frameBuffer + destination, bytes, span);
+            bytes += span;
+            count -= span;
+            offset += span;
+        }
+        offset = 0;
+    }
+
+    return count == 0;
+} // WritePreparedFramePixels

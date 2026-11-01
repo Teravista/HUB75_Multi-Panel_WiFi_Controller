@@ -170,6 +170,7 @@ target_sources(hub75 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaTransfer.cpp
 
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/RgbMediaCopiesClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/PlaybackPrefetchClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryStorage.cpp
@@ -205,6 +206,10 @@ target_include_directories(hub75 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src
         ${CMAKE_CURRENT_LIST_DIR}/src
         ${CMAKE_CURRENT_LIST_DIR}/src/config
+        ${CMAKE_CURRENT_LIST_DIR}/src/sd
+        ${CMAKE_CURRENT_LIST_DIR}/src/display
+        ${CMAKE_CURRENT_LIST_DIR}/src/media
+        ${CMAKE_CURRENT_LIST_DIR}/src/shared
         ${CMAKE_CURRENT_LIST_DIR}
 )
 

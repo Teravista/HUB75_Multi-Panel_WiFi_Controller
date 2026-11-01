@@ -1,4 +1,5 @@
 #pragma once
+#include <include/RgbMediaCopiesClass.hpp>
 #include "sd/include/MemoryManagerClass.hpp"
 #include "sd/include/memoryManagerPlatform.hpp"
 #include "sd/include/PlaybackPrefetchClass.hpp"
@@ -32,6 +33,8 @@ struct Slot {
     uint32_t checksum = 0;
     uint32_t crcSeed = STORAGE_CRC32_INITIAL_U;
     bool frameChecksums = false;
+    size_t preparedFrameBytes = 0;
+    size_t preparedPixelBytes = 0;
 };
 
 struct FrameResult {
@@ -58,6 +61,7 @@ struct FrameWork {
     void* context;
     MemoryManager::FrameReadTiming* timing;
     bool accepted = true;
+    size_t pixelBytes = RGB888_PIXEL_BYTES;
 
     // Verifies and delivers a buffered raw frame fragment to its pixel sink.
     void ProcessPendingFramePixels(size_t maximum, bool overlapping = false);
@@ -276,6 +280,7 @@ struct SavedPhotoSlot {
     uint32_t crcSeed = STORAGE_CRC32_INITIAL_U;
     bool frameChecksums = false;
     bool indexedJpeg = false;
+    PreparedFrameLayout prepared;
     int result = 0;
     const char* error = "invalid saved photo";
 };
@@ -321,6 +326,21 @@ struct SaveSession {
     size_t headerBytes = MediaTransfer::FileHeaderBytes;
     char name[MemoryManager::PhotoNameBytes]{};
     uint8_t thumbnail[MemoryManager::ThumbnailBytes]{};
+};
+
+/**
+    Adapts checked native frame fragments to an optional display consumer.
+
+    The enclosing read owns this borrowed callback context until the CRC pipeline
+    drains. Logical-only callers continue using the original representation.
+*/
+struct PreparedSinkContext {
+    MemoryManager::PreparedImageSink sink;
+    void* context;
+    const PreparedFrameLayout* layout;
+
+    // Forwards provisional native pixels with their checked rectangle layout.
+    static bool DeliverPreparedPixels(void* opaque, const uint8_t* bytes, size_t count, size_t offset);
 };
 
 struct PlaybackSession {
@@ -446,6 +466,7 @@ struct StorageState {
     FIL mediaFile{};
     FIL playbackFile{};
     SaveSession save;
+    RgbMediaCopies rgbCopies;
     PlaybackSession playback;
     uint32_t lastPlaybackFrame = 0;
     bool hasPlaybackFrame = false;
