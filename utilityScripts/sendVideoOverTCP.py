@@ -1,4 +1,4 @@
-"""Convert a video to JPEG/RGB888/RGB565 frames, upload to SD, then loop on the Pico.
+"""Convert a video to JPEG/RGB565 frames, upload to SD, then loop on the Pico.
 
     python utilityScripts/sendVideoOverTCP.py
     python utilityScripts/sendVideoOverTCP.py clip.mp4 --ip 192.168.1.48 --fps 3
@@ -36,12 +36,13 @@ DEFAULT_VIDEO_NAME = ""          # Blank/None = source filename; e.g. "Forest wa
 DEFAULT_FPS = 30                # Playback/conversion FPS, from 1 to 60.
 MAX_VIDEO_SECONDS = 600       # None = whole video; e.g. 20 = first 20 seconds.
 PING_PONG = False            # True = forward/backward; False = restart at frame 0.
-PIXEL_FORMAT = "rgb565"       # "rgb565", "rgb888", or "jpeg" for new conversions.
+PIXEL_FORMAT = "rgb565"       # "rgb565" or "jpeg" for new conversions.
 SIZING_MODE = "crop"          # "crop" fills screen; "fit" keeps the whole image with black borders.
 JPEG_QUALITY = 85             # Baseline JPEG quality for newly converted JPEG clips, 1..95.
 
 WIDTH, HEIGHT = 128, 256
-FRAME_BYTES = WIDTH * HEIGHT * 3
+SOURCE_CHANNEL_COUNT = 3
+SOURCE_FRAME_BYTES = WIDTH * HEIGHT * SOURCE_CHANNEL_COUNT
 CHUNK_BYTES = 1536
 BULK_CHUNK_BYTES = 6144
 PORT = 5002
@@ -49,7 +50,7 @@ DESCRIPTOR = struct.Struct("<4sBBBBHHIIIQ")
 REQUEST_BYTES = DESCRIPTOR.size + 4
 MAX_FILE_BYTES = 0xFFFFFFFF
 PING_PONG_FLAG = 1
-PIXEL_FORMAT_IDS = {"rgb888": 1, "rgb565": 2, "jpeg": 3}
+PIXEL_FORMAT_IDS = {"rgb565": 2, "jpeg": 3}
 JPEG_INDEX = struct.Struct("<III")
 JPEG_RECORD = struct.Struct("<II")
 MAX_JPEG_BYTES = 128 * 1024
@@ -60,7 +61,7 @@ class VideoMetadata:
     frames: int
     fps: Fraction
     ping_pong: bool = False
-    pixel_format: str = "rgb888"
+    pixel_format: str = "rgb565"
     encoded_bytes: int = 0
     jpeg_quality: int = 0  # Unknown for previously prepared JPEG clips.
 
@@ -79,10 +80,7 @@ class VideoMetadata:
     def frame_bytes(self) -> int:
         if self.pixel_format == "jpeg":
             return 0  # Variable encoded frame lengths are described by the index.
-        if self.pixel_format == "rgb565":
-            bytes_per_pixel = 2
-        else:
-            bytes_per_pixel = 3
+        bytes_per_pixel = 2
         return self.width * self.height * (bytes_per_pixel)
 
     # Returns the complete raw or indexed JPEG payload size.
@@ -111,7 +109,7 @@ class VideoMetadata:
             if any(not isinstance(n,int) or isinstance(n,bool) for n in (self.offset_x,self.offset_y)) or not 0 <= self.offset_x <= WIDTH-self.width or not 0 <= self.offset_y <= HEIGHT-self.height:
                 raise ValueError("Stored placement must stay inside the panel")
         if self.pixel_format not in PIXEL_FORMAT_IDS:
-            raise ValueError("Pixel format must be rgb888, rgb565 or jpeg")
+            raise ValueError("Pixel format must be rgb565 or jpeg")
         if not isinstance(self.jpeg_quality, int) or isinstance(self.jpeg_quality, bool) or not 0 <= self.jpeg_quality <= 95:
             raise ValueError("Stored JPEG quality must be an integer from 0 (unknown) to 95")
         if self.pixel_format != "jpeg" and self.jpeg_quality:
@@ -211,10 +209,7 @@ class VideoMetadata:
         if fmt == 3:
             pixel_format = "jpeg"
         else:
-            if fmt == 2:
-                pixel_format = "rgb565"
-            else:
-                pixel_format = "rgb888"
+            pixel_format = "rgb565"
         if fmt == 3:
             encoded_bytes = payload
         else:
@@ -254,11 +249,11 @@ def find_ffmpeg_executable(explicit: str | None = None) -> str:
 # Reads exactly one raw video frame from the conversion process.
 #
 # @param stream Open binary stream from which frame bytes are read.
-# @param frame_bytes Exact number of RGB888 bytes expected for one raw frame.
+# @param frame_bytes Exact number of source RGB bytes expected for one raw frame.
 #
-# @return bytes - A complete RGB888 frame; truncated frames raise an exception.
+# @return bytes - A complete source RGB frame; truncated frames raise an exception.
 # @return b"" - The stream ended cleanly before the next frame started.
-def read_rgb888_frame(stream, frame_bytes: int = FRAME_BYTES) -> bytes:
+def ReadSourceFrame(stream, frame_bytes: int = SOURCE_FRAME_BYTES) -> bytes:
     chunks = bytearray()
     while len(chunks) < frame_bytes:
         part = stream.read(frame_bytes - len(chunks))
@@ -276,7 +271,7 @@ def read_rgb888_frame(stream, frame_bytes: int = FRAME_BYTES) -> bytes:
 #
 # @return tuple - Frame bytes, fitted width and fitted height in pixels.
 # @return None - The stream ended cleanly before the next fitted frame.
-def read_fitted_rgb888_frame(stream):
+def ReadFittedSourceFrame(stream):
     """Read one FFmpeg P6 frame with its scaled dimensions, without buffering a video."""
     header_bytes = 0
     # Reads the next non-comment token from the fitted-frame stream.
@@ -315,23 +310,23 @@ def read_fitted_rgb888_frame(stream):
     width, height, maximum = int(token()), int(token()), int(token())
     if not 1 <= width <= WIDTH or not 1 <= height <= HEIGHT or maximum != 255:
         raise RuntimeError("Invalid fitted frame dimensions")
-    frame = read_rgb888_frame(stream, width*height*3)
+    frame = ReadSourceFrame(stream, width*height*SOURCE_CHANNEL_COUNT)
     if not frame:
         raise RuntimeError("Missing fitted frame pixels")
     return frame, width, height
 
 
-# Packs RGB888 frame bytes into little-endian RGB565 pixels.
+# Packs source RGB frame bytes into little-endian RGB565 pixels.
 #
-# @param frame Raw RGB888 frame or encoded JPEG frame being processed.
+# @param frame Raw source RGB frame or encoded JPEG frame being processed.
 #
-# @return value - Little-endian RGB565 pixel bytes converted from the RGB888 source.
-def convert_rgb888_to_rgb565(frame: bytes) -> bytes:
+# @return value - Little-endian RGB565 pixel bytes converted from the source RGB source.
+def PackSourceFrameRgb565(frame: bytes) -> bytes:
     """Canonical RGB -> little-endian R5G6B5, without changing wiring correction."""
-    if len(frame) % 3:
-        raise ValueError("RGB888 input must contain complete pixels")
+    if len(frame) % SOURCE_CHANNEL_COUNT:
+        raise ValueError("source RGB input must contain complete pixels")
     words = array("H", ((frame[i] >> 3) << 11 | (frame[i+1] >> 2) << 5 | frame[i+2] >> 3
-                        for i in range(0, len(frame), 3)))
+                        for i in range(0, len(frame), SOURCE_CHANNEL_COUNT)))
     if sys.byteorder != "little":
         words.byteswap()
     return words.tobytes()
@@ -348,7 +343,7 @@ def convert_rgb888_to_rgb565(frame: bytes) -> bytes:
 #                a duration cap.
 # @param ping_pong Whether playback reverses at its endpoints; None preserves the prepared
 #                  setting.
-# @param pixel_format Stored pixel format: rgb888, rgb565 or jpeg.
+# @param pixel_format Stored pixel format: rgb565 or jpeg.
 # @param jpeg_quality JPEG encoder quality, from 1 to 95.
 # @param sizing Aspect-ratio mode: crop fills the panel; fit preserves the entire source
 #               image.
@@ -356,7 +351,7 @@ def convert_rgb888_to_rgb565(frame: bytes) -> bytes:
 # @return value - Descriptor of the validated prepared video written to the output file.
 def prepare_video(source: Path, output: Path, fps: Fraction, *, ffmpeg: str | None = None,
                   overwrite: bool = False, seconds: float | None = None,
-                  ping_pong: bool = False, pixel_format: str = "rgb888",
+                  ping_pong: bool = False, pixel_format: str = "rgb565",
                   jpeg_quality: int = JPEG_QUALITY, sizing: str = "crop") -> VideoMetadata:
     if sizing not in ("crop", "fit"):
         raise ValueError("Sizing must be crop or fit")
@@ -413,7 +408,7 @@ def prepare_video(source: Path, output: Path, fps: Fraction, *, ffmpeg: str | No
             try:
                 while True:
                     if sizing == "fit":
-                        item = read_fitted_rgb888_frame(process.stdout)
+                        item = ReadFittedSourceFrame(process.stdout)
                         if item is None:
                             break
                         frame, frame_width, frame_height = item
@@ -421,11 +416,11 @@ def prepare_video(source: Path, output: Path, fps: Fraction, *, ffmpeg: str | No
                             raise ValueError("Video dimensions changed during conversion")
                         width, height = frame_width, frame_height
                     else:
-                        frame = read_rgb888_frame(process.stdout)
+                        frame = ReadSourceFrame(process.stdout)
                         if not frame:
                             break
                     if pixel_format == "rgb565":
-                        frame = convert_rgb888_to_rgb565(frame)
+                        frame = PackSourceFrameRgb565(frame)
                     count += 1
                     if pixel_format == "jpeg":
                         from PIL import Image

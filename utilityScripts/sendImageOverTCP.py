@@ -30,11 +30,23 @@ SIZING_MODE = "crop"  # "fit" saves only the fitted area through the HTTP photo 
 HTTP_PORT = 80
 
 
+# Packs an image into canonical little-endian RGB565 bytes for storage and transport.
+#
+# @param image Source Pillow image with RGB channels.
+#
+# @return bytes - Two bytes per pixel in row-major order.
+def PackPhotoPixels(image: Image.Image) -> bytes:
+    pixels = bytearray(image.width * image.height * 2)
+    for index, (red, green, blue) in enumerate(image.getdata()):
+        struct.pack_into("<H", pixels, index * 2, (red >> 3) << 11 | (green >> 2) << 5 | blue >> 3)
+    return bytes(pixels)
+
+
 # Crops and resizes a photo into a full-panel RGB image.
 #
 # @param image_path Path to the source image.
 #
-# @return value - Full-panel RGB888 image bytes prepared for the photo upload protocol.
+# @return value - Full-panel RGB565 image bytes prepared for the photo upload protocol.
 def build_logical_image(image_path: str) -> bytes:
     image = Image.open(image_path).convert("RGB")
     image = ImageOps.fit(
@@ -43,7 +55,7 @@ def build_logical_image(image_path: str) -> bytes:
         method=Image.Resampling.LANCZOS,
         centering=(0.5, 0.5),
     )
-    return image.tobytes()  # row-major RGB, 3 bytes per pixel
+    return PackPhotoPixels(image)
 
 
 # Encodes a fitted photo with placement metadata and a library thumbnail.
@@ -59,7 +71,7 @@ def prepare_fitted_photo(image_path: str):
         scaled = source.resize(size, Image.Resampling.LANCZOS)
         fitted = Image.new("RGB", size, "black")
         fitted.paste(scaled, mask=scaled.getchannel("A"))
-    payload = fitted.tobytes()
+    payload = PackPhotoPixels(fitted)
     preview = Image.new("RGB", (LOGICAL_WIDTH, LOGICAL_HEIGHT), "black")
     preview.paste(fitted, ((LOGICAL_WIDTH-size[0])//2, (LOGICAL_HEIGHT-size[1])//2))
     thumbnail = bytearray(1024)
@@ -67,7 +79,7 @@ def prepare_fitted_photo(image_path: str):
         for x in range(16):
             r,g,b = preview.getpixel((x*8+4,y*8+4))
             struct.pack_into("<H", thumbnail, (y*16+x)*2, (r>>3)<<11 | (g>>2)<<5 | b>>3)
-    descriptor = struct.pack("<4sBBBBHHIIIQI", b"H75M",1,1,1,0,*size,1,0,1,len(payload),zlib.crc32(payload))
+    descriptor = struct.pack("<4sBBBBHHIIIQI", b"H75M",1,1,2,0,*size,1,0,1,len(payload),zlib.crc32(payload))
     name = Path(image_path).name.encode("ascii", "replace")[:63].ljust(64,b"\0")
     return descriptor + name + thumbnail, payload
 

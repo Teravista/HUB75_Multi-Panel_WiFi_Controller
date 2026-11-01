@@ -14,7 +14,7 @@
 #include "pico/sync.h"
 
 #include "hub75.hpp"
-#if CPU_FRAME_RGB565 && !defined(HUB75_MULTIPLEX_2_ROWS)
+#if !defined(HUB75_MULTIPLEX_2_ROWS)
 #error "The compact CPU frame currently requires HUB75_MULTIPLEX_2_ROWS"
 #endif
 #include "hub75.pio.h"
@@ -440,7 +440,7 @@ static void __not_in_flash_func(oen_finished_handler)()
     }
 #elif defined(HUB75_P10_3535_16X32_4S)
     // line wise BCM (Binary Coded Modulation)
-    // calls hub75_data_rgb888_set_shift more often than plane wise BCM
+    // calls the data-shift helper more often than plane wise BCM
 #if !HUB75_PREPARED_SCAN
     hub75_data_rgb_set_shift(pio_config.data_pio, pio_config.sm_data, pio_config.data_prog_offs, bit_plane);
 #endif
@@ -849,28 +849,34 @@ static inline uint32_t pack_lut_rgb_(uint32_t r, uint32_t g, uint32_t b, const u
 
 #if USE_PICO_GRAPHICS == true
 /**
- * @brief Update frame_buffer from PicoGraphics source (RGB888 / packed 32-bit),
- *        using accumulator temporal dithering while preserving the LUT mapping.
- *
- * @param src Graphics object to be updated - RGB888 format, 24-bits in uint32_t array
+ * Update the inactive scan allocation from the RGB565 graphics frame.
+ * The caller retains its source frame; publication still happens at a scan boundary.
  */
-__attribute__((optimize("unroll-loops"))) void update(
-    PicoGraphics const *graphics // Graphics object to be updated - RGB888 format, 24-bits in uint32_t array
-)
+__attribute__((optimize("unroll-loops"))) void update(PicoGraphics const *graphics)
 {
+    if (graphics->pen_type != PicoGraphics::PEN_RGB565) {
+        return;
+    }
 #if HUB75_PREPARED_SCAN
     PackedPanelFrame::Source source;
     source.pixels = graphics->frame_buffer;
-    if (graphics->pen_type == PicoGraphics::PEN_RGB565) {
-        source.format = PackedPanelFrame::SourceFormat::GraphicsRgb565;
-    } else if (graphics->pen_type == PicoGraphics::PEN_RGB888) {
-        source.format = PackedPanelFrame::SourceFormat::GraphicsRgb888;
-    } else {
-        return;
-    }
     if (!packed_panel_frame.Prepare(frame_buffer, packed_panel_frame.GetFrameWordCount(), source)) {
         return;
     }
+#else
+    const auto* pixels = static_cast<const uint16_t*>(graphics->frame_buffer);
+#if TEMPORAL_DITHERING == false
+    static constexpr auto tables = MakeDriver565Tables(lut);
+#endif
+    for (size_t i = 0; i < size_t(width) * height; ++i) {
+        const size_t destination = i < offset ? i * 2 : (i - offset) * 2 + 1;
+#if TEMPORAL_DITHERING == false
+        frame_buffer[destination] = PackDriverRGB565(pixels[i], tables);
+#else
+        frame_buffer[destination] = LUT_MAPPING(destination, ExpandDriverRGB565(pixels[i]));
+#endif
+    }
+#endif
     critical_section_enter_blocking(&frame_swap_critical_section);
     swap_pending = true;
     if (frame_buffer == frame_buffer1) {
@@ -879,247 +885,5 @@ __attribute__((optimize("unroll-loops"))) void update(
         frame_buffer = frame_buffer1;
     }
     critical_section_exit(&frame_swap_critical_section);
-    return;
-#else
-    if (graphics->pen_type == PicoGraphics::PEN_RGB565) {
-#if !defined(HUB75_MULTIPLEX_2_ROWS)
-        return; // RGB565 input currently supports the controller's two-row panels.
-#else
-        const auto* pixels = static_cast<const uint16_t*>(graphics->frame_buffer);
-#if TEMPORAL_DITHERING == false
-        // 512 bytes in flash avoid expanding each pixel and redoing gamma shifts.
-        static constexpr auto tables=MakeDriver565Tables(lut);
-#endif
-        for (size_t i = 0; i < size_t(width) * height; ++i) {
-            // HUB75_MULTIPLEX_2_ROWS: each row contains interleaved upper/lower pixels.
-            const size_t destination = (i < offset) ? i * 2 : (i - offset) * 2 + 1;
-#if TEMPORAL_DITHERING == false
-            frame_buffer[destination] = PackDriverRGB565(pixels[i],tables);
-#else
-            frame_buffer[destination] = LUT_MAPPING(destination,ExpandDriverRGB565(pixels[i]));
-#endif
-        }
-        critical_section_enter_blocking(&frame_swap_critical_section);
-        swap_pending = true;
-        frame_buffer = (frame_buffer == frame_buffer1) ? frame_buffer2 : frame_buffer1;
-        critical_section_exit(&frame_swap_critical_section);
-        return;
-#endif
-    }
-    if (graphics->pen_type != PicoGraphics::PEN_RGB888) return;
-
-    __attribute__((aligned(4))) uint32_t const *src = static_cast<uint32_t const *>(graphics->frame_buffer);
-
-#if defined(HUB75_MULTIPLEX_2_ROWS)
-    constexpr size_t pixels = MATRIX_PANEL_WIDTH * MATRIX_PANEL_HEIGHT;
-    for (size_t fb_index = 0, j = 0; fb_index < pixels; fb_index += 2, ++j)
-    {
-        frame_buffer[fb_index] = LUT_MAPPING(fb_index, src[j]);
-        frame_buffer[fb_index + 1] = LUT_MAPPING(fb_index + 1, src[j + offset]);
-    }
-#elif defined HUB75_P10_3535_16X32_4S
-    int line = 0;
-    int counter = 0;
-
-    constexpr int COLUMN_PAIRS = MATRIX_PANEL_WIDTH >> 1;
-    constexpr int HALF_PAIRS = COLUMN_PAIRS >> 1;
-
-    constexpr int PAIR_HALF_BIT = HALF_PAIRS;
-    constexpr int PAIR_HALF_SHIFT = __builtin_ctz(HALF_PAIRS);
-
-    constexpr int ROW_STRIDE = MATRIX_PANEL_WIDTH;
-    constexpr int ROWS_PER_GROUP = MATRIX_PANEL_HEIGHT / SCAN_GROUPS;
-    constexpr int GROUP_ROW_OFFSET = ROWS_PER_GROUP * ROW_STRIDE;
-    constexpr int HALF_PANEL_OFFSET = (MATRIX_PANEL_HEIGHT >> 1) * ROW_STRIDE;
-
-    constexpr int total_pairs = (MATRIX_PANEL_WIDTH * MATRIX_PANEL_HEIGHT) >> 1;
-
-    for (int j = 0, fb_index = 0; j < total_pairs; ++j, fb_index += 2)
-    {
-        int32_t index = !(j & PAIR_HALF_BIT) ? j - (line << PAIR_HALF_SHIFT)
-                                             : GROUP_ROW_OFFSET + j - ((line + 1) << PAIR_HALF_SHIFT);
-
-        frame_buffer[fb_index] = LUT_MAPPING(fb_index, src[index]);
-        frame_buffer[fb_index + 1] = LUT_MAPPING(fb_index + 1, src[index + HALF_PANEL_OFFSET]);
-
-        if (++counter >= COLUMN_PAIRS)
-        {
-            counter = 0;
-            ++line;
-        }
-    }
-#elif defined HUB75_P3_1415_16S_64X64_S31
-    constexpr uint total_pixels = MATRIX_PANEL_WIDTH * MATRIX_PANEL_HEIGHT;
-    constexpr uint line_offset = 2 * MATRIX_PANEL_WIDTH;
-
-    constexpr uint quarter = total_pixels >> 2;
-
-    uint quarter1 = 0 * quarter;
-    uint quarter2 = 1 * quarter;
-    uint quarter3 = 2 * quarter;
-    uint quarter4 = 3 * quarter;
-
-    uint p = 0; // per line pixel counter
-
-    // Number of logical rows processed
-    uint line = 0;
-
-    // Framebuffer write pointer
-    volatile uint32_t *dst = frame_buffer;
-
-    // Each iteration processes 4 physical rows (2 scan-row pairs)
-    while (line < (height >> 2))
-    {
-        ptrdiff_t fb_index = dst - frame_buffer;
-        // even src lines
-        dst[0] = LUT_MAPPING(fb_index, src[quarter2]);
-        quarter2++;
-        dst[1] = LUT_MAPPING(fb_index + 1, src[quarter4]);
-        quarter4++;
-        // odd src lines
-        dst[line_offset + 0] = LUT_MAPPING(fb_index + line_offset, src[quarter1]);
-        quarter1++;
-        dst[line_offset + 1] = LUT_MAPPING(fb_index + line_offset + 1, src[quarter3]);
-        quarter3++;
-
-        dst += 2;
-        p++;
-
-        // End of logical row
-        if (p == width)
-        {
-            p = 0;
-            line++;
-            dst += line_offset; // advance to next scan-row pair
-        }
-    }
-#endif
-
-    critical_section_enter_blocking(&frame_swap_critical_section);
-    swap_pending = true;
-    frame_buffer = (frame_buffer == frame_buffer1) ? frame_buffer2 : frame_buffer1;
-    critical_section_exit(&frame_swap_critical_section);
-#endif
 }
 #endif
-
-/**
- * @brief Updates the frame buffer with pixel data from the source array.
- *
- * This function takes a source array of pixel data and updates the frame buffer
- * with interleaved pixel values. The pixel values are gamma-corrected to 10 bits using a lookup table.
- *
- * @param src Graphics object to be updated - RGB888 format, 24-bits in uint32_t array
- */
-__attribute__((optimize("unroll-loops"))) void update_bgr(const uint8_t *src)
-{
-#if HUB75_PREPARED_SCAN
-    PackedPanelFrame::Source source;
-    source.pixels = src;
-    source.format = PackedPanelFrame::SourceFormat::Bgr888;
-    if (!packed_panel_frame.Prepare(frame_buffer, packed_panel_frame.GetFrameWordCount(), source)) {
-        return;
-    }
-    critical_section_enter_blocking(&frame_swap_critical_section);
-    swap_pending = true;
-    if (frame_buffer == frame_buffer1) {
-        frame_buffer = frame_buffer2;
-    } else {
-        frame_buffer = frame_buffer1;
-    }
-    critical_section_exit(&frame_swap_critical_section);
-    return;
-#else
-
-#ifdef HUB75_MULTIPLEX_2_ROWS
-    constexpr uint total_pixels = MATRIX_PANEL_WIDTH * MATRIX_PANEL_HEIGHT;
-    const uint rgb_offset = offset * 3;
-    for (size_t fb_index = 0, j = 0; fb_index < total_pixels; j += 3, fb_index += 2)
-    {
-        frame_buffer[fb_index] = LUT_MAPPING_RGB(fb_index, src[j], src[j + 1], src[j + 2]);
-        frame_buffer[fb_index + 1] = LUT_MAPPING_RGB((fb_index + 1), src[rgb_offset + j], src[rgb_offset + j + 1], src[rgb_offset + j + 2]);
-    }
-#elif defined HUB75_P10_3535_16X32_4S
-    int line = 0;
-    int counter = 0;
-
-    constexpr int COLUMN_PAIRS = MATRIX_PANEL_WIDTH >> 1;
-    constexpr int HALF_PAIRS = COLUMN_PAIRS >> 1;
-
-    constexpr int PAIR_HALF_BIT = HALF_PAIRS;
-    constexpr int PAIR_HALF_SHIFT = __builtin_ctz(HALF_PAIRS);
-
-    constexpr int ROW_STRIDE = MATRIX_PANEL_WIDTH;
-    constexpr int ROWS_PER_GROUP = MATRIX_PANEL_HEIGHT / SCAN_GROUPS;
-    constexpr int GROUP_ROW_OFFSET = ROWS_PER_GROUP * ROW_STRIDE;
-    constexpr int HALF_PANEL_OFFSET = ((MATRIX_PANEL_HEIGHT >> 1) * ROW_STRIDE) * 3;
-
-    constexpr int total_pairs = (MATRIX_PANEL_WIDTH * MATRIX_PANEL_HEIGHT) >> 1;
-
-    for (int j = 0, fb_index = 0; j < total_pairs; ++j, fb_index += 2)
-    {
-        int32_t index = !(j & PAIR_HALF_BIT) ? (j - (line << PAIR_HALF_SHIFT)) * 3
-                                             : (GROUP_ROW_OFFSET + j - ((line + 1) << PAIR_HALF_SHIFT)) * 3;
-
-        frame_buffer[fb_index] = LUT_MAPPING_RGB(fb_index, src[index], src[index + 1], src[index + 2]);
-        index += HALF_PANEL_OFFSET;
-        frame_buffer[fb_index + 1] = LUT_MAPPING_RGB(fb_index + 1, src[index], src[index + 1], src[index + 2]);
-
-        if (++counter >= COLUMN_PAIRS)
-        {
-            counter = 0;
-            ++line;
-        }
-    }
-#elif defined HUB75_P3_1415_16S_64X64_S31
-    constexpr uint total_pixels = MATRIX_PANEL_WIDTH * MATRIX_PANEL_HEIGHT;
-    constexpr uint line_width = 2 * MATRIX_PANEL_WIDTH;
-
-    constexpr uint quarter = (total_pixels >> 2) * 3;
-
-    uint quarter1 = 0 * quarter;
-    uint quarter2 = 1 * quarter;
-    uint quarter3 = 2 * quarter;
-    uint quarter4 = 3 * quarter;
-
-    uint p = 0; // per line pixel counter
-
-    // Number of logical rows processed
-    uint line = 0;
-
-    // Framebuffer write pointer
-    volatile uint32_t *dst = frame_buffer;
-
-    // Each iteration processes 4 physical rows (2 scan-row pairs)
-    while (line < (height >> 2))
-    {
-        ptrdiff_t fb_index = dst - frame_buffer;
-        // even src lines
-        dst[0] = LUT_MAPPING_RGB(fb_index, src[quarter2], src[quarter2 + 1], src[quarter2 + 2]);
-        quarter2 += 3;
-        dst[1] = LUT_MAPPING_RGB(fb_index + 1, src[quarter4], src[quarter4 + 1], src[quarter4 + 2]);
-        quarter4 += 3;
-        // odd src lines
-        dst[line_width + 0] = LUT_MAPPING_RGB(fb_index + line_width, src[quarter1], src[quarter1 + 1], src[quarter1 + 2]);
-        quarter1 += 3;
-        dst[line_width + 1] = LUT_MAPPING_RGB(fb_index + line_width + 1, src[quarter3], src[quarter3 + 1], src[quarter3 + 2]);
-        quarter3 += 3;
-
-        dst += 2;
-        p++;
-
-        // End of logical row
-        if (p == width)
-        {
-            p = 0;
-            line++;
-            dst += line_width; // advance to next scan-row pair
-        }
-    }
-#endif
-    critical_section_enter_blocking(&frame_swap_critical_section);
-    swap_pending = true;
-    frame_buffer = (frame_buffer == frame_buffer1) ? frame_buffer2 : frame_buffer1;
-    critical_section_exit(&frame_swap_critical_section);
-#endif
-}

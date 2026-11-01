@@ -1,6 +1,6 @@
 # Video upload and SD playback
 
-Python prepares RGB565, RGB888 or indexed JPEG frames and streams them to TCP port 5002.
+Python prepares RGB565 or indexed JPEG frames and streams them to TCP port 5002.
 Browser conversion uses HTTP port 80. Both paths wait for verified SD publication and
 select the saved library item; playback reads one checked frame at a time. Stored
 dimensions and placement follow the per-item descriptor.
@@ -69,7 +69,7 @@ reception/verification; panel scanning retains the last submitted driver buffer.
 or cancellation releases ownership and requests restoration of the selected usable
 library content.
 
-## Raw-video SD container, version 4 (RGB888 / RGB565)
+## Raw-video SD container, version 4 (RGB565)
 
 The legacy `BeginMediaSave` API uses alternating `LASTA.H75` / `LASTB.H75` generations
 and retains the previous valid generation during replacement. A partial upload begins
@@ -229,8 +229,8 @@ their existing stop-and-wait protocol and restart an interrupted payload.
 
 ## Python photo sizing
 
-`sendImageOverTCP.py` keeps its TCP RGB888 full-panel crop path. `--sizing fit` instead
-uses the HTTP photo-library transaction: it stores the fitted RGB888 rectangle, a filename
+`sendImageOverTCP.py` keeps its TCP RGB565 full-panel crop path. `--sizing fit` instead
+uses the HTTP photo-library transaction: it stores the fitted RGB565 rectangle, a filename
 label and thumbnail, then waits for verified publication. Configure `SIZING_MODE` at the
 top or pass `--sizing crop`/`--sizing fit`; `--http-port` defaults to 80. Client-side photo
 fitting respects orientation and renders transparent areas against black.

@@ -92,7 +92,7 @@ public:
 
     using ImageSource = bool (*)(void* context, uint8_t* pixels, size_t bytes, size_t offset);
 
-    // Saves a retained RGB888 photo with the default full-panel descriptor.
+    // Saves a retained RGB565 photo with the default full-panel descriptor.
     bool SaveLastImage(ImageSource source, void* context);
 
     // Saves a new retained photo while keeping the previous valid generation.
@@ -116,7 +116,7 @@ public:
     // Writes a new named photo without replacing an existing file.
     bool SaveImage(const char* name, const uint8_t* pixels, size_t bytes);
 
-    // Streams a named RGB888 photo and validates its metadata and checksum.
+    // Streams a named RGB565 photo and validates its metadata and checksum.
     bool ReadImage(const char* name, ImageSink sink, void* context, MediaMetadata* metadata = nullptr);
 
     // Starts an unpublished raw or indexed-JPEG video save while retaining the previous valid slot.
@@ -183,7 +183,7 @@ public:
     };
 
     // Reads and verifies one frame from the selected saved media.
-    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context, FrameReadTiming* timing = nullptr, PixelFormat jpegOutput = PixelFormat::RGB888, PreparedImageSink preparedSink = nullptr, ImageTile::Sink tileSink = nullptr);
+    bool ReadMediaFrame(uint32_t frameIndex, ImageSink sink, void* context, FrameReadTiming* timing = nullptr, PreparedImageSink preparedSink = nullptr, ImageTile::Sink tileSink = nullptr);
 
     // Closes the active playback file and clears its runtime state.
     void CloseMediaPlayback(void);

@@ -37,10 +37,10 @@ ID is not confirmation that the save has completed.
 Photo containers use a 1536-byte header, version 6 for raw pixels or 7 for indexed JPEG.
 Video headers are 512 bytes, version 8 for raw or 9 for indexed JPEG. Both extend the
 checked 64-byte media header with a name and a final header CRC. Raw frames retain their
-frame checksums; JPEG retains its checked index and frame records. RGB888, RGB565 and
+frame checksums; JPEG retains its checked index and frame records. RGB565 and
 baseline JPEG support full-panel or smaller placed rectangles.
 
-`SaveLibraryImage` streams the current RGB888 framebuffer, creates its thumbnail and
+`SaveLibraryImage` streams the current RGB565 framebuffer, creates its thumbnail and
 verifies the new photo without allocating another frame. The firmware saves each
 completed raw TCP photo once, before drawing the connection overlay. TCP video uploads
 publish independent library items. Completion selects the newly saved item. Legacy
@@ -50,7 +50,7 @@ permanent.
 
 ## RGB originals, previews and prepared display frames
 
-RGB565 and RGB888 library items retain three representations in one file:
+RGB565 library items retain three representations in one file:
 
 1. The unchanged original logical pixel payload, metadata and checksums.
 2. A 32 × 64 logical RGB565 preview, including black placement borders. Videos

@@ -7,7 +7,7 @@
     Borrows one tightly packed pixel rectangle inside a logical image.
 
     Coordinates are relative to the image before panel mapping or placement.
-    Pixel bytes use RGB888 channel order or little-endian RGB565. The producer
+    Pixel bytes use little-endian RGB565. The producer
     owns the pixels and may reuse them as soon as the synchronous sink returns.
     A tile is provisional until the enclosing frame passes its integrity checks.
 */

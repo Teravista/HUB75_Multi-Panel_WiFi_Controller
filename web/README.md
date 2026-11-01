@@ -18,7 +18,7 @@ bookkeeping are excluded.
 
 ## Photos and videos
 
-Choose a source, optionally enter its saved name, and select RGB565 (default), RGB888 or
+Choose a source, optionally enter its saved name, and select RGB565 (default) or
 JPEG. Blank names use the filename without its extension. JPEG quality defaults to 85
 and accepts 1–95. The browser prepares pixels rather than sending the original image or
 video file. Video controls add FPS (1–60), maximum source duration (0.1–600 seconds) and
@@ -42,7 +42,7 @@ removed after completion, cancellation or terminal failure. A paused resumable
 video retains its prepared data. Browser storage capacity can limit
 long clips.
 
-The legacy `POST /api/frame` endpoint accepts exactly 98,304 full-panel RGB888 bytes and
+The legacy `POST /api/frame` endpoint accepts exactly 65,536 full-panel little-endian RGB565 bytes and
 replies `ACK` after reception. Its SD save is attempted later by the main loop. HTTP and
 TCP uploads share framebuffer ownership. One HTTP client is accepted at a time;
 filesystem work runs in the foreground outside lwIP callbacks. Requests require a local
@@ -105,10 +105,10 @@ client-side operations. Browser clients retain the local-origin request checks.
 
 ## Summary updates
 
-Summary displays separate display/video FPS averages for the latest 30 seconds,
+Summary displays separate display/video FPS averages for the latest 10 seconds,
 plus RAM accounting, managed SD usage and card state. A photo shows display FPS;
 a video also shows the rate of distinct submitted frames. The startup averaging
-window grows to 30 seconds. The mode card also shows the displayed photo/slideshow
+window grows to 10 seconds. The mode card also shows the displayed photo/slideshow
 item or the first frame of the active video. Built-in content has no saved-media
 preview. Preview requests run when the displayed item or SD session changes; normal
 status polling retains the loaded image. **Refresh summary** reloads it explicitly.

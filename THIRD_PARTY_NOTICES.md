@@ -20,7 +20,7 @@ hooks and DMA completion before CRC-error retry.
 https://elm-chan.org/fsw/tjpgd/
 
 Copyright and redistribution notices are retained in `tjpgd.c` and `tjpgd.h`.
-Local decoder changes add entropy/chroma optimizations, direct RGB565 output,
+Local decoder changes add entropy/chroma optimizations, fixed direct RGB565 output,
 optional validation/timing hooks and RP2350 SRAM execution.
 
 ## JuPFu hub75

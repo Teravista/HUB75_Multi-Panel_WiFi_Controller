@@ -32,15 +32,11 @@
 #define PACKED_PANEL_565_RED_BLUE_VALUES 32u
 #define PACKED_PANEL_565_GREEN_VALUES 64u
 #define PACKED_PANEL_MAX_DEPTH 10u
-#define PACKED_PANEL_GREEN_SHIFT 8u
-#define PACKED_PANEL_RED_SHIFT 16u
-#define PACKED_PANEL_BYTE_MASK 255u
 #define PACKED_PANEL_565_RED_SHIFT 11u
 #define PACKED_PANEL_565_GREEN_SHIFT 5u
 #define PACKED_PANEL_565_GREEN_MASK 63u
 #define PACKED_PANEL_565_RED_BLUE_MASK 31u
 #define PACKED_PANEL_BYTE_BITS 8u
-#define PACKED_PANEL_RAW_PIXEL_BYTES 3u
 #define PACKED_PANEL_565_RED_BLUE_EXPAND_SHIFT 3u
 #define PACKED_PANEL_565_RED_BLUE_REPEAT_SHIFT 2u
 #define PACKED_PANEL_565_GREEN_EXPAND_SHIFT 2u
@@ -48,9 +44,6 @@
 #define PACKED_PANEL_565_PIXEL_MASK 65535u
 #define PACKED_PANEL_GREEN_BIT 1u
 #define PACKED_PANEL_BLUE_BIT 2u
-#define PACKED_PANEL_BGR_BLUE_BYTE 0u
-#define PACKED_PANEL_BGR_GREEN_BYTE 1u
-#define PACKED_PANEL_BGR_RED_BYTE 2u
 
 // Rotate the first chain only in dual-output mode to preserve the portrait panel arrangement.
 #ifndef PACKED_PANEL_DUAL_FIRST_OUTPUT_ROTATE_180
@@ -70,17 +63,10 @@
     column pairs share a word. A small gamma-spreading table avoids repeating color
     conversion during scans; there is no third image buffer or change to SD media.
     Preparation runs on the foreground core before the driver publishes the frame.
-    A dedicated RGB565 loop avoids format dispatch per pixel and can run from SRAM;
-    graphics RGB888 and raw BGR888 retain the generic source path.
+    A dedicated RGB565 loop avoids format dispatch per pixel and can run from SRAM.
 */
 class PackedPanelFrame {
 public:
-    enum class SourceFormat {
-        GraphicsRgb565,
-        GraphicsRgb888,
-        Bgr888
-    };
-
     struct Configuration {
         uint32_t frameWidth = 0;
         uint32_t frameHeight = 0;
@@ -91,7 +77,6 @@ public:
 
     struct Source {
         const void* pixels = nullptr;
-        SourceFormat format = SourceFormat::GraphicsRgb565;
     };
 
     // Initializes compact row geometry and the borrowed gamma mapping's spread table.
@@ -127,7 +112,5 @@ private:
     // Converts one graphics RGB565 value into spaced gamma bits without format dispatch.
     uint64_t ReadRgb565PixelBits(uint16_t pixel) const;
 
-    // Converts one RGB888 source pixel into gamma bits spaced across output planes.
-    uint64_t ReadRgb888PixelBits(const Source& source, size_t index) const;
 
 };

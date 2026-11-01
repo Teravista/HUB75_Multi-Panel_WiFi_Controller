@@ -286,7 +286,7 @@ FrameWork::ProcessPendingFramePixels (
         return;
     }
     part = std::min(maximum, count - done);
-    // DMA overlap can stop mid-buffer; never split RGB888, RGB565 or a native
+    // DMA overlap can stop mid-buffer; never split RGB565 or a native
     // four-byte CPU pixel when handing a fragment to its synchronous consumer.
     part -= part % pixelBytes;
     if (!part) {
@@ -480,7 +480,7 @@ ReadAndVerifyRawVideoFrame (
     }
     pending = {nullptr, 0, 0, 0, initialChecksum, sink, context, timing};
     pending.pixelBytes = pixelBytes;
-    static_assert(PlaybackChunkBytes % SD_SECTOR_BYTES == 0 && PlaybackChunkBytes % RGB888_PIXEL_BYTES == 0);
+    static_assert(PlaybackChunkBytes % SD_SECTOR_BYTES == 0 && PlaybackChunkBytes % RGB565_PIXEL_BYTES == 0);
     nextBuffer = 0;
     count = 0;
     for (offset = 0; read.result == FR_OK && offset < frameBytes;) {
@@ -781,7 +781,7 @@ ParallelDecode::DecodeJpegOnWorker (
     job->decoded = JpegFrameDecoder::Decode(ReadEncodedJpegInput, &(*job), JpegStream::WriteDecodedJpegPixels,
                                            &job->stream, job->width, job->height,
                                            readBuffer + JpegStream::BufferBytes, JpegStream::BufferBytes,
-                                           job->error, job->stages, job->clock, nullptr, job->rgb565, tileOutput);
+                                           job->error, job->stages, job->clock, nullptr, tileOutput);
     job->elapsedUs = to_us_since_boot(get_absolute_time()) - started;
 } // DecodeJpegOnWorker
 
@@ -805,7 +805,6 @@ ParallelDecode::DecodeJpegOnWorker (
     @param error Output JPEG decoder result code; JDR_OK indicates success.
     @param stages Optional output counters for individual JPEG decoder stages.
     @param clock Optional monotonic profiling clock returning microseconds.
-    @param rgb565 Whether decoded output uses RGB565 rather than RGB888 pixels.
     @param decodeUs Output time spent decoding, in microseconds.
     @param waitUs Output time spent waiting for encoded input, in microseconds.
     @param pipelineBytes Output number of encoded bytes handled through the parallel input pipe.
@@ -821,7 +820,6 @@ DecodeJpegParallel (
     int& error,
     JpegFrameDecoder::Profile* stages,
     JpegFrameDecoder::Clock clock,
-    bool rgb565,
     uint64_t& decodeUs,
     uint64_t& waitUs,
     uint32_t& pipelineBytes
@@ -835,7 +833,7 @@ DecodeJpegParallel (
     size_t bytes;
     uint64_t consumerWorkUs;
     uint64_t measuredConsumerUs;
-    ParallelDecode job{stream, width, height, error, stages, clock, rgb565};
+    ParallelDecode job{stream, width, height, error, stages, clock};
     /**
         Reads the next encoded JPEG input chunk into the pipeline buffer.
 
@@ -972,7 +970,7 @@ DecodeJpegParallel (
     A busy or unlaunched worker selects the synchronous decoder immediately. All producer
     reads stay on Core 0, and a failed read signals input completion before waiting for
     the worker to release its borrowed context. Pixel output remains provisional until
-    encoded length, CRC and the final JPEG end marker pass; no complete RGB888 frame is
+    encoded length, CRC and the final JPEG end marker pass; no complete RGB565 frame is
     allocated.
 
     @param file Open encoded record positioned just after its checked record header.
@@ -982,7 +980,6 @@ DecodeJpegParallel (
     @param sink Consumer of provisional decoded pixels, or null for validation.
     @param context Borrowed pixel-consumer context.
     @param timing Optional output counters for this record.
-    @param outputRGB565 True selects little-endian RGB565 output; false selects RGB888.
     @param payloadCrc Optional running payload CRC receiving every encoded frame byte.
 
     @param tileSink Optional whole-tile consumer; row delivery remains the fallback.
@@ -998,7 +995,6 @@ DecodeEncodedJpegFrame (
     MemoryManager::ImageSink sink,
     void* context,
     MemoryManager::FrameReadTiming* timing,
-    bool outputRGB565,
     uint32_t* payloadCrc,
     ImageTile::Sink tileSink
     )
@@ -1032,7 +1028,7 @@ DecodeEncodedJpegFrame (
     if ((sink || tileSink) && ReserveJpegDecodeWorker()) {
         usedCore1 = true;
         decoded = DecodeJpegParallel(stream, metadata.width, metadata.height, decoderError,
-                                     nullptr, nullptr, outputRGB565, decodeUs, waitUs, pipelineBytes);
+                                     nullptr, nullptr, decodeUs, waitUs, pipelineBytes);
     } else
     #endif
     {
@@ -1047,7 +1043,7 @@ DecodeEncodedJpegFrame (
         decoded = JpegFrameDecoder::Decode(JpegStream::ReadEncodedJpegInput, &stream,
                                           outputCallback, &stream, metadata.width, metadata.height,
                                           readBuffer + JpegStream::BufferBytes, JpegStream::BufferBytes,
-                                          decoderError, nullptr, nullptr, nullptr, outputRGB565, tileOutput);
+                                          decoderError, nullptr, nullptr, nullptr, tileOutput);
         decodeUs = to_us_since_boot(get_absolute_time()) - decodeStarted;
     }
 
@@ -1218,34 +1214,8 @@ ReadUnsigned32LittleEndian (
            (uint32_t(p[UINT32_BYTE_THREE_INDEX]) << WORD_BYTE_THREE_SHIFT);
 } // ReadUnsigned32LittleEndian
 
-/**
-    Builds a photo storage header with dimensions and payload checksum.
 
-    Encodes the fixed RGB888 photo format, logical panel dimensions and payload size in the
-    defined byte order. The supplied checksum covers the complete image payload. Constructing
-    this header performs no filesystem operation and does not imply the file has been saved.
 
-    @param header Buffer holding the storage or HTTP header.
-    @param checksum Expected CRC32 checksum of the media payload.
-*/
-void
-BuildPhotoStorageHeader (
-    uint8_t* header,
-    uint32_t checksum
-    )
-{
-    // These field offsets and little-endian values define the persistent binary format.
-    std::memcpy(header, "H75I", MEDIA_MAGIC_BYTES);
-    header[STORAGE_HEADER_VERSION_OFFSET] = STORAGE_VERSION_PHOTO; // File format version
-    header[PHOTO_HEADER_PIXEL_BYTES_OFFSET] = IMAGE_BYTES_PER_PIXEL;
-    header[PHOTO_HEADER_WIDTH_LOW_OFFSET] = uint8_t(LOGICAL_IMAGE_WIDTH);
-    header[PHOTO_HEADER_WIDTH_HIGH_OFFSET] = uint8_t(LOGICAL_IMAGE_WIDTH >> BITS_PER_BYTE);
-    header[PHOTO_HEADER_HEIGHT_LOW_OFFSET] = uint8_t(LOGICAL_IMAGE_HEIGHT);
-    header[PHOTO_HEADER_HEIGHT_HIGH_OFFSET] = uint8_t(LOGICAL_IMAGE_HEIGHT >> BITS_PER_BYTE);
-    header[PHOTO_HEADER_RESERVED_LOW_OFFSET] = header[PHOTO_HEADER_RESERVED_HIGH_OFFSET] = 0;
-    WriteUnsigned32LittleEndian(header + PHOTO_HEADER_PAYLOAD_SIZE_OFFSET, SOURCE_FRAME_SIZE_BYTES);
-    WriteUnsigned32LittleEndian(header + PHOTO_HEADER_CHECKSUM_OFFSET, checksum);
-} // BuildPhotoStorageHeader
 
 /**
     Builds a saved-photo header with its generation and checksum.
@@ -1284,9 +1254,8 @@ BuildSavedPhotoHeader (
 /**
     Validates a stored photo while streaming provisional pixel data.
 
-    Recognizes supported current and legacy photo headers, checks the declared file size and
-    reconstructs compatible metadata where older formats lack a descriptor. It then reads the
-    complete RGB888 payload in bounded chunks while accumulating the correct version-specific
+    Validates the versioned photo descriptor and declared file size before reading pixels. It then reads the
+    complete RGB565 payload in bounded chunks while accumulating the correct version-specific
     checksum.
 
     Sink calls run synchronously as chunks arrive, so their pixels remain provisional until the
@@ -1310,13 +1279,11 @@ ReadAndValidatePhotoFile (
 {
     SavedPhotoSlot slot;
     uint8_t header[LastHeaderBytes];
-    uint8_t expected[LegacyLastHeaderBytes];
     UINT count;
     size_t headerBytes;
     bool complete;
     uint32_t expectedCrc;
     uint32_t crc;
-    uint32_t checksumOffset;
     size_t offset;
     UINT bytes;
     FRESULT closeResult;
@@ -1337,21 +1304,14 @@ ReadAndValidatePhotoFile (
 
     // Validate the file header and declared size before accepting pixel data.
     std::memset(header, 0, sizeof(header));
-    std::memset(expected, 0, sizeof(expected));
     count = 0;
     headerBytes = 0;
     slot.result = f_read(&managerState.imageFile, header, STORAGE_HEADER_PREFIX_BYTES, &count);
     complete = slot.result == FR_OK && count == STORAGE_HEADER_PREFIX_BYTES;
     slot.error = "image header read failed";
     if (complete) {
-        if (!std::memcmp(header, "H75I", MEDIA_MAGIC_BYTES) &&
-            header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_PHOTO) {
-            headerBytes = HeaderBytes;
-        } else if (!std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
-                   header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LEGACY_SAVED_PHOTO) {
-            headerBytes = LegacyLastHeaderBytes;
-        } else if (!std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
-                   header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_SAVED_PHOTO) {
+        if (!std::memcmp(header, "H75L", MEDIA_MAGIC_BYTES) &&
+            header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_SAVED_PHOTO) {
             headerBytes = LastHeaderBytes;
         }
         slot.error = "invalid stored image header";
@@ -1382,32 +1342,8 @@ ReadAndValidatePhotoFile (
                     ~UpdateImageCrc32(STORAGE_CRC32_INITIAL_U, header, SAVED_PHOTO_HEADER_CRC_OFFSET) &&
                 MediaMetadataCodec::DecodeMediaDescriptor(header + STORAGE_HEADER_METADATA_OFFSET,
                                                           MediaMetadataCodec::HeaderBytes, slot.metadata) &&
-                slot.metadata.pixelFormat == PixelFormat::RGB888 &&
+                slot.metadata.pixelFormat == PixelFormat::RGB565 &&
                 slot.metadata.IsPhotoFor(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);
-        } else {
-            // Legacy files had no media type/FPS/format. They were
-            // single RGB888 panel photos, so synthesize that descriptor.
-            slot.metadata = MediaMetadata::Photo(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT);
-            BuildPhotoStorageHeader(expected,
-                                    ReadUnsigned32LittleEndian(header + PHOTO_HEADER_CHECKSUM_OFFSET));
-            if (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_LEGACY_SAVED_PHOTO) {
-                std::memcpy(expected, "H75L", MEDIA_MAGIC_BYTES);
-                expected[MEDIA_MAGIC_BYTES] = STORAGE_VERSION_LEGACY_SAVED_PHOTO;
-                slot.generation = ReadUnsigned32LittleEndian(header + PHOTO_LEGACY_GENERATION_OFFSET);
-                WriteUnsigned32LittleEndian(expected + PHOTO_LEGACY_GENERATION_OFFSET, slot.generation);
-                WriteUnsigned32LittleEndian(
-                    expected + PHOTO_LEGACY_CHECKSUM_OFFSET,
-                    ReadUnsigned32LittleEndian(header + PHOTO_LEGACY_CHECKSUM_OFFSET));
-                crc = UpdateImageCrc32(crc, header, PHOTO_LEGACY_CHECKSUM_OFFSET);
-            }
-            complete = !std::memcmp(header, expected, headerBytes);
-            checksumOffset = {};
-            if (header[STORAGE_HEADER_VERSION_OFFSET] == STORAGE_VERSION_PHOTO) {
-                checksumOffset = PHOTO_HEADER_CHECKSUM_OFFSET;
-            } else {
-                checksumOffset = PHOTO_LEGACY_CHECKSUM_OFFSET;
-            }
-            expectedCrc = ReadUnsigned32LittleEndian(header + checksumOffset);
         }
     }
 
@@ -1456,7 +1392,7 @@ ReadAndValidatePhotoFile (
     Reads and validates one retained photo, optionally delivering its pixels.
 
     Both retained slots use the same version-aware reader as named images.
-    Legacy files gain their known RGB888 photo descriptor without being rewritten.
+    Files require a supported descriptor before their pixels can be read.
 
     @param index Retained slot index, zero or one.
     @param sink Optional synchronous consumer; null performs validation only.
@@ -1520,8 +1456,8 @@ FindNewestSavedPhoto (
 
     @param index Destination slot index, zero or one.
     @param generation New generation number.
-    @param metadata Validated exact-panel RGB888 photo description.
-    @param source Synchronous stable RGB888 pixel producer.
+    @param metadata Validated exact-panel RGB565 photo description.
+    @param source Synchronous stable RGB565 pixel producer.
     @param context Borrowed source state for this save.
     @param result Output filesystem status for failure reporting.
 
@@ -1980,12 +1916,11 @@ InspectSavedMediaSlot (
 
     @param slot Checked JPEG slot metadata and payload offset.
     @param index Zero-based independently seekable frame.
-    @param sink Optional consumer of provisional RGB888 or RGB565 rows.
+    @param sink Optional consumer of provisional RGB565 rows.
     @param context Borrowed pixel-consumer state.
     @param inspecting Selects the startup inspection handle.
     @param verifying Selects the active unpublished save handle instead.
     @param timing Optional output counters for the bounded frame read.
-    @param outputRGB565 True selects RGB565 JPEG pixels; false selects RGB888.
 
     @param tileSink Optional whole-tile consumer; row delivery remains the fallback.
 
@@ -2000,7 +1935,6 @@ ReadAndVerifyJpegFrame (
     bool inspecting,
     bool verifying,
     MemoryManager::FrameReadTiming* timing,
-    bool outputRGB565,
     ImageTile::Sink tileSink
     )
 {
@@ -2087,7 +2021,7 @@ ReadAndVerifyJpegFrame (
 
     // Decode and checksum encoded bytes while preserving the existing strict index validation.
     decoded = MemoryStorage::DecodeEncodedJpegFrame(*file, slot.metadata, length, expectedCrc,
-                                                   sink, context, timing, outputRGB565, nullptr, tileSink);
+                                                   sink, context, timing, nullptr, tileSink);
     read = {decoded.complete, int(decoded.result), decoded.error};
     return read;
 } // ReadAndVerifyJpegFrame
@@ -3173,13 +3107,7 @@ PreviewSamplingContext::SamplePreviewPixels (
             y % LIBRARY_PREVIEW_SAMPLE_STEP != LIBRARY_PREVIEW_SAMPLE_CENTER) {
             continue;
         }
-        if (preview->pixelBytes == RGB565_PIXEL_BYTES) {
-            rgb = MediaMetadataCodec::ReadUnsigned16LittleEndian(bytes + i);
-        } else {
-            rgb = uint16_t((bytes[i] >> RGB565_RED_BLUE_REDUCE_SHIFT) << RGB565_RED_SHIFT |
-                           (bytes[i + 1] >> RGB565_GREEN_REDUCE_SHIFT) << RGB565_GREEN_SHIFT |
-                           bytes[i + RGB_PIXEL_BLUE_INDEX] >> RGB565_RED_BLUE_REDUCE_SHIFT);
-        }
+        rgb = MediaMetadataCodec::ReadUnsigned16LittleEndian(bytes + i);
         MediaMetadataCodec::WriteUnsigned16LittleEndian(
             preview->pixels +
                 ((y / LIBRARY_PREVIEW_SAMPLE_STEP) * MemoryManager::PreviewWidth + x / LIBRARY_PREVIEW_SAMPLE_STEP) *

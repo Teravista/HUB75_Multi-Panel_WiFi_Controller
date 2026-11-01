@@ -102,8 +102,7 @@ RgbMediaCopies::LayoutSignature (
     Builds bounded logical source rectangles and their packed physical destinations.
 
     Each logical panel is split into narrow column blocks. Rotation turns each into
-    a native rectangle small enough for the existing scratch buffer, including when
-    CPU pixels use four bytes. Only the image's occupied region is stored.
+    a native RGB565 rectangle small enough for the existing scratch buffer. Only the image's occupied region is stored.
 
     @return true - Every source pixel belongs to a bounded destination rectangle.
     @return false - Placement, geometry or workspace limits are unsupported.
@@ -193,7 +192,7 @@ RgbMediaCopies::FitsFileSize (
     uint64_t previewOffset;
     uint64_t nativeBytes;
 
-    if ((metadata.pixelFormat != PixelFormat::RGB888 && metadata.pixelFormat != PixelFormat::RGB565 &&
+    if ((metadata.pixelFormat != PixelFormat::RGB565 &&
          metadata.pixelFormat != PixelFormat::JPEG) ||
         !metadata.FitsPanel(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT) || !metadata.PayloadBytes(payload)) {
         return false;
@@ -253,10 +252,10 @@ RgbMediaCopies::Begin (
 
     Reset();
     result = FR_INVALID_PARAMETER;
-    if ((metadata.pixelFormat != PixelFormat::RGB888 && metadata.pixelFormat != PixelFormat::RGB565 &&
+    if ((metadata.pixelFormat != PixelFormat::RGB565 &&
          metadata.pixelFormat != PixelFormat::JPEG) ||
         !FitsFileSize(metadata, headerBytes) || !fileOpen || !path || std::strlen(path) >= sizeof(path_) ||
-        !workspace || capacity < RGB_COPIES_BLOCK_BYTES + RGB_COPIES_SOURCE_BLOCK_WIDTH * RGB888_PIXEL_BYTES ||
+        !workspace || capacity < RGB_COPIES_BLOCK_BYTES + RGB_COPIES_SOURCE_BLOCK_WIDTH * RGB565_PIXEL_BYTES ||
         (metadata.pixelFormat == PixelFormat::JPEG && capacity < RGB_COPIES_JPEG_WORK_OFFSET * 2u) ||
         headerBytes < RGB_COPIES_HEADER_RESERVE_BYTES + MEDIA_FILE_HEADER_BYTES) {
         return false;
@@ -358,7 +357,7 @@ RgbMediaCopies::PrepareRows (
     unsigned logicalX;
     unsigned logicalY;
     uint32_t rgb;
-    uint8_t channels[RGB888_PIXEL_BYTES];
+    uint8_t channels[RGB_CHANNEL_COUNT];
     uint16_t packed;
 
     source = &source_[region_];
@@ -393,15 +392,11 @@ RgbMediaCopies::PrepareRows (
         }
 
         for (pixel = 0; pixel < source->width; ++pixel) {
-            if (metadata_.pixelFormat == PixelFormat::RGB565) {
-                packed = MediaMetadataCodec::ReadUnsigned16LittleEndian(input + pixel * sourcePixelBytes);
-                rgb = CpuFrame::ExpandRgb565ToRgb888(packed);
-                channels[0] = uint8_t(rgb >> RGB888_RED_SHIFT);
-                channels[1] = uint8_t(rgb >> RGB888_GREEN_SHIFT);
-                channels[RGB_PIXEL_BLUE_INDEX] = uint8_t(rgb);
-            } else {
-                std::memcpy(channels, input + pixel * sourcePixelBytes, sizeof(channels));
-            }
+            packed = MediaMetadataCodec::ReadUnsigned16LittleEndian(input + pixel * sourcePixelBytes);
+            rgb = CpuFrame::ExpandRgb565Channels(packed);
+            channels[0] = uint8_t(rgb >> COLOR_RED_SHIFT);
+            channels[1] = uint8_t(rgb >> COLOR_GREEN_SHIFT);
+            channels[RGB_PIXEL_BLUE_INDEX] = uint8_t(rgb);
 
             CpuFrame::StoreRgbPixel(workspace_ + output, channels[IMAGE_RED_BYTE_OFFSET],
                 channels[IMAGE_GREEN_BYTE_OFFSET], channels[IMAGE_BLUE_BYTE_OFFSET]);
@@ -803,7 +798,7 @@ RgbMediaCopies::DecodeDescriptor (
     layout.displayOffset = MediaMetadataCodec::ReadUnsigned64LittleEndian(descriptor + RGB_COPIES_DISPLAY_OFFSET_FIELD);
     expectedPreview = (originalEnd + RGB_COPIES_SECTOR_BYTES - 1) / RGB_COPIES_SECTOR_BYTES * RGB_COPIES_SECTOR_BYTES;
     expectedEnd = layout.displayOffset + uint64_t(layout.frameBytes + RGB_COPIES_CHECKSUM_BYTES) * metadata.frameCount;
-    if ((layout.pixelBytes != RGB565_PIXEL_BYTES && layout.pixelBytes != sizeof(uint32_t)) ||
+    if (layout.pixelBytes != RGB565_PIXEL_BYTES ||
         !layout.regionCount || layout.regionCount > PREPARED_FRAME_MAX_REGIONS ||
         layout.frameBytes != uint32_t(metadata.width) * metadata.height * layout.pixelBytes ||
         layout.previewOffset != expectedPreview || layout.displayOffset != expectedPreview + RGB_COPIES_PREVIEW_BYTES ||
@@ -995,15 +990,15 @@ RgbMediaCopies::ReadJpegInput (
 } // ReadJpegInput
 
 /**
-    Samples decoded RGB888 fragments directly into the small logical preview.
+    Samples decoded RGB565 fragments directly into the small logical preview.
 
     The JPEG decoder supplies MCU row fragments with absolute logical offsets.
     Only preview sample centers are retained; placement leaves the other preview
     pixels black. No full decoded image or corrected playback pixels are stored.
 
     @param context Borrowed preparation owner under exclusive storage access.
-    @param bytes Logical RGB888 fragment from the first JPEG frame.
-    @param count Complete RGB888 bytes in the fragment.
+    @param bytes Logical RGB565 fragment from the first JPEG frame.
+    @param count Complete RGB565 bytes in the fragment.
     @param offset Byte position inside the decoded logical image.
 
     @return true - The fragment was validated and its preview samples retained.
@@ -1028,26 +1023,26 @@ RgbMediaCopies::ConsumeJpegPixels (
     uint16_t packed;
 
     copies = static_cast<RgbMediaCopies*>(context);
-    if (!bytes || !count || count % RGB888_PIXEL_BYTES || offset % RGB888_PIXEL_BYTES ||
-        offset + count > uint64_t(copies->metadata_.width) * copies->metadata_.height * RGB888_PIXEL_BYTES) {
+    if (!bytes || !count || count % RGB565_PIXEL_BYTES || offset % RGB565_PIXEL_BYTES ||
+        offset + count > uint64_t(copies->metadata_.width) * copies->metadata_.height * RGB565_PIXEL_BYTES) {
         return false;
     }
-    pixel = offset / RGB888_PIXEL_BYTES;
+    pixel = offset / RGB565_PIXEL_BYTES;
     x = pixel % copies->metadata_.width;
     y = pixel / copies->metadata_.width;
-    if (x + count / RGB888_PIXEL_BYTES > copies->metadata_.width) {
+    if (x + count / RGB565_PIXEL_BYTES > copies->metadata_.width) {
         return false;
     }
     copies->jpegDecodedBytes_ += count;
 
     logicalY = y + copies->metadata_.Top(LOGICAL_IMAGE_HEIGHT);
     if (logicalY % RGB_COPIES_PREVIEW_STEP == RGB_COPIES_PREVIEW_CENTER) {
-        for (input = 0; input < count; input += RGB888_PIXEL_BYTES) {
-            logicalX = x + input / RGB888_PIXEL_BYTES + copies->metadata_.Left(LOGICAL_IMAGE_WIDTH);
+        for (input = 0; input < count; input += RGB565_PIXEL_BYTES) {
+            logicalX = x + input / RGB565_PIXEL_BYTES + copies->metadata_.Left(LOGICAL_IMAGE_WIDTH);
             if (logicalX % RGB_COPIES_PREVIEW_STEP == RGB_COPIES_PREVIEW_CENTER) {
                 previewOffset = (logicalY / RGB_COPIES_PREVIEW_STEP * RGB_COPIES_PREVIEW_WIDTH +
                     logicalX / RGB_COPIES_PREVIEW_STEP) * RGB565_PIXEL_BYTES;
-                packed = CpuFrame::PackRgb565Pixel(bytes[input], bytes[input + 1], bytes[input + RGB_PIXEL_BLUE_INDEX]);
+                packed = MediaMetadataCodec::ReadUnsigned16LittleEndian(bytes + input);
                 MediaMetadataCodec::WriteUnsigned16LittleEndian(copies->preview_ + previewOffset, packed);
             }
         }
@@ -1139,7 +1134,7 @@ RgbMediaCopies::PrepareJpegPreview (
     result = jpegResult_;
     if (!decoded || result != FR_OK || jpegRemaining_ || ~jpegChecksum_ != checksum ||
         jpegLastWord_ != RGB_COPIES_JPEG_END_MARKER ||
-        jpegDecodedBytes_ != size_t(metadata_.width) * metadata_.height * RGB888_PIXEL_BYTES) {
+        jpegDecodedBytes_ != size_t(metadata_.width) * metadata_.height * RGB565_PIXEL_BYTES) {
         if (result == FR_OK) {
             result = FR_INVALID_OBJECT;
         }

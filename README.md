@@ -86,7 +86,7 @@ display and restoration after restart.
 
 ## Ways to Get Content Onto the Panel
 These Python scripts handle content:
-- `imageToRGB888ArrayConverter.py` / `mp4ToRGB888ArrayConverter.py` - convert an image or video into a C header with a byte array, included via `defines.h` under the `USE_ANIMATION` flag. This becomes the default image/animation flashed into firmware.
+- `imageToRGB565ArrayConverter.py` / `mp4ToRGB565ArrayConverter.py` - convert an image or video into a C header with a byte array, included via `defines.h` under the `USE_ANIMATION` flag. This becomes the default image/animation flashed into firmware.
 - `sendImageOverTCP.py` - uploads a full photo over TCP, or a compact fitted photo through HTTP.
 - `sendVideoOverTCP.py` - converts and uploads a video to microSD, waits for verification, then starts looping playback.
 
@@ -174,7 +174,7 @@ The `USE_ANIMATION` flag in `src/config/defines.h` controls what gets built into
 `0` builds a single still image, `1` builds a multi-frame animation.
 
 ## Flashing Your Own Image or Animation
-1. Run `imageToRGB888ArrayConverter.py` (still image) or `mp4ToRGB888ArrayConverter.py` (video/animation), pointing it at your source file and adjusting settings like animation delay/fps as needed.
+1. Run `imageToRGB565ArrayConverter.py` (still image) or `mp4ToRGB565ArrayConverter.py` (video/animation), pointing it at your source file and adjusting settings like animation delay/fps as needed.
 2. The script generates a `.h` file in `imagesVideos/`.
 3. `#include` that new file in `src/config/defines.h` under the `USE_ANIMATION` block - that's the only required change.
 
@@ -206,7 +206,7 @@ python utilityScripts/sendVideoOverTCP.py "clip.mp4" --fps 30 --seconds 10
 ```
 
 The video service uses TCP port 5002. Configure its target IP in the script or with
-`--ip`. The uploader prepares the selected RGB565/RGB888/JPEG encoding, sends bounded
+`--ip`. The uploader prepares the selected RGB565/JPEG encoding, sends bounded
 chunks and waits for **Saved and verified**. The Pico selects the saved clip for looping
 playback and restores the selection after restart. `--seconds` limits source conversion;
 `--output "clip.h75v"` retains the prepared file for later uploads. See [video

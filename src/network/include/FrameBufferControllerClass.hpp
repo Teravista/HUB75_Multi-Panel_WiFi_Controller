@@ -26,7 +26,7 @@
     Connects photo reception and saved-media playback to the shared CPU framebuffer.
 
     FrameReceiver serializes uploads and rendering so foreground SD saves can read
-    stable pixels before status overlays are drawn. RGB888 network input is mapped
+    stable pixels before status overlays are drawn. RGB565 network input is mapped
     into panel order and the configured CPU pixel format; readback reverses that
     mapping for persistence. The controller owns TCP receive state and references
     a caller-owned framebuffer rather than allocating another full image. Exclusive
@@ -38,7 +38,7 @@ public:
     // Connects frame reception to the CPU framebuffer and display helpers.
     explicit FrameBufferController(PanelRenderer* helpers, unsigned char* buffer, bool holdCompletedFrame = false);
 
-    // Copies framebuffer pixels into RGB888 output for saving.
+    // Copies framebuffer pixels into logical RGB565 output for saving.
     bool ReadFramePixels(uint8_t* pixels, size_t bytes, size_t offset) const;
 
     // Reports whether a photo upload is currently receiving bytes.
@@ -53,13 +53,13 @@ public:
     // Returns the completed logical frame when one is available.
     const unsigned char* GetUploadedFrameData(void) const;
 
-    // Ownership tokens identify one complete logical RGB888 photo.
+    // Ownership tokens identify one complete logical RGB565 photo.
     using Token = FrameReceiver::Token;
 
     // Returns the revision of the most recently published frame.
     Token GetFrameRevision(void) const;
 
-    // Starts a full-panel RGB888 photo upload with default metadata.
+    // Starts a full-panel RGB565 photo upload with default metadata.
     Token BeginFrame(size_t bytes);
 
     // Starts a photo upload with the requested frame size and metadata.
@@ -102,7 +102,7 @@ public:
     void ClearStoredFrame(void);
 
     // Maps a stored pixel fragment into the placed CPU framebuffer region.
-    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset, PixelFormat format = PixelFormat::RGB888, uint16_t width = LOGICAL_IMAGE_WIDTH, uint16_t height = LOGICAL_IMAGE_HEIGHT, uint16_t left = MediaMetadata::AutoOffset, uint16_t top = MediaMetadata::AutoOffset);
+    bool WriteStoredFramePixels(const uint8_t* bytes, size_t count, size_t offset, PixelFormat format = PixelFormat::RGB565, uint16_t width = LOGICAL_IMAGE_WIDTH, uint16_t height = LOGICAL_IMAGE_HEIGHT, uint16_t left = MediaMetadata::AutoOffset, uint16_t top = MediaMetadata::AutoOffset);
 
     // Copies prepared native rectangles into the CPU framebuffer without pixel conversion.
     bool WritePreparedFramePixels(const uint8_t* bytes, size_t count, size_t offset, const PreparedFrameLayout& layout);
@@ -114,13 +114,11 @@ public:
     void PrepareStoredFrame(const MediaMetadata& metadata);
 
 private:
-#if CPU_FRAME_RGB565
     // Reorders one little-endian RGB565 pixel into native panel colour and byte order.
     static void StorePanelRgb565Pixel(uint8_t* destination, const uint8_t* source);
-#endif
 
     // Converts stored pixels and places them in the CPU framebuffer.
-    template <PixelFormat Format> static bool MapStoredPixels(PanelRenderer& helpers, uint8_t* buffer, const uint8_t* bytes, size_t count, size_t offset, uint16_t width, uint16_t height, uint16_t left, uint16_t top);
+    static bool MapStoredPixels(PanelRenderer& helpers, uint8_t* buffer, const uint8_t* bytes, size_t count, size_t offset, uint16_t width, uint16_t height, uint16_t left, uint16_t top);
 
     // Returns elapsed boot time in milliseconds for transport deadlines.
     static uint32_t GetPhotoUploadTimeMs(void);
@@ -150,7 +148,7 @@ private:
     bool m_complete = false;
     bool m_ackQueued = false;
     size_t m_acknowledged = 0;
-    // Converts one received RGB888 pixel into the CPU framebuffer format.
+    // Converts one received RGB565 pixel into the CPU framebuffer format.
     void DecodeAndStorePixel(const unsigned char* bytes, size_t index);
 
     // Forwards a received pixel callback to its upload controller.

@@ -3,7 +3,7 @@
 #include "http/api/include/httpControl.hpp"
 
 namespace HttpRequest {
-constexpr size_t kFrameBytes = 128 * 256 * 3;
+constexpr size_t kFrameBytes = 128 * 256 * 2;
 constexpr size_t kHeaderCapacity = 1536;
 enum class Route { Page, Frame, Video, Control, ApiInfo, Reject };
 

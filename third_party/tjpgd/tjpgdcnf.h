@@ -5,12 +5,8 @@
 #define	JD_SZBUF		512
 /* Specifies size of stream input buffer */
 
-#define JD_FORMAT		0
-/* Specifies output pixel format.
-/  0: RGB888 (24-bit/pix)
-/  1: RGB565 (16-bit/pix)
-/  2: Grayscale (8-bit/pix)
-*/
+#define JD_FORMAT		1
+/* Fixed little-endian RGB565 output (16 bits per pixel). */
 
 #define	JD_USE_SCALE	0
 /* Switches output descaling feature.
@@ -36,7 +32,7 @@
 #define JD_INLINE_ENTROPY 1
 #endif
 
-/* Reuse the identical chroma contribution of each 2x2 RGB888 pixel group. */
+/* Reuse the identical chroma contribution of each 2x2 decoded pixel group. */
 #ifndef JD_REUSE_CHROMA
 #define JD_REUSE_CHROMA 1
 #endif

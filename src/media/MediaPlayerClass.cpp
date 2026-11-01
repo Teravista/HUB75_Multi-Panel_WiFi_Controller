@@ -214,12 +214,7 @@ MediaPlayer::Consume (
     PixelFormat format;
 
     player = static_cast<MediaPlayer*>(context);
-    format = PixelFormat::RGB888;
-    if (player->metadata_.pixelFormat == PixelFormat::JPEG) {
-        format = DecodedFormat();
-    } else if (player->metadata_.pixelFormat == PixelFormat::RGB565) {
-        format = PixelFormat::RGB565;
-    }
+    format = PixelFormat::RGB565;
     return player->upload_.WriteStoredFramePixels(bytes, count, offset, format, player->metadata_.width,
                                                  player->metadata_.height, player->metadata_.offsetX, player->metadata_.offsetY);
 } // Consume
@@ -408,7 +403,7 @@ MediaPlayer::ReadFrame (
 {
     readingCorrectedCopy_ = false;
     upload_.PrepareStoredFrame(metadata_);
-    if (!memory_.ReadMediaFrame(frame, Consume, this, nullptr, DecodedFormat(), ConsumePrepared, ConsumeTile)) {
+    if (!memory_.ReadMediaFrame(frame, Consume, this, nullptr, ConsumePrepared, ConsumeTile)) {
         return false;
     }
 
@@ -417,23 +412,8 @@ MediaPlayer::ReadFrame (
     return true;
 } // ReadFrame
 
-/**
-    Selects the decoded pixel format used by the CPU framebuffer.
 
-    @return PixelFormat::RGB565 - The configured CPU framebuffer uses RGB565 pixels.
-    @return PixelFormat::RGB888 - The configured CPU framebuffer uses RGB888 pixels.
-*/
-PixelFormat
-MediaPlayer::DecodedFormat (
-    void
-    )
-{
-#if CPU_FRAME_RGB565
-    return PixelFormat::RGB565;
-#else
-    return PixelFormat::RGB888;
-#endif
-} // DecodedFormat
+
 
 
 /**

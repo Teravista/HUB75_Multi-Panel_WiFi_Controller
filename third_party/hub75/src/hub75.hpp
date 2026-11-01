@@ -141,7 +141,6 @@ void start_hub75_driver();
 // Foreground producers must wait before writing/submitting another frame.
 bool hub75_ready_for_update();
 extern volatile uint32_t hub75_frame_count;
-void update_bgr(const uint8_t *src);
 #if USE_PICO_GRAPHICS == true
 void update(PicoGraphics const *graphics);
 #endif

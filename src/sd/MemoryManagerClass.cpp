@@ -185,7 +185,7 @@ MemoryManager::GetLastError (
     Writes a new named photo without replacing an existing file.
 
     Creates a new file with exclusive-create semantics, builds the descriptor-bearing photo header and writes
-    the caller's stable RGB888 image in bounded chunks. The full payload checksum is computed
+    the caller's stable RGB565 image in bounded chunks. The full payload checksum is computed
     before writing, and successful completion includes closing the file. A failed or short write
     triggers cleanup instead of intentionally replacing an existing image. This is a synchronous
     foreground call.
@@ -194,7 +194,7 @@ MemoryManager::GetLastError (
     @param pixels Read-only image pixel data; keep it unchanged until the operation returns.
     @param bytes Number of bytes to process.
 
-    @return true - The new RGB888 file was written and closed successfully.
+    @return true - The new RGB565 file was written and closed successfully.
     @return false - Input is invalid, the name exists, storage is unavailable or file I/O
                     failed; GetLastError() gives the reason.
 */
@@ -277,7 +277,7 @@ MemoryManager::SaveImage (
 } // SaveImage
 
 /**
-    Streams a named RGB888 photo and validates its metadata and checksum.
+    Streams a named RGB565 photo and validates its metadata and checksum.
 
     Supports legacy named/retained headers and the descriptor-bearing v3 format.
     The shared reader checks the header and exact photo dimensions before pixels
@@ -285,7 +285,7 @@ MemoryManager::SaveImage (
     close succeed; the optional metadata output is published only after success.
 
     @param name Valid root filename to read.
-    @param sink Synchronous RGB888 pixel consumer.
+    @param sink Synchronous RGB565 pixel consumer.
     @param context Borrowed consumer state for the duration of the read.
     @param metadata Optional descriptor output; unchanged on failure.
 
@@ -334,12 +334,12 @@ MemoryManager::ReadImage (
 } // ReadImage
 
 /**
-    Saves a retained RGB888 photo with the default full-panel descriptor.
+    Saves a retained RGB565 photo with the default full-panel descriptor.
 
     Existing callers keep the raw-photo API. The metadata-aware overload performs
     all validation, locking, alternate-slot selection and readback verification.
 
-    @param source Stable logical RGB888 pixel producer.
+    @param source Stable logical RGB565 pixel producer.
     @param context Borrowed source state valid until the save completes.
 
     @return true - A new photo generation was saved and verified.
@@ -363,8 +363,8 @@ MemoryManager::SaveLastImage (
     save is reported successful. A source callback must not re-enter storage, and
     its image must stay stable throughout the call. No extra full frame is allocated.
 
-    @param metadata Exact-panel RGB888 photo descriptor to retain with the pixels.
-    @param source Stable logical RGB888 pixel producer.
+    @param metadata Exact-panel RGB565 photo descriptor to retain with the pixels.
+    @param source Stable logical RGB565 pixel producer.
     @param context Borrowed source state valid until this call completes.
 
     @return true - A new generation was written and verified.
@@ -394,7 +394,7 @@ MemoryManager::SaveLastImage (
     if (MemoryStorage::managerState.save.phase != MemoryStorage::SavePhase::Idle) {
         return ReportStorageFailure("media save in progress");
     }
-    if (metadata.pixelFormat != PixelFormat::RGB888 ||
+    if (metadata.pixelFormat != PixelFormat::RGB565 ||
         !metadata.IsPhotoFor(LOGICAL_IMAGE_WIDTH, LOGICAL_IMAGE_HEIGHT)) {
         return ReportStorageFailure("unsupported photo metadata");
     }
@@ -441,7 +441,7 @@ MemoryManager::SaveLastImage (
     synchronous read delivers its provisional pixels and verifies them again.
     Callers publish the frame only after this method succeeds.
 
-    @param sink Synchronous consumer of logical RGB888 fragments.
+    @param sink Synchronous consumer of logical RGB565 fragments.
     @param context Borrowed consumer state valid until this call completes.
     @param metadata Optional descriptor output; unchanged unless the read succeeds.
 
@@ -946,7 +946,6 @@ MemoryManager::OpenLastMedia (
     @param sink Synchronous consumer of provisional frame bytes.
     @param context Borrowed consumer state for this read.
     @param timing Optional output counters for this frame read.
-    @param jpegOutput Requested JPEG pixel format; raw media retains its stored format.
     @param preparedSink Optional native consumer; omitting it always reads the logical original.
     @param tileSink Optional JPEG rectangle consumer; raw media retains its fragment sink.
 
@@ -959,7 +958,6 @@ MemoryManager::ReadMediaFrame (
     ImageSink sink,
     void* context,
     FrameReadTiming* timing,
-    PixelFormat jpegOutput,
     PreparedImageSink preparedSink,
     ImageTile::Sink tileSink
     )
@@ -981,7 +979,7 @@ MemoryManager::ReadMediaFrame (
     if (!guard.acquired || !ready_ || !MemoryStorage::managerState.playback.open || MemoryStorage::managerState.save.phase != MemoryStorage::SavePhase::Idle) {
         return ReportStorageFailure("media playback not open");
     }
-    if (!sink || (jpegOutput != PixelFormat::RGB888 && jpegOutput != PixelFormat::RGB565) || frameIndex >= MemoryStorage::managerState.playback.description.metadata.frameCount) {
+    if (!sink || frameIndex >= MemoryStorage::managerState.playback.description.metadata.frameCount) {
         return ReportStorageFailure("invalid media frame request");
     }
     // Direction guides read-ahead without changing the selected frame or validation.
@@ -999,7 +997,7 @@ MemoryManager::ReadMediaFrame (
             native, frameIndex, MemoryStorage::PreparedSinkContext::DeliverPreparedPixels, &nativeConsumer, timing);
         read = {nativeResult.complete, int(nativeResult.result), nativeResult.error};
     } else if (MemoryStorage::managerState.playback.description.indexedJpeg) {
-        read = MemoryStorage::ReadAndVerifyJpegFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, false, timing, jpegOutput == PixelFormat::RGB565, tileSink);
+        read = MemoryStorage::ReadAndVerifyJpegFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, false, timing, tileSink);
     } else {
         read = MemoryStorage::ReadAndVerifyRawVideoFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, timing);
     }
@@ -1121,7 +1119,7 @@ MemoryManager::VerifyJpegSaveStep (
     // Validate encoded bytes and update both CRCs through the same bounded input stream.
     frame = MemoryStorage::DecodeEncodedJpegFrame(
         MemoryStorage::managerState.mediaFile, slot.metadata, entry.length, checksum, nullptr, nullptr,
-        nullptr, false, &MemoryStorage::managerState.save.verifyCrc);
+        nullptr, &MemoryStorage::managerState.save.verifyCrc);
     if (!frame.complete) {
         return ReportStorageFailure(frame.error, frame.result);
     }
@@ -1708,17 +1706,15 @@ MemoryManager::SaveLibraryImage (
                 return ReportStorageFailure("image source failed");
             }
             crc = MemoryStorage::UpdateImageCrc32(crc, MemoryStorage::managerState.readBuffer, count);
-            for (i = 0; i < count; i += RGB888_PIXEL_BYTES) {
-                pixel = (offset + i) / RGB888_PIXEL_BYTES;
+            for (i = 0; i < count; i += RGB565_PIXEL_BYTES) {
+                pixel = (offset + i) / RGB565_PIXEL_BYTES;
                 x = pixel % LOGICAL_IMAGE_WIDTH;
                 y = pixel / LOGICAL_IMAGE_WIDTH;
                 if (x % LIBRARY_THUMBNAIL_SAMPLE_STEP != LIBRARY_THUMBNAIL_SAMPLE_CENTER ||
                     y % LIBRARY_THUMBNAIL_SAMPLE_STEP != LIBRARY_THUMBNAIL_SAMPLE_CENTER) {
                     continue;
                 }
-                word = uint16_t((MemoryStorage::managerState.readBuffer[i] >> RGB565_RED_BLUE_REDUCE_SHIFT) << RGB565_RED_SHIFT |
-                             (MemoryStorage::managerState.readBuffer[i + 1] >> RGB565_GREEN_REDUCE_SHIFT) << RGB565_GREEN_SHIFT |
-                             MemoryStorage::managerState.readBuffer[i + RGB_PIXEL_BLUE_INDEX] >> RGB565_RED_BLUE_REDUCE_SHIFT);
+                word = MediaMetadataCodec::ReadUnsigned16LittleEndian(MemoryStorage::managerState.readBuffer + i);
                 MediaMetadataCodec::WriteUnsigned16LittleEndian(
                     thumbnail + ((y / LIBRARY_THUMBNAIL_SAMPLE_STEP) * LIBRARY_THUMBNAIL_WIDTH +
                                  x / LIBRARY_THUMBNAIL_SAMPLE_STEP) *
@@ -2277,7 +2273,7 @@ MemoryManager::ReadLibraryPreview (
     }
     pixelBytes = {};
     if (slot.indexedJpeg) {
-        pixelBytes = RGB888_PIXEL_BYTES;
+        pixelBytes = RGB565_PIXEL_BYTES;
     } else {
         pixelBytes = slot.metadata.PixelBytes();
     }

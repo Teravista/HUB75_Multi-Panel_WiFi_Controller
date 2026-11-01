@@ -41,14 +41,14 @@ SwapRgb565BytesForGraphics (
 } // SwapRgb565BytesForGraphics
 
 /**
-    Expands an RGB565 pixel into an RGB888 color.
+    Expands an RGB565 pixel into separate eight-bit color channels.
 
     @param pixel Packed RGB565 pixel value.
 
-    @return value - Expanded RGB888 color encoded as 0x00RRGGBB.
+    @return value - Expanded channels encoded as 0x00RRGGBB.
 */
 uint32_t
-ExpandRgb565ToRgb888 (
+ExpandRgb565Channels (
     uint16_t pixel
     )
 {
@@ -60,18 +60,16 @@ ExpandRgb565ToRgb888 (
     g = (pixel >> RGB565_GREEN_SHIFT) & RGB565_GREEN_MASK;
     b = pixel & RGB565_BLUE_MASK;
     return (((r << RGB565_RED_BLUE_EXPAND_SHIFT) | (r >> RGB565_RED_BLUE_REPLICATE_SHIFT))
-            << RGB888_RED_SHIFT) |
-           (((g << RGB565_GREEN_EXPAND_SHIFT) | (g >> RGB565_GREEN_REPLICATE_SHIFT)) << RGB888_GREEN_SHIFT) |
+            << COLOR_RED_SHIFT) |
+           (((g << RGB565_GREEN_EXPAND_SHIFT) | (g >> RGB565_GREEN_REPLICATE_SHIFT)) << COLOR_GREEN_SHIFT) |
            ((b << RGB565_RED_BLUE_EXPAND_SHIFT) | (b >> RGB565_RED_BLUE_REPLICATE_SHIFT));
-} // ExpandRgb565ToRgb888
+} // ExpandRgb565Channels
 
 /**
-    Writes an RGB color using the configured CPU framebuffer format.
+    Writes an RGB color into the RGB565 CPU framebuffer.
 
-    Selects the compiled CPU framebuffer format, then packs and stores one pixel using that
-    format's byte order. The RGB565 path reduces channel precision while the RGB888 path retains
-    the wider color value. The destination is caller-owned and must provide enough space for the
-    configured pixel size.
+    Packs and stores one RGB565 pixel in graphics byte order. The caller-owned
+    destination must provide two writable bytes.
 
     @param destination Writable destination buffer; the caller must provide sufficient storage.
     @param r Red channel intensity, from 0 to 255.
@@ -88,34 +86,26 @@ StoreRgbPixel (
 {
     Pixel pixel;
 
-#if CPU_FRAME_RGB565
     pixel = SwapRgb565BytesForGraphics(PackRgb565Pixel(r, g, b));
-#else
-    pixel = (uint32_t(r) << RGB888_RED_SHIFT) | (uint32_t(g) << RGB888_GREEN_SHIFT) | b;
-#endif
     std::memcpy(destination, &pixel, sizeof(pixel));
 } // StoreRgbPixel
 
 /**
-    Reads a CPU framebuffer pixel as an RGB888 color.
+    Reads a CPU framebuffer pixel as separate eight-bit color channels.
 
     @param source Read-only source bytes in the format required by this operation.
 
     @return value - The source CPU pixel expanded to 0x00RRGGBB.
 */
 uint32_t
-LoadRgbPixelAsRgb888 (
+LoadRgbPixelChannels (
     const uint8_t* source
     )
 {
     Pixel pixel;
 
     std::memcpy(&pixel, source, sizeof(pixel));
-#if CPU_FRAME_RGB565
-    return ExpandRgb565ToRgb888(SwapRgb565BytesForGraphics(pixel));
-#else
-    return pixel;
-#endif
-} // LoadRgbPixelAsRgb888
+    return ExpandRgb565Channels(SwapRgb565BytesForGraphics(pixel));
+} // LoadRgbPixelChannels
 
 } // namespace CpuFrame

@@ -1,14 +1,10 @@
 # Display and frame rates
 
-The CPU graphics frame is RGB565: 128 x 256 x 2 bytes = 64 KiB. Flashed images and raw
-TCP photo uploads use RGB888 input. Pixel conversion preserves the panel mapping and
-wiring correction, with 5/6/5-bit CPU colour precision. Set `CPU_FRAME_RGB565=0` in the
-CMake definitions to use the 128 KiB RGB888 CPU buffer instead. Both output modes
-use prepared scan bits: two 128.75 KiB scan buffers for one output, or two
-130 KiB scan buffers for two outputs, plus 2.75 KiB of gamma tables. The RGB888 CPU option needs an extra 64 KiB,
-so its RAM budget must
-also accommodate the playback cache and JPEG input slots; reduce
-`PlaybackPrefetch::Bytes` when that combination exceeds available RAM.
+The CPU graphics frame always uses RGB565: 128 × 256 × 2 bytes = 64 KiB.
+Raw uploads, SD originals, decoded JPEG tiles and flashed images use the same
+two-byte pixel precision. Prepared display copies retain panel placement and
+hardware channel correction. Two scan buffers use 128.75 KiB each for one output
+or 130 KiB each for two outputs, plus 2.75 KiB of gamma tables.
 
 The controller prepares gamma-corrected brightness-plane bits before scanning
 when temporal dithering is disabled. Foreground submission checks `hub75_ready_for_update()` before
@@ -25,20 +21,17 @@ the brightness planes. Packing extracts groups of five planes with native 32-bit
 operations, retaining ten-bit gamma and the existing scan layout. RGB565 uses a
 dedicated typed loop with inlined gamma reads and plane extraction. On Pico builds,
 `PACKED_PANEL_HOT_CODE_IN_RAM=1` places that loop in SRAM; zero retains flash
-execution. RGB888/BGR888 keep the generic fallback. Both paths produce the same
-scan words and allocate no additional image buffers. Native RGB565
+execution. Packing allocates no additional image buffers. Native RGB565
 gamma indices use an additional 768-byte lookup. JPEG output and original RGB565
 playback reorder five/six-bit channels directly into the CPU framebuffer, preserving
-the exact colours of the RGB888 expansion/repacking path.
+the configured hardware channel correction.
 Scan timing follows the driver's configured row order, bit-plane
 schedule and clock.
 
 Three-word row records have four-byte alignment and explicit size/offset checks.
 
-RGB565 CPU pixels use 16-bit (2-byte) values and only require two-byte alignment. The
-RGB888 CPU-frame option stores each 24-bit colour in a 32-bit (4-byte) value and uses
-128 KiB. RGB565 uses 64 KiB at 128 × 256 pixels. Driver scan buffers use 32-bit records
-and four-byte alignment.
+RGB565 CPU pixels use two-byte values and alignment. Driver scan buffers use
+32-bit records and four-byte alignment.
 
 ## Frame rates
 
@@ -48,7 +41,7 @@ saved rate; zero preserves the saved rate. Panel scan refresh and distinct video
 submission are separate counters. SD reads, decoding and rendering limit achievable new
 frames, so a requested rate is not a throughput guarantee.
 
-The Summary shows a rolling average over the latest 30 seconds, using the available
+The Summary shows a rolling average over the latest 10 seconds, using the available
 shorter window at startup. `FrameRateTracker` samples cumulative completed scans and
 distinct submitted video revisions independently. Reusing a held frame or redrawing
 the Wi-Fi overlay does not increase video FPS. Counters remain cumulative across
