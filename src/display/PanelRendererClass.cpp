@@ -1,4 +1,6 @@
-#include "display/include/PanelRendererClass.hpp"
+#include <include/PanelRendererClass.hpp>
+
+#include <cstring>
 #include "config/defines.h"
 
 #define IP_ROW_RIGHT 0b001
@@ -182,13 +184,17 @@ PanelRenderer::RenderLogicalImageToGraphics (
 } // RenderLogicalImageToGraphics
 
 /**
-    Draws independent home Wi-Fi and hotspot indicators at the bottom corners.
+    Draws changed home Wi-Fi and hotspot indicators at the bottom corners.
 
     The home address stays at the bottom-right and the hosted address stays at
     the bottom-left. A saved bottom strip restores the image before every redraw,
     so address changes and disconnects cannot leave old text behind. New source
     frames replace that strip before either indicator is painted. Exceptionally
     long address pairs use tighter character spacing to keep the labels apart.
+
+    A held image with identical labels, readiness and device dots keeps its existing
+    scan allocation. A new source frame always refreshes the overlay, even when
+    the network state is unchanged. Only drawn state enters the cache.
 
     @param graphics Destination graphics framebuffer for the panel chain.
     @param homeReady Whether home Wi-Fi and its local controller services are ready.
@@ -197,8 +203,11 @@ PanelRenderer::RenderLogicalImageToGraphics (
     @param hotspotIp Hosted network IPv4 text, independent of home association.
     @param freshFrame Whether a new base image was drawn before these overlays.
     @param hotspotDevices Optional WIFI_HOTSPOT_MAX_CLIENTS device-state entries.
+
+    @return true - The overlay was drawn and the CPU frame needs submission.
+    @return false - The held frame already contains this exact overlay.
 */
-void
+bool
 PanelRenderer::DrawNetworkStatus (
     CpuGraphics& graphics,
     bool homeReady,
@@ -216,6 +225,7 @@ PanelRenderer::DrawNetworkStatus (
     static CpuFrame::Pixel* savedFrameBuffer = nullptr;
     CpuFrame::Pixel* pixels = nullptr;
     bool captureBackground;
+    NetworkOverlayState overlay;
     int physicalX;
     int physicalY;
     int logicalX;
@@ -229,6 +239,29 @@ PanelRenderer::DrawNetworkStatus (
 
     top = NETWORK_OVERLAY_TOP;
     pixels = static_cast<CpuFrame::Pixel*>(graphics.frame_buffer) + graphics.layer_offset;
+    // Compare only visible network data, leaving routine status polling out of rendering.
+    overlay.homeReady = homeReady;
+    overlay.hotspotReady = hotspotReady;
+    if (homeIp) {
+        std::strncpy(overlay.homeIp, homeIp, sizeof(overlay.homeIp) - 1);
+    }
+    if (hotspotIp) {
+        std::strncpy(overlay.hotspotIp, hotspotIp, sizeof(overlay.hotspotIp) - 1);
+    }
+    if (hotspotDevices) {
+        std::memcpy(overlay.hotspotDevices, hotspotDevices, sizeof(overlay.hotspotDevices));
+    }
+    if (!freshFrame && overlayValid_ && overlayFrameBuffer_ == pixels &&
+        overlay.homeReady == networkOverlay_.homeReady &&
+        overlay.hotspotReady == networkOverlay_.hotspotReady &&
+        std::strcmp(overlay.homeIp, networkOverlay_.homeIp) == 0 &&
+        std::strcmp(overlay.hotspotIp, networkOverlay_.hotspotIp) == 0 &&
+        std::memcmp(overlay.hotspotDevices, networkOverlay_.hotspotDevices,
+            sizeof(overlay.hotspotDevices)) == 0) {
+        return false;
+    }
+
+    // Capture a new source background or restore the held image before changing its labels.
     captureBackground = freshFrame || savedFrameBuffer != pixels;
     backgroundIndex = 0;
     for (logicalY = top; logicalY < top + NETWORK_OVERLAY_HEIGHT; ++logicalY) {
@@ -256,6 +289,10 @@ PanelRenderer::DrawNetworkStatus (
     DrawNetworkIndicator(graphics, homeReady, homeIp, true, digitAdvance);
     DrawNetworkIndicator(graphics, hotspotReady, hotspotIp, false, digitAdvance);
     DrawHotspotDeviceDots(graphics, hotspotDevices);
+    networkOverlay_ = overlay;
+    overlayFrameBuffer_ = pixels;
+    overlayValid_ = true;
+    return true;
 } // DrawNetworkStatus
 
 /**

@@ -10,11 +10,30 @@
         "PICO_BOARD": "pico2_w",
         "CMAKE_BUILD_TYPE": "MinSizeRel",
         "CMAKE_C_FLAGS_MINSIZEREL": "-Os -DNDEBUG",
-        "CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -DNDEBUG"
+        "CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -DNDEBUG",
+        "HUB75_DOUBLE_PIO_DRIVE": "OFF"
+      }
+    },
+    {
+      "name": "dual-panel-pio",
+      "inherits": "web-upload",
+      "displayName": "Full controller with two parallel two-panel outputs",
+      "binaryDir": "${sourceDir}/build/dual-panel-pio",
+      "cacheVariables": {
+        "HUB75_DOUBLE_PIO_DRIVE": "ON"
       }
     }
   ],
   "buildPresets": [
-    { "name": "web-upload", "configurePreset": "web-upload", "jobs": 4 }
+    {
+      "name": "web-upload",
+      "configurePreset": "web-upload",
+      "jobs": 4
+    },
+    {
+      "name": "dual-panel-pio",
+      "configurePreset": "dual-panel-pio",
+      "jobs": 4
+    }
   ]
 }

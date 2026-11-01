@@ -1,0 +1,66 @@
+; Row sequencer adapted from Raspberry Pi HUB75 PIO.
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+; SPDX-License-Identifier: BSD-3-Clause
+;
+; Packed six-bit column pairs; five pairs per 30-bit FIFO payload.
+; CPU preparation preserves ten-bit gamma and the previous clocked pixel sequence.
+; Explicit row-finished IRQs and the post-latch row notification remain unchanged.
+; Pixel timing: six PIO clocks low, four high (10 per column).
+.pio_version 0
+
+.program parallel_panel_primary
+.side_set 1
+.wrap_target
+    pull                    side 0
+    out y, 32               side 0
+pixel_loop:
+    out pins, 6 [5]         side 0
+    nop [2]                 side 1
+    jmp y-- pixel_loop      side 1
+    mov osr, null           side 0
+    out null, 32            side 0
+    irq wait 0              side 0
+.wrap
+
+.program parallel_panel_data
+.side_set 1
+.wrap_target
+    pull                    side 0
+    out y, 32               side 0
+pixel_loop:
+    out isr, 3              side 0
+    in null, 3              side 0
+    in osr, 3               side 0
+    out null, 3             side 0
+    mov pins, isr [1]       side 0
+    nop [2]                 side 1
+    jmp y-- pixel_loop      side 1
+    mov osr, null           side 0
+    out null, 32            side 0
+    irq wait 0              side 0
+.wrap
+
+; Three-word record: row address, lit cycles, dark cycles.
+; IRQ1 follows the latch pulse and anti-ghost settling, before illumination.
+; The CPU may then load the next shift register while this output latch stays lit.
+.program parallel_panel_row
+.side_set 2
+.wrap_target
+    out pins, 5 [7]         side 0b10
+    out null, 27            side 0b10
+    ; Hold LAT high for the same guard interval used after its falling edge.
+    mov x, y [3]            side 0b11
+latch_pulse:
+    jmp x-- latch_pulse     side 0b11
+    mov x, y                side 0b10
+wait_loop:
+    jmp x-- wait_loop       side 0b10
+    irq 1                   side 0b10
+    out x, 32               side 0b10
+lit_loop:
+    jmp x-- lit_loop        side 0b00
+    out x, 32               side 0b10
+dark_loop:
+    jmp x-- dark_loop       side 0b10
+    in x, 32                side 0b10
+.wrap

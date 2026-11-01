@@ -18,6 +18,21 @@
 #error "The compact CPU frame currently requires HUB75_MULTIPLEX_2_ROWS"
 #endif
 #include "hub75.pio.h"
+#if DOUBLE_PIO_DRIVE && !HUB75_PREPARED_SCAN
+#error "Two outputs require the supported two-row, non-temporal scan path"
+#endif
+#if HUB75_PREPARED_SCAN
+#include <include/ParallelPanelScanClass.hpp>
+#include <include/PackedPanelFrameClass.hpp>
+#if !defined(HUB75_MULTIPLEX_2_ROWS)
+#error "Parallel panel driving requires HUB75_MULTIPLEX_2_ROWS"
+#endif
+static ParallelPanelScan parallel_panel_scan;
+static PackedPanelFrame packed_panel_frame;
+#if TEMPORAL_DITHERING != false
+#error "Prepared scan bits require the non-temporal gamma mapping"
+#endif
+#endif
 
 #include "rul6024.h"
 #include "fm6126a.h"
@@ -354,6 +369,19 @@ static void init_accumulators(std::size_t pixel_count)
     acc_b.assign(pixel_count, 0);
 }
 
+#if HUB75_PREPARED_SCAN
+/**
+    Counts a prepared scan after its last row finishes the complete display period.
+*/
+static void
+__not_in_flash_func(ReportPreparedScanCompleted) (
+    void
+    )
+{
+    ++hub75_frame_count;
+} // ReportPreparedScanCompleted
+#endif
+
 /**
  * @brief Interrupt handler for the Output Enable (OEn) finished event.
  *
@@ -361,11 +389,15 @@ static void init_accumulators(std::size_t pixel_count)
  * It updates row addressing and bit-plane selection for the next frame,
  * modifies the PIO state machine instruction, and restarts DMA transfers
  * for pixel data to ensure continuous frame updates.
+ * In prepared mode this callback advances the next row after a confirmed latch;
+ * ReportPreparedScanCompleted counts the finished display period separately.
  */
 static void __not_in_flash_func(oen_finished_handler)()
 {
     // Clear the interrupt request for the finished DMA channel
+#if !HUB75_PREPARED_SCAN
     dma_channel_acknowledge_irq1(oen_finished_chan);
+#endif
 
     // Advance row addressing; reset and increment bit-plane if needed
 #if defined(HUB75_MULTIPLEX_2_ROWS)
@@ -378,10 +410,14 @@ static void __not_in_flash_func(oen_finished_handler)()
             bit_plane = 0;
 
             swap_dma_buffer_if_pending();
+#if !HUB75_PREPARED_SCAN
             ++hub75_frame_count;
+#endif
         }
         // Patch the PIO program to make it shift to the next bit plane
+#if !HUB75_PREPARED_SCAN
         hub75_data_rgb_set_shift(pio_config.data_pio, pio_config.sm_data, pio_config.data_prog_offs, bit_plane);
+#endif
     }
 #elif defined(HUB75_P3_1415_16S_64X64_S31)
     // plane wise BCM (Binary Coded Modulation)
@@ -393,15 +429,21 @@ static void __not_in_flash_func(oen_finished_handler)()
             bit_plane = 0;
 
             swap_dma_buffer_if_pending();
+#if !HUB75_PREPARED_SCAN
             ++hub75_frame_count;
+#endif
         }
         // Patch the PIO program to make it shift to the next bit plane
+#if !HUB75_PREPARED_SCAN
         hub75_data_rgb_set_shift(pio_config.data_pio, pio_config.sm_data, pio_config.data_prog_offs, bit_plane);
+#endif
     }
 #elif defined(HUB75_P10_3535_16X32_4S)
     // line wise BCM (Binary Coded Modulation)
     // calls hub75_data_rgb888_set_shift more often than plane wise BCM
+#if !HUB75_PREPARED_SCAN
     hub75_data_rgb_set_shift(pio_config.data_pio, pio_config.sm_data, pio_config.data_prog_offs, bit_plane);
+#endif
 
     if (++bit_plane >= BIT_DEPTH)
     {
@@ -411,11 +453,17 @@ static void __not_in_flash_func(oen_finished_handler)()
             row_address = 0;
 
             swap_dma_buffer_if_pending();
+#if !HUB75_PREPARED_SCAN
             ++hub75_frame_count;
+#endif
         }
     };
 #endif
 
+#if HUB75_PREPARED_SCAN
+    parallel_panel_scan.StartRow(dma_buffer, row_address, bit_plane,
+        lit_cycles[bit_plane], dark_cycles[bit_plane]);
+#else
     // Build the three-word OEn record for the next row/bit-plane and point
     // oen_chan at it.  The PIO state machine consumes all three words in order:
     //   word 0 — row address
@@ -437,6 +485,7 @@ static void __not_in_flash_func(oen_finished_handler)()
 #elif defined(HUB75_P10_3535_16X32_4S) || defined(HUB75_P3_1415_16S_64X64_S31)
     dma_channel_set_read_addr(pixel_chan, &dma_buffer[row_address * (width << 2)], true);
 #endif
+#endif
 }
 
 /**
@@ -454,8 +503,22 @@ void create_hub75_driver(uint w, uint h, uint panel_type = PANEL_TYPE, bool inve
     width = w;
     height = h;
 
+#if HUB75_PREPARED_SCAN
+    PackedPanelFrame::Configuration packedConfiguration;
+    packedConfiguration.frameWidth = width;
+    packedConfiguration.frameHeight = height;
+    packedConfiguration.outputCount = DISPLAY_PIO_OUTPUT_COUNT;
+    packedConfiguration.bitDepth = BIT_DEPTH;
+    packedConfiguration.gamma = lut;
+    if (!packed_panel_frame.Initialize(packedConfiguration)) {
+        panic("Invalid prepared HUB75 scan geometry/gamma");
+    }
+    frame_buffer1 = new uint32_t[packed_panel_frame.GetFrameWordCount()]();
+    frame_buffer2 = new uint32_t[packed_panel_frame.GetFrameWordCount()]();
+#else
     frame_buffer1 = new uint32_t[width * height](); // Allocate memory for frame buffer and zero-initialize
     frame_buffer2 = new uint32_t[width * height](); // Allocate memory for frame buffer and zero-initialize
+#endif
 
 #if defined(HUB75_MULTIPLEX_2_ROWS)
     offset = width * (height >> 1);
@@ -501,9 +564,14 @@ void start_hub75_driver()
     oen_data.lit_cycles = lit_cycles[bit_plane];
     oen_data.dark_cycles = dark_cycles[bit_plane];
 
+#if HUB75_PREPARED_SCAN
+    parallel_panel_scan.StartRow(dma_buffer, row_address, bit_plane,
+        lit_cycles[bit_plane], dark_cycles[bit_plane]);
+#else
     // Start DMA channels
     dma_channel_set_write_addr(oen_finished_chan, &oen_finished_data, true);
     dma_channel_set_read_addr(pixel_chan, dma_buffer, true);
+#endif
 }
 
 /**
@@ -515,6 +583,17 @@ void start_hub75_driver()
  */
 static void configure_pio(bool inverted_stb)
 {
+#if HUB75_PREPARED_SCAN
+    ParallelPanelScan::Configuration configuration;
+    configuration.frameWidth = width;
+    configuration.frameHeight = height;
+    configuration.outputCount = DISPLAY_PIO_OUTPUT_COUNT;
+    configuration.wordsPerLaneRow = packed_panel_frame.GetRowWordCount();
+    configuration.invertedLatch = inverted_stb;
+    configuration.prepareNextRow = oen_finished_handler;
+    configuration.scanFinished = ReportPreparedScanCompleted;
+    parallel_panel_scan.Initialize(configuration);
+#else
     // On RP2350B, GPIO 30-47 are only accessible via PIO2
     // Force both state machines onto PIO2
     if (!pio_claim_free_sm_and_add_program_for_gpio_range(
@@ -561,6 +640,7 @@ static void configure_pio(bool inverted_stb)
         hub75_row_inverted_program_init(pio_config.row_pio, pio_config.sm_row, pio_config.row_prog_offs, ROWSEL_BASE_PIN, ROWSEL_N_PINS, STROBE_PIN, wait_cycles);
     else
         hub75_row_program_init(pio_config.row_pio, pio_config.sm_row, pio_config.row_prog_offs, ROWSEL_BASE_PIN, ROWSEL_N_PINS, STROBE_PIN, wait_cycles);
+#endif
 }
 
 /**
@@ -571,10 +651,12 @@ static void configure_pio(bool inverted_stb)
  */
 static void configure_dma_channels()
 {
+#if !HUB75_PREPARED_SCAN
     pixel_chan = dma_claim_unused_channel(true);
     dummy_pixel_chan = dma_claim_unused_channel(true);
     oen_chan = dma_claim_unused_channel(true);
     oen_finished_chan = dma_claim_unused_channel(true);
+#endif
 }
 
 /**
@@ -630,6 +712,7 @@ static void dma_input_channel_setup(uint channel,
  */
 static void setup_dma_transfers()
 {
+#if !HUB75_PREPARED_SCAN
 #if defined(HUB75_MULTIPLEX_2_ROWS)
     dma_input_channel_setup(pixel_chan, width << 1, DMA_SIZE_32, true, dummy_pixel_chan, pio_config.data_pio, pio_config.sm_data);
 #elif defined(HUB75_P10_3535_16X32_4S) || defined(HUB75_P3_1415_16S_64X64_S31)
@@ -653,6 +736,7 @@ static void setup_dma_transfers()
     channel_config_set_write_increment(&oen_finished_config, false);
     channel_config_set_dreq(&oen_finished_config, pio_get_dreq(pio_config.row_pio, pio_config.sm_row, false));
     dma_channel_configure(oen_finished_chan, &oen_finished_config, &oen_finished_data, &pio_config.row_pio->rxf[pio_config.sm_row], dma_encode_transfer_count(1), false);
+#endif
 }
 
 /**
@@ -664,12 +748,14 @@ static void setup_dma_transfers()
  */
 static void setup_dma_irq()
 {
+#if !HUB75_PREPARED_SCAN
     irq_set_exclusive_handler(DMA_IRQ_1, oen_finished_handler);
     // Row restart is time-critical: let it preempt USB/timer foreground workers.
     // Core 1 radio firmware loading must not evict/stall this handler from XIP.
     irq_set_priority(DMA_IRQ_1, PICO_HIGHEST_IRQ_PRIORITY);
     dma_channel_set_irq1_enabled(oen_finished_chan, true);
     irq_set_enabled(DMA_IRQ_1, true);
+#endif
 }
 
 #if TEMPORAL_DITHERING != false
@@ -772,6 +858,29 @@ __attribute__((optimize("unroll-loops"))) void update(
     PicoGraphics const *graphics // Graphics object to be updated - RGB888 format, 24-bits in uint32_t array
 )
 {
+#if HUB75_PREPARED_SCAN
+    PackedPanelFrame::Source source;
+    source.pixels = graphics->frame_buffer;
+    if (graphics->pen_type == PicoGraphics::PEN_RGB565) {
+        source.format = PackedPanelFrame::SourceFormat::GraphicsRgb565;
+    } else if (graphics->pen_type == PicoGraphics::PEN_RGB888) {
+        source.format = PackedPanelFrame::SourceFormat::GraphicsRgb888;
+    } else {
+        return;
+    }
+    if (!packed_panel_frame.Prepare(frame_buffer, packed_panel_frame.GetFrameWordCount(), source)) {
+        return;
+    }
+    critical_section_enter_blocking(&frame_swap_critical_section);
+    swap_pending = true;
+    if (frame_buffer == frame_buffer1) {
+        frame_buffer = frame_buffer2;
+    } else {
+        frame_buffer = frame_buffer1;
+    }
+    critical_section_exit(&frame_swap_critical_section);
+    return;
+#else
     if (graphics->pen_type == PicoGraphics::PEN_RGB565) {
 #if !defined(HUB75_MULTIPLEX_2_ROWS)
         return; // RGB565 input currently supports the controller's two-row panels.
@@ -890,6 +999,7 @@ __attribute__((optimize("unroll-loops"))) void update(
     swap_pending = true;
     frame_buffer = (frame_buffer == frame_buffer1) ? frame_buffer2 : frame_buffer1;
     critical_section_exit(&frame_swap_critical_section);
+#endif
 }
 #endif
 
@@ -903,6 +1013,24 @@ __attribute__((optimize("unroll-loops"))) void update(
  */
 __attribute__((optimize("unroll-loops"))) void update_bgr(const uint8_t *src)
 {
+#if HUB75_PREPARED_SCAN
+    PackedPanelFrame::Source source;
+    source.pixels = src;
+    source.format = PackedPanelFrame::SourceFormat::Bgr888;
+    if (!packed_panel_frame.Prepare(frame_buffer, packed_panel_frame.GetFrameWordCount(), source)) {
+        return;
+    }
+    critical_section_enter_blocking(&frame_swap_critical_section);
+    swap_pending = true;
+    if (frame_buffer == frame_buffer1) {
+        frame_buffer = frame_buffer2;
+    } else {
+        frame_buffer = frame_buffer1;
+    }
+    critical_section_exit(&frame_swap_critical_section);
+    return;
+#else
+
 #ifdef HUB75_MULTIPLEX_2_ROWS
     constexpr uint total_pixels = MATRIX_PANEL_WIDTH * MATRIX_PANEL_HEIGHT;
     const uint rgb_offset = offset * 3;
@@ -993,4 +1121,5 @@ __attribute__((optimize("unroll-loops"))) void update_bgr(const uint8_t *src)
     swap_pending = true;
     frame_buffer = (frame_buffer == frame_buffer1) ? frame_buffer2 : frame_buffer1;
     critical_section_exit(&frame_swap_critical_section);
+#endif
 }

@@ -28,8 +28,8 @@ public:
     // Maps a logical image into the graphics buffer for the panel chain.
     void RenderLogicalImageToGraphics(CpuGraphics& graphics, const unsigned char* imageData);
 
-    // Draws independent home Wi-Fi and hotspot indicators at the bottom corners.
-    void DrawNetworkStatus(CpuGraphics& graphics, bool homeReady, const char* homeIp, bool hotspotReady, const char* hotspotIp, bool freshFrame = false, const uint8_t* hotspotDevices = nullptr);
+    // Draws changed home Wi-Fi and hotspot indicators at the bottom corners.
+    bool DrawNetworkStatus(CpuGraphics& graphics, bool homeReady, const char* homeIp, bool hotspotReady, const char* hotspotIp, bool freshFrame = false, const uint8_t* hotspotDevices = nullptr);
 
     // Advances one frame and reverses direction at each animation endpoint.
     size_t GetNextPingPongFrameIndex(size_t currentFrameIndex, bool& movingForward, size_t frameCount);
@@ -38,6 +38,18 @@ public:
     size_t GetNextAnimationFrameIndex(size_t currentFrameIndex, bool& animationMovingForward);
 
 private:
+    struct NetworkOverlayState {
+        bool homeReady = false;
+        bool hotspotReady = false;
+        char homeIp[IPV4_TEXT_BYTES]{};
+        char hotspotIp[IPV4_TEXT_BYTES]{};
+        uint8_t hotspotDevices[WIFI_HOTSPOT_MAX_CLIENTS]{};
+    };
+
+    NetworkOverlayState networkOverlay_;
+    const void* overlayFrameBuffer_ = nullptr;
+    bool overlayValid_ = false;
+
     static const uint8_t digitRows_[][IP_FONT_ROW_COUNT];
     static const uint8_t houseRows_[WIFI_ICON_HEIGHT];
     static const uint8_t antennaRows_[WIFI_ICON_HEIGHT];

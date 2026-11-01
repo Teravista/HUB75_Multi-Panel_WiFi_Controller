@@ -34,6 +34,23 @@ include(pico_sdk_import.cmake)
 
 project(hub75 C CXX ASM)
 option(HUB75_VERBOSE_LOGS "Enable verbose diagnostics and the startup serial delay" OFF)
+option(HUB75_DOUBLE_PIO_DRIVE "Drive two two-panel chains in parallel with normal controller services" OFF)
+
+# A source-header toggle must select the same geometry and files as the C++ guards.
+set(HUB75_DEFINES_FILE "${CMAKE_CURRENT_LIST_DIR}/src/config/defines.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${HUB75_DEFINES_FILE}")
+file(STRINGS "${HUB75_DEFINES_FILE}" HUB75_DOUBLE_PIO_DEFAULT_LINE
+    REGEX "^#[ \t]*define[ \t]+DOUBLE_PIO_DRIVE[ \t]+[01][ \t]*$")
+list(LENGTH HUB75_DOUBLE_PIO_DEFAULT_LINE HUB75_DOUBLE_PIO_DEFAULT_COUNT)
+if(NOT HUB75_DOUBLE_PIO_DEFAULT_COUNT EQUAL 1)
+    message(FATAL_ERROR "defines.h must contain one DOUBLE_PIO_DRIVE default set to 0 or 1.")
+endif()
+string(REGEX REPLACE ".*[ \t]([01])[ \t]*$" "\\1"
+    HUB75_DOUBLE_PIO_DEFAULT "${HUB75_DOUBLE_PIO_DEFAULT_LINE}")
+set(HUB75_DOUBLE_PIO_DRIVE_ACTIVE OFF)
+if(HUB75_DOUBLE_PIO_DRIVE OR HUB75_DOUBLE_PIO_DEFAULT STREQUAL "1")
+    set(HUB75_DOUBLE_PIO_DRIVE_ACTIVE ON)
+endif()
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -77,6 +94,11 @@ add_custom_command(
 # Add executable. Default name is the project name
 add_executable(hub75 mainEntry.cpp)
 
+if(HUB75_DOUBLE_PIO_DRIVE_ACTIVE)
+    target_compile_definitions(hub75 PRIVATE DOUBLE_PIO_DRIVE=1)
+endif()
+set(HUB75_CHAIN_WIDTH 512)
+
 pico_set_program_name(hub75 "hub75_demo")
 pico_set_program_version(hub75 "2.0")
 
@@ -95,7 +117,7 @@ set(PANEL_RUL6024 2)
 target_compile_definitions(hub75 PRIVATE
     PICO_RP2350A=0             # PICO_RP2350A=0` means not a RP2350A but a RP2350B microcontroller - uncomment for RP235xB microcontroller only!
     # USE_PICO_GRAPHICS=true      # set to false if you use hub75 as a library - any reference to pico_graphics is removed
-    MATRIX_PANEL_WIDTH=512       # your matrix panel width
+    MATRIX_PANEL_WIDTH=${HUB75_CHAIN_WIDTH} # physical scan-chain width
     MATRIX_PANEL_HEIGHT=64      # your matrix panel height
     # DATA_BASE_PIN=30            # base GPIO pin (aka start index) of R0, G0, B0, R1, G1, B1 GPIO pins
     # DATA_N_PINS=6               # number (count) of colour pins (usually 6)
@@ -134,6 +156,22 @@ target_compile_definitions(no-OS-FatFS-SD-SDIO-SPI-RPi-Pico INTERFACE
 target_compile_definitions(hub75 PRIVATE HUB75_VERBOSE_LOGS=$<BOOL:${HUB75_VERBOSE_LOGS}>)
 
 target_sources(hub75 PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/PanelRendererClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/cpuFrame.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rgb565.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp
+)
+
+# Prepared scan bits and display/load overlap apply to one or two outputs.
+target_sources(hub75 PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/ParallelPanelScanClass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/display/PackedPanelFrameClass.cpp)
+set_source_files_properties(src/display/PackedPanelFrameClass.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+pico_generate_pio_header(hub75 ${CMAKE_CURRENT_LIST_DIR}/src/display/parallelPanelData.pio)
+
+target_sources(hub75 PRIVATE
     ${NETWORK_CONFIG_HEADER}
     ${WEB_PAGE_HEADER}
 
@@ -141,9 +179,7 @@ target_sources(hub75 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/core/serialLog.cpp
 
     ${CMAKE_CURRENT_LIST_DIR}/src/display/FrameRateTrackerClass.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/display/PanelRendererClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/display/RenderPipelineClass.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/display/cpuFrame.cpp
 
     ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameBufferControllerClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/network/FrameReceiverClass.cpp
@@ -170,16 +206,12 @@ target_sources(hub75 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/media/mediaTransfer.cpp
 
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/MemoryManagerClass.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/sd/RgbMediaCopiesClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/PlaybackPrefetchClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryManagerPico.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/memoryStorage.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/RgbMediaCopiesClass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/storageCrc32.cpp
 
-    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/fm6126a.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/hub75.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rgb565.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/third_party/hub75/src/rul6024.cpp
     ${CMAKE_CURRENT_LIST_DIR}/third_party/tjpgd/tjpgd.c
 )
 

@@ -1,3 +1,5 @@
+#include <config/defines.h>
+
 #include "core/include/serialLog.hpp"
 #include <cstdint>
 #include "display/include/RenderPipelineClass.hpp"
@@ -6,7 +8,6 @@
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hub75.hpp"
-#include "config/defines.h"
 #include "display/include/PanelRendererClass.hpp"
 #include "network/include/FrameBufferControllerClass.hpp"
 #include "network/include/WifiConnectionClass.hpp"
@@ -16,9 +17,13 @@
 #include "media/include/MediaPlayerClass.hpp"
 #include "network/include/TcpVideoUploadClass.hpp"
 
-#define SERIAL_STATUS_LINE_BYTES 320
+#define SERIAL_STATUS_LINE_BYTES 384
 
-#define WIFI_STATE_MACHINE_REV "dual-wifi-client-dots"
+#if DOUBLE_PIO_DRIVE
+#define WIFI_STATE_MACHINE_REV "panel-dual-layout-v10-jpeg-buffered"
+#else
+#define WIFI_STATE_MACHINE_REV "panel-single-layout-v10-jpeg-buffered"
+#endif
 
 
 struct NetworkPauseContext {
@@ -49,6 +54,7 @@ struct RenderContext {
     uint32_t* attemptedPhotoRevision;
     const unsigned char** uploadedFrame;
     FrameBufferController::Token* displayedRevision;
+    bool submittedFrame = false;
 };
 
 /**
@@ -152,8 +158,10 @@ PrepareDisplayFrame (
 
     Runs only after the scanner accepts another frame. A changed source revision refreshes the
     small saved background beneath both network labels; overlay-only redraws restore that background.
-    The completed submission advances the distinct video-frame counter before the pipeline
-    releases CPU-frame ownership.
+    An unchanged held frame skips driver packing. An actual submission advances the
+    distinct video-frame counter before the pipeline releases CPU-frame ownership.
+    The loop yields briefly when no pixels changed, avoiding busy polling between
+    scheduled video frames while uploads retain their normal ownership boundary.
 
     @param opaque Borrowed foreground rendering context.
     @param scannerWaitUs Elapsed scanner wait in microseconds, supplied by the pipeline.
@@ -169,15 +177,21 @@ SubmitDisplayFrame (
 
     (void)scannerWaitUs;
     render = static_cast<RenderContext*>(opaque);
+    render->submittedFrame = false;
     freshFrame = *render->uploadedFrame == nullptr ||
         render->upload->GetFrameRevision() != *render->displayedRevision;
-    render->renderer->DrawNetworkStatus(*render->graphics,
+    if (!render->renderer->DrawNetworkStatus(*render->graphics,
         render->networkStatus->homeReady, render->networkStatus->homeIp,
         render->networkStatus->hotspotReady, render->networkStatus->hotspotIp, freshFrame,
-        render->networkStatus->hotspotDevices);
+        render->networkStatus->hotspotDevices)) {
+        return;
+    }
+
+    // Rebuild scan bits only for a new media revision or a visibly changed overlay.
     update(render->graphics);
     *render->displayedRevision = render->upload->GetFrameRevision();
     render->player->RecordFramePresented();
+    render->submittedFrame = true;
 } // SubmitDisplayFrame
 
 /**
@@ -350,7 +364,7 @@ RenderLoop (
         if (submission == RenderPipeline::Result::Stalled) {
             std::puts("[display] scanner wait timed out; frame ownership released");
         }
-        if (submission != RenderPipeline::Result::Submitted) {
+        if (submission != RenderPipeline::Result::Submitted || !render.submittedFrame) {
             sleep_ms(UPLOAD_POLL_DELAY_1MS);
             continue;
         }
@@ -446,6 +460,9 @@ RunController (
     RenderLoop(renderer, upload, network, memory, library, player, video, http, graphics);
 } // RunController
 
+
+
+
 /**
     Initializes clocks and USB before constructing controller services.
 
@@ -465,7 +482,8 @@ main (
 #if HUB75_VERBOSE_LOGS
     sleep_ms(STARTUP_DELAY_5S);
 #endif
-    printf("\n[boot] hub75 starting (%s)\n", WIFI_STATE_MACHINE_REV);
+    printf("\n[boot] hub75 starting (%s), built=%s %s\n",
+        WIFI_STATE_MACHINE_REV, __DATE__, __TIME__);
     HUB75_DEBUG("[boot] constructing controllers\n");
     RunController();
     return 0;
