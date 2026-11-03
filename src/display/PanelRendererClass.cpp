@@ -45,8 +45,8 @@ static_assert(NETWORK_OVERLAY_TOP >= 0 &&
     "Network icons and device strip must fit within separate display rows");
 
 const uint8_t PanelRenderer::houseRows_[WIFI_ICON_HEIGHT] = {
-    0b00011000, 0b00111100, 0b01100110, 0b11000011,
-    0b01000010, 0b01011010, 0b01011010, 0b01111110};
+    0b00000000, 0b00011000, 0b00111100, 0b01100110,
+    0b11000011, 0b01011010, 0b01011010, 0b01111110};
 
 const uint8_t PanelRenderer::antennaRows_[WIFI_ICON_HEIGHT] = {
     0b00000000, 0b10000001, 0b01011010, 0b00100100,
