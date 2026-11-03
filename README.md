@@ -1,19 +1,5 @@
 # HUB75 Multi-Panel WiFi Controller
 
-## Guides
-
-| Topic | Guide |
-| --- | --- |
-| Browser tabs, upload options, placement and previews | [Web interface](web/README.md) |
-| Saved collections, slideshow, settings and pagination | [Media library](docs/MEDIA-LIBRARY.md) |
-| Python uploads, transfer messages and failure handling | [Video uploads](docs/VIDEO-UPLOAD.md) |
-| SD wiring, storage API, verification and throughput | [Storage](docs/MEMORY-MANAGER.md) |
-| Binary descriptors and container compatibility | [Media metadata](docs/MEDIA-METADATA.md) |
-| Compressed frame layout and bounded decoder | [JPEG video](docs/JPEG-VIDEO.md) |
-| Frame buffers, scan isolation and FPS | [Display](docs/DISPLAY.md) |
-| Core ownership, connectivity, recovery and serial status | [Runtime](docs/RUNTIME.md) |
-| Custom controller routes and examples | [HTTP API](docs/HTTP-API.md) |
-
 <table>
   <tr>
     <td width="50%">
@@ -55,6 +41,7 @@
 - [5. Credits / License](#5-credits--license)
   - [Attribution](#attribution)
   - [License](#license)
+- [6. Additional Documentation / Information](#6-additional-documentation--information)
 
 # 1. Overview
 
@@ -242,11 +229,110 @@ repository root; the panel driver remains in `third_party/hub75/`.
 
 ## Program Flow
 
-Core 0 starts the panel, restores selected SD media or the built-in fallback, then owns
-frame preparation, storage jobs and publication. Core 1 owns Wi-Fi and upload transports
-and can decode JPEG when its foreground network work is idle. Uploads hold shared media
-resources until save, verification or cancellation. See [runtime ownership and
-recovery](docs/RUNTIME.md).
+`main()` enters `RunController()`, which starts the cooperating foreground loop,
+network worker and panel scanner.
+
+**Blue:** display · **Green:** networking · **Orange:** SD · **Yellow:** HTML ·
+**Pink:** HTTP API · **Grey:** coordination.
+
+**Solid arrows:** calls, state updates and control actions.<br/>
+**Dashed arrows:** queued requests, uploaded bytes, pixels or prepared buffers.<br/>
+**Group headings:** execution owner; feature colors retain the same meaning across cores.
+
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+    subGraphTitleMargin:
+      top: 8
+      bottom: 20
+---
+flowchart TB
+    subgraph coordination["`**Core 0 · application loop**`"]
+        Entry["Controller entry<br/>main() → RunController()"]
+        Main["Main loop<br/>RenderLoop()"]
+    end
+    subgraph core1["`**Core 1 · network worker**`"]
+        direction TB
+        Worker["Network worker loop<br/>NetworkCore()"]
+        Network["Home Wi-Fi / hotspot / endpoints<br/>NetworkServices::Update()<br/>UpdateNetworkStateMachine()"]
+        Receive["Receive / route HTTP and TCP<br/>UpdateTransport() handlers<br/>RouteHttpRequest()"]
+        Html["Serve embedded HTML / JavaScript<br/>BuildHttpResponse()<br/>SendPendingHttpResponse()"]
+    end
+    subgraph core0["`**Core 0 · request and frame handling**`"]
+        direction TB
+        Jobs["Process queued requests / uploads<br/>WebServer::UpdateStorage()<br/>TcpVideoUpload::UpdateStorage()"]
+        Api["Library queries, selection and settings<br/>HandleLibraryRequest()<br/>MediaLibrary"]
+        Save["Write uploaded media to SD<br/>BeginLibraryPhoto() / BeginLibraryVideo()<br/>AppendMediaBytes()"]
+        Verify["Verify / publish the saved entry<br/>VerifyMediaSaveStep()<br/>Failure retains previous media"]
+        Prepare["Prepare the next display frame<br/>PrepareDisplayFrame()"]
+        Playback["Advance selected media playback<br/>MediaLibrary::Update()<br/>MediaPlayer::Update()"]
+        State["Check SD health / retry mounts<br/>MemoryManager::Update()"]
+        StorageEvent["React to lost / restored storage<br/>StorageUnavailable()<br/>RequestReload()"]
+        Read["Read / decode the selected SD frame<br/>ReadMediaFrame()<br/>RGB: prepared copy or original<br/>JPEG: decode original frames"]
+        Frame["Fill the RGB565 CPU framebuffer<br/>Verified / decoded pixels<br/>or built-in fallback"]
+        Submit["Draw network icons / IP overlays<br/>SubmitDisplayFrame()"]
+        Pack["Pack the inactive driver buffer<br/>update()<br/>PackedPanelFrame::Prepare()"]
+    end
+    subgraph scanner["`**PIO / DMA · Core 0 IRQ**`"]
+        Driver["Swap after a complete scan<br/>Continuously refresh the panels"]
+    end
+    Entry -->|"Start the<br/>main loop"| Main
+    Entry -->|"Start the network<br/>worker on Core 1"| Worker
+    Worker -->|"Advance the network<br/>state machine"| Network
+    Network -->|"Handle clients through<br/>local HTTP / TCP listeners"| Receive
+    Receive -->|"Send the embedded page<br/>for GET /"| Html
+    Receive -.->|"Queue API / HTTP upload requests<br/>and TCP video data for Core 0"| Jobs
+    Receive -.->|"Adopt completed TCP photos<br/>during frame preparation"| Prepare
+    Main -->|"Process queued<br/>requests and uploads"| Jobs
+    Main -->|"Advance the SD<br/>state machine"| State
+    Main ----->|"Prepare the next<br/>display frame"| Prepare
+    Jobs -->|"Apply the requested<br/>library action"| Api
+    Jobs -->|"Save received<br/>photo/video data"| Save
+    Prepare -->|"Save each new live TCP photo once<br/>ImportLivePhoto()"| Save
+    Save -->|"Verify the upload<br/>after its last byte"| Verify
+    Verify -->|"If verification succeeds,<br/>select the saved media"| Read
+    Prepare -->|"Continue with playback<br/>after any live-photo import"| Playback
+    Playback -->|"Read the next frame<br/>when it is due"| Read
+    State -->|"Handle card loss<br/>or a successful remount"| StorageEvent
+    Read -.->|"Load verified pixels<br/>into the framebuffer"| Frame
+    StorageEvent -->|"Draw built-in content<br/>when SD is unavailable"| Frame
+    Frame -.->|"Pass the prepared frame<br/>for network overlays"| Submit
+    Submit -->|"Pack changed pixels<br/>when scanner is ready"| Pack
+    Pack -.->|"Publish the prepared<br/>buffer for scanning"| Driver
+    classDef coordination fill:#cbd5e1cc,stroke:#475569,color:#0f172a
+    classDef display fill:#60a5facc,stroke:#1d4ed8,color:#0f172a
+    classDef network fill:#4ade80cc,stroke:#15803d,color:#0f172a
+    classDef storage fill:#fb923ccc,stroke:#c2410c,color:#0f172a
+    classDef web fill:#fde047cc,stroke:#a16207,color:#0f172a
+    classDef api fill:#f472b6cc,stroke:#be185d,color:#0f172a
+    class Entry,Main,Jobs coordination
+    class Worker,Network,Receive network
+    class Html web
+    class Api api
+    class State,StorageEvent,Save,Verify,Read storage
+    class Prepare,Playback,Frame,Submit,Pack,Driver display
+    style coordination fill:transparent,stroke:#94a3b8
+    style core1 fill:transparent,stroke:#94a3b8
+    style core0 fill:transparent,stroke:#94a3b8
+    style scanner fill:transparent,stroke:#94a3b8
+```
+
+The diagram combines recurring control calls and the important data paths; branches
+do not mean that every operation happens on every loop pass. Either Wi-Fi address
+serves the same page and API. HTML comes from firmware; library queries, previews,
+control actions and upload persistence delegate to the foreground storage/media owners.
+Both Core 0 groups run in the same foreground execution path.
+
+Uploads are verified before their saved entry becomes active. A failed save retains
+previous media. RGB playback prefers a compatible corrected copy and otherwise
+uses the original pixels; JPEG playback decodes the original compressed frames.
+JPEG decoding may use Core 1 when free. Core 0 owns SD access and frame publication.
+
+**Buffer ownership:** An active upload temporarily claims the CPU framebuffer,
+pausing saved playback until completion, cancellation or inactivity cleanup
+releases it. The PIO/DMA scanner keeps refreshing the last submitted driver buffer.
 
 ## Driver Overview
 
@@ -271,3 +357,17 @@ See [connection states and recovery](docs/RUNTIME.md#wi-fi-recovery).
 This project's original code is licensed under the [MIT License](LICENSE). Vendored and
 derived components remain subject to their respective licenses; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+# 6. Additional Documentation / Information
+
+| Topic | Guide |
+| --- | --- |
+| Browser tabs, upload options, placement and previews | [Web interface](web/README.md) |
+| Saved collections, slideshow, settings and pagination | [Media library](docs/MEDIA-LIBRARY.md) |
+| Python uploads, transfer messages and failure handling | [Video uploads](docs/VIDEO-UPLOAD.md) |
+| SD wiring, storage API, verification and throughput | [Storage](docs/MEMORY-MANAGER.md) |
+| Binary descriptors and container compatibility | [Media metadata](docs/MEDIA-METADATA.md) |
+| Compressed frame layout and bounded decoder | [JPEG video](docs/JPEG-VIDEO.md) |
+| Frame buffers, scan isolation and FPS | [Display](docs/DISPLAY.md) |
+| Core ownership, connectivity, recovery and serial status | [Runtime](docs/RUNTIME.md) |
+| Custom controller routes and examples | [HTTP API](docs/HTTP-API.md) |
