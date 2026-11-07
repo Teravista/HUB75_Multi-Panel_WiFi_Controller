@@ -810,7 +810,7 @@ FrameBufferController::ClearStoredFrame (
     Reorders one little-endian RGB565 pixel into native panel colour and byte order.
 
     Five-bit channels promoted to green replicate their top bit; reducing green
-    drops its lowest bit. Fragments and tiles share this exact conversion.
+    drops its lowest bit. Fragments and canonical tiles share this conversion.
 
     @param destination Writable native CPU pixel, including unaligned buffers.
     @param source Borrowed two-byte little-endian RGB565 pixel.
@@ -1167,14 +1167,22 @@ FrameBufferController::WriteStoredFrameTile (
                         ptrdiff_t(CpuFrame::PixelBytes);
                 }
 
-                // Convert directly from the decoder's tile without copying a row scratch buffer.
+                // Both orders follow the same panel strides. Native tiles already contain the final pixel bytes.
                 for (row = 0; row < blockHeight; ++row) {
                     source = tile.pixels + ((size_t(tileY + row) * tile.width) + tileX) * RGB565_PIXEL_BYTES;
                     destination = origin + ptrdiff_t(row) * rowStride;
-                    for (column = 0; column < blockWidth; ++column) {
-                        StorePanelRgb565Pixel(m_frameBuffer + destination, source);
-                        destination += columnStride;
-                        source += RGB565_PIXEL_BYTES;
+                    if (tile.order == ImageTile::Order::Panel) {
+                        for (column = 0; column < blockWidth; ++column) {
+                            std::memcpy(m_frameBuffer + destination, source, RGB565_PIXEL_BYTES);
+                            destination += columnStride;
+                            source += RGB565_PIXEL_BYTES;
+                        }
+                    } else {
+                        for (column = 0; column < blockWidth; ++column) {
+                            StorePanelRgb565Pixel(m_frameBuffer + destination, source);
+                            destination += columnStride;
+                            source += RGB565_PIXEL_BYTES;
+                        }
                     }
                 }
                 tileX += blockWidth;

@@ -103,7 +103,7 @@ public:
     // Returns a saved media preview as a JSON pixel response.
     bool Thumbnail(uint32_t id, char* json, size_t capacity, bool video = false);
 
-    // Formats the active selection, settings, and frame rates as JSON.
+    // Formats firmware identity, active selection, settings, and frame rates as JSON.
     bool PlaybackStatus(char* json, size_t capacity) const;
 
     // Formats RAM and managed SD storage usage as JSON.
@@ -175,10 +175,10 @@ private:
     // Removes a media ID from the temporary failure exclusions.
     void Unreject(uint32_t id, bool video);
 
-    // Finds the next usable photo candidate in one saved-library page.
+    // Inspects one saved-photo candidate after the supplied cursor.
     bool FindNextPhotoCandidate(uint32_t after, uint32_t except, MemoryManager::LibraryPage& page, uint32_t& candidate) const;
 
-    // Finds the next usable video candidate in one saved-library page.
+    // Inspects one saved-video candidate after the supplied cursor.
     bool FindNextVideoCandidate(uint32_t after, uint32_t except, MemoryManager::LibraryPage& page, uint32_t& candidate) const;
 
     // Finds the next usable library item without retaining the full directory.

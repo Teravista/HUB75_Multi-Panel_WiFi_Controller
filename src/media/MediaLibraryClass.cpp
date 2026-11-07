@@ -1,4 +1,5 @@
 #include "media/include/MediaLibraryClass.hpp"
+#include <include/firmwareInfo.hpp>
 #include "hub75.hpp"
 #include "pico/time.h"
 #include <cstdarg>
@@ -215,15 +216,16 @@ MediaLibrary::HasVideo (
 } // HasVideo
 
 /**
-    Finds the next usable photo candidate in one saved-library page.
+    Inspects one saved-photo candidate after the supplied cursor.
 
-    Keeps the temporary page buffer in this call so photo and video scans share
-    the same stack space instead of reserving both buffers in the caller.
+    Reads one metadata record to keep replacement selection within the foreground
+    stack budget while filesystem and SPI calls are nested below it. FindNext
+    advances the returned cursor when this record is excluded, damaged or rejected.
 
     @param after Exclusive library ID cursor for the page to read.
     @param except Library ID to skip; zero skips no item.
-    @param page Output page totals and continuation cursor.
-    @param candidate Output usable item ID; zero means no candidate in this page.
+    @param page Output library totals and continuation cursor.
+    @param candidate Output usable item ID; zero means this record is not usable.
 
     @return true - The page was read, including pages with no usable candidate.
     @return false - Storage could not provide the requested library page.
@@ -236,34 +238,32 @@ MediaLibrary::FindNextPhotoCandidate (
     uint32_t& candidate
     ) const
 {
-    MemoryManager::LibraryPhoto items[MemoryManager::LibraryPageSize];
+    MemoryManager::LibraryPhoto item;
     size_t count;
-    size_t index;
 
     count = 0;
     candidate = 0;
-    if (!memory_.ListLibraryPhotos(items, MemoryManager::LibraryPageSize, count, after, &page)) {
+    if (!memory_.ListLibraryPhotos(&item, 1, count, after, &page)) {
         return false;
     }
-    for (index = 0; index < count; ++index) {
-        if (items[index].id != except && items[index].valid && !Rejected(items[index].id, false)) {
-            candidate = items[index].id;
-            break;
-        }
+
+    if (count && item.id != except && item.valid && !Rejected(item.id, false)) {
+        candidate = item.id;
     }
     return true;
 } // FindNextPhotoCandidate
 
 /**
-    Finds the next usable video candidate in one saved-library page.
+    Inspects one saved-video candidate after the supplied cursor.
 
-    Keeps the temporary page buffer in this call so photo and video scans share
-    the same stack space instead of reserving both buffers in the caller.
+    Reads one metadata record to keep replacement selection within the foreground
+    stack budget while filesystem and SPI calls are nested below it. FindNext
+    advances the returned cursor when this record is excluded, damaged or rejected.
 
     @param after Exclusive library ID cursor for the page to read.
     @param except Library ID to skip; zero skips no item.
-    @param page Output page totals and continuation cursor.
-    @param candidate Output usable item ID; zero means no candidate in this page.
+    @param page Output library totals and continuation cursor.
+    @param candidate Output usable item ID; zero means this record is not usable.
 
     @return true - The page was read, including pages with no usable candidate.
     @return false - Storage could not provide the requested library page.
@@ -276,20 +276,17 @@ MediaLibrary::FindNextVideoCandidate (
     uint32_t& candidate
     ) const
 {
-    MemoryManager::LibraryVideo items[MemoryManager::LibraryPageSize];
+    MemoryManager::LibraryVideo item;
     size_t count;
-    size_t index;
 
     count = 0;
     candidate = 0;
-    if (!memory_.ListLibraryVideos(items, MemoryManager::LibraryPageSize, count, after, &page)) {
+    if (!memory_.ListLibraryVideos(&item, 1, count, after, &page)) {
         return false;
     }
-    for (index = 0; index < count; ++index) {
-        if (items[index].id != except && items[index].valid && !Rejected(items[index].id, true)) {
-            candidate = items[index].id;
-            break;
-        }
+
+    if (count && item.id != except && item.valid && !Rejected(item.id, true)) {
+        candidate = item.id;
     }
     return true;
 } // FindNextVideoCandidate
@@ -1620,7 +1617,7 @@ MediaLibrary::Thumbnail (
 } // Thumbnail
 
 /**
-    Formats the active selection, settings, and frame rates as JSON.
+    Formats firmware identity, active selection, settings, and frame rates as JSON.
 
     Combines the actual player mode, cached displayed name, selected settings and rolling frame
     rates into one bounded Summary response. SD lifecycle and RAM data are snapshots; this path
@@ -1706,7 +1703,11 @@ MediaLibrary::PlaybackStatus (
     AppendStorageStateJson(out, memory_);
     AppendFrameRatesJson(out, frameRates_.Read());
     AppendRamUsageJson(out, memory_.GetRamUsage());
-    out.AppendFormattedText(",\"error\":\"\"}");
+
+    // Report the same immutable identity printed at boot without accessing storage.
+    out.AppendFormattedText(",\"firmware\":{\"id\":");
+    out.AppendEscapedString(FIRMWARE_INFO.id);
+    out.AppendFormattedText("},\"error\":\"\"}");
     return out.good;
 } // PlaybackStatus
 

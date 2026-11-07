@@ -15,6 +15,7 @@ struct Context {
     uint16_t width;
     uint16_t height;
     ImageTile::Sink tileOutput = nullptr;
+    ImageTile::Order tileOrder = ImageTile::Order::Canonical;
     JpegFrameDecoder::Clock clock = nullptr;
     void* clockContext = nullptr;
     uint64_t inputUs = 0;
@@ -128,6 +129,7 @@ DeliverDecodedTile (
 
     // A tile-capable consumer receives the complete rectangle through one borrowed callback.
     if (context.tileOutput) {
+        tile.order = context.tileOrder;
         tile.pixels = pixels;
         tile.left = rect->left;
         tile.top = rect->top;
@@ -215,6 +217,7 @@ WriteDecodedJpegPixels (
     @param clock Optional monotonic profiling clock returning microseconds.
     @param clockContext Caller-owned state passed to the profiling clock.
     @param tileOutput Optional whole-tile sink, preferred over the compatible row sink.
+    @param tileOrder Preferred tile packing. Rows always use canonical RGB565; tiles report their actual order.
 
     @return true - The baseline JPEG decoded completely and its output was accepted.
     @return false - Input, dimensions, workspace, decoding or output acceptance failed; error
@@ -234,7 +237,8 @@ JpegFrameDecoder::Decode (
     Profile* profile,
     Clock clock,
     void* clockContext,
-    ImageTile::Sink tileOutput
+    ImageTile::Sink tileOutput,
+    ImageTile::Order tileOrder
     )
 {
     Context context;
@@ -304,7 +308,12 @@ JpegFrameDecoder::Decode (
         outputCallback = nullptr;
     }
 
-    // Select native reconstruction after prepare initializes the decoder state.
+    // The fused kernel packs B/R/G in wire order. Other panel wirings use the normal tile mapper.
+    if (tileOutput && tileOrder == ImageTile::Order::Panel &&
+        IMAGE_RED_BYTE_OFFSET == 2 && IMAGE_GREEN_BYTE_OFFSET == 0 && IMAGE_BLUE_BYTE_OFFSET == 1) {
+        decoder.panel_brg565 = 1;
+        context.tileOrder = ImageTile::Order::Panel;
+    }
 
     // Decode into row callbacks, or validate the stream when no pixel consumer is supplied.
     error = jd_decomp(&decoder, outputCallback, 0);

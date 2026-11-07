@@ -132,6 +132,7 @@ struct JpegStream {
     bool accepted = true;
     uint32_t* payloadCrc = nullptr;
     ImageTile::Sink tileSink = nullptr;
+    ImageTile::Order tileOrder = ImageTile::Order::Canonical;
     static constexpr size_t BufferBytes = JpegStreamBufferBytes;
 
     // Refills the bounded encoded JPEG input buffer from storage.
@@ -184,7 +185,7 @@ bool DecodeJpegParallel(JpegStream& stream, uint16_t width, uint16_t height, int
 #endif
 
 // Decodes and checks a bounded JPEG record already positioned by the storage manager.
-FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, uint32_t* payloadCrc = nullptr, ImageTile::Sink tileSink = nullptr);
+FrameResult DecodeEncodedJpegFrame(FIL& file, const MediaMetadata& metadata, size_t bytes, uint32_t checksum, MemoryManager::ImageSink sink, void* context, MemoryManager::FrameReadTiming* timing, uint32_t* payloadCrc = nullptr, ImageTile::Sink tileSink = nullptr, ImageTile::Order tileOrder = ImageTile::Order::Canonical);
 
 // Checks whether a file is the active playback handle using the prefetch cache.
 bool IsPrefetchedPlaybackFile(FIL& file);
@@ -325,6 +326,9 @@ struct SaveSession {
     uint8_t thumbnail[MemoryManager::ThumbnailBytes]{};
 };
 
+// Restores idle transaction defaults without putting a thumbnail-sized temporary on the stack.
+void ResetSaveSession(void);
+
 /**
     Adapts checked native frame fragments to an optional display consumer.
 
@@ -386,7 +390,7 @@ struct JpegIndexEntry {
 bool LoadJpegIndexWindow(FIL& file, const SavedPhotoSlot& slot, uint32_t index, int& result);
 
 // Validates an indexed JPEG record before completing provisional frame output.
-SavedFrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, MemoryManager::ImageSink sink, void* context, bool inspecting, bool verifying = false, MemoryManager::FrameReadTiming* timing = nullptr, ImageTile::Sink tileSink = nullptr);
+SavedFrameResult ReadAndVerifyJpegFrame(const SavedPhotoSlot& slot, uint32_t index, MemoryManager::ImageSink sink, void* context, bool inspecting, bool verifying = false, MemoryManager::FrameReadTiming* timing = nullptr, ImageTile::Sink tileSink = nullptr, ImageTile::Order tileOrder = ImageTile::Order::Canonical);
 
 inline constexpr size_t LibraryHeaderBytes = 1536;
 

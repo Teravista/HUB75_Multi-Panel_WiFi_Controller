@@ -65,6 +65,7 @@ struct JDEC {
 	uint8_t msx, msy;			/* MCU size in unit of block (width, height) */
 	uint8_t qtid[3];			/* Quantization table ID of each component, Y, Cb, Cr */
 	uint8_t ncomp;				/* Number of color components 1:grayscale, 3:color */
+	uint8_t panel_brg565;       /* Set after jd_prepare for B/R/G channel order and MSB-first bytes. */
 	int16_t dcv[3];				/* Previous DC element of each component */
 	uint16_t nrst;				/* Restart inverval */
 	uint16_t width, height;		/* Size of the input image (pixel) */
