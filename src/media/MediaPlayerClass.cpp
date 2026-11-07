@@ -403,7 +403,8 @@ MediaPlayer::ReadFrame (
 {
     readingCorrectedCopy_ = false;
     upload_.PrepareStoredFrame(metadata_);
-    if (!memory_.ReadMediaFrame(frame, Consume, this, nullptr, ConsumePrepared, ConsumeTile)) {
+    if (!memory_.ReadMediaFrame(frame, Consume, this, nullptr, ConsumePrepared, ConsumeTile,
+                                ImageTile::Order::Panel)) {
         return false;
     }
 

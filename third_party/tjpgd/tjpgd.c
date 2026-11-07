@@ -445,7 +445,7 @@ JD_FAST_PATH int huffext(JDEC* jd, unsigned int id, unsigned int cls)
 {
 #if JD_INLINE_ENTROPY && JD_FASTDECODE == 2
 	const unsigned int bits = jd->dbit % 32;
-	if (bits >= 16) {
+	if (bits >= HUFF_BIT) {  /* A short-table hit needs only the lookup prefix. */
 		const uint32_t word = jd->wreg & ((1UL << bits) - 1);
 		const unsigned int index = (unsigned int)(word >> (bits - HUFF_BIT));
 		const unsigned int code = cls ? jd->hufflut_ac[id][index] : jd->hufflut_dc[id][index];
@@ -851,10 +851,24 @@ static JRESULT JD_HOT_CODE(mcu_load) (
 
 #if JD_FORMAT == 1 && !JD_USE_SCALE
 /* Clip the reconstructed channels, then write packed RGB565 pixels directly. */
-JD_FAST_PATH uint16_t pack_rgb565(int red, int green, int blue)
+JD_FAST_PATH uint16_t pack_rgb565(int red, int green, int blue, int panel_brg565)
 {
-	const uint16_t pixel = (uint16_t)(((uint16_t)(BYTECLIP(red) & 0xF8) << 8) |
-		((uint16_t)(BYTECLIP(green) & 0xFC) << 3) | (BYTECLIP(blue) >> 3));
+	const uint16_t r = BYTECLIP(red), g = BYTECLIP(green), b = BYTECLIP(blue);
+	uint16_t pixel;
+
+	if (panel_brg565) {
+		/* Match canonical RGB565 quantization before rewiring B/R/G. The
+		   five-bit red channel gains its original high bit in green's low bit. */
+		pixel = (uint16_t)(((b & 0xF8) << 8) | ((r & 0xF8) << 3) |
+			((r & 0x80) >> 2) | (g >> 3));
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+		return pixel;
+#else
+		return (uint16_t)((pixel << 8) | (pixel >> 8));
+#endif
+	}
+
+	pixel = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 	return (uint16_t)((pixel << 8) | (pixel >> 8));
 #else
@@ -864,7 +878,7 @@ JD_FAST_PATH uint16_t pack_rgb565(int red, int green, int blue)
 
 /* Reuse each chroma contribution for a 2x2 group, writing packed pixels directly. */
 #if JD_REUSE_CHROMA
-static void JD_HOT_CODE(color_420_rgb565)(JDEC* jd)
+JD_FAST_PATH void color_420_rgb565(JDEC* jd, int panel_brg565)
 {
 	const int accuracy = (sizeof(int) > 2) ? 1024 : 128;
 	uint16_t* rgb = (uint16_t*)jd->workbuf;
@@ -881,19 +895,16 @@ static void JD_HOT_CODE(color_420_rgb565)(JDEC* jd)
 			for (unsigned int row = 0; row < 2; row++) {
 				const int y0 = ypixels[row * 8], y1 = ypixels[row * 8 + 1];
 				uint16_t* pixels = output + row * 16;
-				pixels[0] = pack_rgb565(y0 + red, y0 - green, y0 + blue);
-				pixels[1] = pack_rgb565(y1 + red, y1 - green, y1 + blue);
+				pixels[0] = pack_rgb565(y0 + red, y0 - green, y0 + blue, panel_brg565);
+				pixels[1] = pack_rgb565(y1 + red, y1 - green, y1 + blue, panel_brg565);
 			}
 		}
 	}
 }
 #endif
 
-/* Keep the existing MCU layout, clipping, arithmetic and callback rectangle.
-   Only output storage changes; workbuf is already aligned for uint16_t access. */
-static JRESULT JD_HOT_CODE(mcu_output_rgb565)(
-	JDEC* jd, int (*outfunc)(JDEC*, void*, JRECT*), JRECT* rect,
-	unsigned int mx, unsigned int my, unsigned int rx, unsigned int ry)
+/* Call with a constant output layout so neither pixel loop branches on it. */
+JD_FAST_PATH void color_mcu_rgb565(JDEC* jd, unsigned int mx, unsigned int my, int panel_brg565)
 {
 	const int accuracy = (sizeof(int) > 2) ? 1024 : 128;
 	uint16_t* output = (uint16_t*)jd->workbuf;
@@ -903,7 +914,7 @@ static JRESULT JD_HOT_CODE(mcu_output_rgb565)(
 
 #if JD_REUSE_CHROMA
 	if (mx == 16 && my == 16) {
-		color_420_rgb565(jd);
+		color_420_rgb565(jd, panel_brg565);
 	} else
 #endif
 	{
@@ -928,9 +939,24 @@ static JRESULT JD_HOT_CODE(mcu_output_rgb565)(
 				yy = *py++;
 				*output++ = pack_rgb565(yy + (int)(1.402 * accuracy) * cr / accuracy,
 					yy - ((int)(0.344 * accuracy) * cb + (int)(0.714 * accuracy) * cr) / accuracy,
-					yy + (int)(1.772 * accuracy) * cb / accuracy);
+					yy + (int)(1.772 * accuracy) * cb / accuracy, panel_brg565);
 			}
 		}
+	}
+
+}
+
+/* Select the output layout once per MCU and keep its callback rectangle tightly packed. */
+static JRESULT JD_HOT_CODE(mcu_output_rgb565)(
+	JDEC* jd, int (*outfunc)(JDEC*, void*, JRECT*), JRECT* rect,
+	unsigned int mx, unsigned int my, unsigned int rx, unsigned int ry)
+{
+	unsigned int ix, iy;
+
+	if (jd->panel_brg565) {
+		color_mcu_rgb565(jd, mx, my, 1);
+	} else {
+		color_mcu_rgb565(jd, mx, my, 0);
 	}
 
 	/* A clipped right edge must remain tightly packed for the existing row consumer. */

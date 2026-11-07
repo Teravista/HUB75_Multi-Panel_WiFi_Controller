@@ -1,4 +1,5 @@
 #include <config/defines.h>
+#include <include/firmwareInfo.hpp>
 
 #include "core/include/serialLog.hpp"
 #include <cstdint>
@@ -19,12 +20,9 @@
 
 #define SERIAL_STATUS_LINE_BYTES 384
 
-#if DOUBLE_PIO_DRIVE
-#define WIFI_STATE_MACHINE_REV "panel-dual-layout-v10-jpeg-buffered"
-#else
-#define WIFI_STATE_MACHINE_REV "panel-single-layout-v10-jpeg-buffered"
-#endif
+#define FIRMWARE_ID "HUB75 v1.0"
 
+const FirmwareInfo FIRMWARE_INFO = {FIRMWARE_ID};
 
 struct NetworkPauseContext {
     bool* servicesPaused;
@@ -387,18 +385,18 @@ RunController (
     void
     )
 {
+    // Services live until reset; keep their storage off the nested SD/render call stack.
     alignas(DMA_BUFFER_ALIGNMENT) static unsigned char frameBuffer[FRAME_BUFFER_SIZE_BYTES];
-    PanelRenderer renderer;
-    FrameBufferController upload(&renderer, frameBuffer, true);
-    MemoryManager memory;
+    static PanelRenderer renderer;
+    static FrameBufferController upload(&renderer, frameBuffer, true);
+    static MemoryManager memory;
     static TcpVideoUpload video(memory, upload, true);
-    // Keep the long-lived DHCP workspace off the foreground render stack.
     static WifiConnection wifiNetwork(&upload, &video);
-    NetworkServices network(wifiNetwork, YieldNetworkWorker, &video);
-    MediaPlayer player(memory, upload);
+    static NetworkServices network(wifiNetwork, YieldNetworkWorker, &video);
+    static MediaPlayer player(memory, upload);
     static MediaLibrary library(memory, upload, player);
     static HttpMediaUpload http(memory, upload);
-    CpuGraphics graphics(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, frameBuffer);
+    static CpuGraphics graphics(MATRIX_PANEL_WIDTH, MATRIX_PANEL_HEIGHT, frameBuffer);
     bool restored;
 
     http.SetMediaLibrary(&library);
@@ -482,8 +480,7 @@ main (
 #if HUB75_VERBOSE_LOGS
     sleep_ms(STARTUP_DELAY_5S);
 #endif
-    printf("\n[boot] hub75 starting (%s), built=%s %s\n",
-        WIFI_STATE_MACHINE_REV, __DATE__, __TIME__);
+    printf("\n[boot] hub75 starting (%s)\n", FIRMWARE_INFO.id);
     HUB75_DEBUG("[boot] constructing controllers\n");
     RunController();
     return 0;

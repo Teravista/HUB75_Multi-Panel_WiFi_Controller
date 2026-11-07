@@ -22,6 +22,22 @@ JpegInputPipe jpegPipe;
 #endif
 
 /**
+    Restores idle transaction defaults without putting a thumbnail-sized temporary on the stack.
+
+    Callers finish or release file ownership first. The immutable template supplies the initial
+    CRCs and descriptor defaults directly from flash, including on verification and error paths.
+*/
+void
+ResetSaveSession (
+    void
+    )
+{
+    static constexpr SaveSession idle{};
+
+    managerState.save = idle;
+} // ResetSaveSession
+
+/**
     Checks whether a file is the active playback handle using the prefetch cache.
 
     @param file Open FatFs file used by this operation.
@@ -781,7 +797,8 @@ ParallelDecode::DecodeJpegOnWorker (
     job->decoded = JpegFrameDecoder::Decode(ReadEncodedJpegInput, &(*job), JpegStream::WriteDecodedJpegPixels,
                                            &job->stream, job->width, job->height,
                                            readBuffer + JpegStream::BufferBytes, JpegStream::BufferBytes,
-                                           job->error, job->stages, job->clock, nullptr, tileOutput);
+                                           job->error, job->stages, job->clock, nullptr, tileOutput,
+                                           job->stream.tileOrder);
     job->elapsedUs = to_us_since_boot(get_absolute_time()) - started;
 } // DecodeJpegOnWorker
 
@@ -981,8 +998,8 @@ DecodeJpegParallel (
     @param context Borrowed pixel-consumer context.
     @param timing Optional output counters for this record.
     @param payloadCrc Optional running payload CRC receiving every encoded frame byte.
-
     @param tileSink Optional whole-tile consumer; row delivery remains the fallback.
+    @param tileOrder Pixel order requested by the whole-tile consumer.
 
     @return result - Completion flag, filesystem result and failure description.
 */
@@ -996,7 +1013,8 @@ DecodeEncodedJpegFrame (
     void* context,
     MemoryManager::FrameReadTiming* timing,
     uint32_t* payloadCrc,
-    ImageTile::Sink tileSink
+    ImageTile::Sink tileSink,
+    ImageTile::Order tileOrder
     )
 {
     FrameResult result;
@@ -1014,6 +1032,9 @@ DecodeEncodedJpegFrame (
 
     stream.payloadCrc = payloadCrc;
     stream.tileSink = tileSink;
+    if (tileSink) {
+        stream.tileOrder = tileOrder;
+    }
     result = {};
     decoderError = 0;
     usedCore1 = false;
@@ -1043,7 +1064,7 @@ DecodeEncodedJpegFrame (
         decoded = JpegFrameDecoder::Decode(JpegStream::ReadEncodedJpegInput, &stream,
                                           outputCallback, &stream, metadata.width, metadata.height,
                                           readBuffer + JpegStream::BufferBytes, JpegStream::BufferBytes,
-                                          decoderError, nullptr, nullptr, nullptr, tileOutput);
+                                          decoderError, nullptr, nullptr, nullptr, tileOutput, stream.tileOrder);
         decodeUs = to_us_since_boot(get_absolute_time()) - decodeStarted;
     }
 
@@ -1693,7 +1714,7 @@ DiscardIncompleteMediaSave (
         }
     }
     managerState.mediaFile = {};
-    managerState.save = {};
+    ResetSaveSession();
     managerState.rgbCopies.Reset();
     return int(result);
 } // DiscardIncompleteMediaSave
@@ -1921,8 +1942,8 @@ InspectSavedMediaSlot (
     @param inspecting Selects the startup inspection handle.
     @param verifying Selects the active unpublished save handle instead.
     @param timing Optional output counters for the bounded frame read.
-
     @param tileSink Optional whole-tile consumer; row delivery remains the fallback.
+    @param tileOrder Pixel order requested by the whole-tile consumer.
 
     @return result - Completion, filesystem status and a stable failure description.
 */
@@ -1935,7 +1956,8 @@ ReadAndVerifyJpegFrame (
     bool inspecting,
     bool verifying,
     MemoryManager::FrameReadTiming* timing,
-    ImageTile::Sink tileSink
+    ImageTile::Sink tileSink,
+    ImageTile::Order tileOrder
     )
 {
     SavedFrameResult read;
@@ -2021,7 +2043,7 @@ ReadAndVerifyJpegFrame (
 
     // Decode and checksum encoded bytes while preserving the existing strict index validation.
     decoded = MemoryStorage::DecodeEncodedJpegFrame(*file, slot.metadata, length, expectedCrc,
-                                                   sink, context, timing, nullptr, tileSink);
+                                                   sink, context, timing, nullptr, tileSink, tileOrder);
     read = {decoded.complete, int(decoded.result), decoded.error};
     return read;
 } // ReadAndVerifyJpegFrame

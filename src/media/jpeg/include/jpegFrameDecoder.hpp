@@ -20,6 +20,6 @@ struct Profile {
 };
 
 // Decodes or validates one JPEG frame using bounded input and output callbacks.
-bool Decode(Input input, void* inputContext, Output output, void* outputContext, uint16_t width, uint16_t height, void* work, size_t workBytes, int& error, Profile* profile = nullptr, Clock clock = nullptr, void* clockContext = nullptr, ImageTile::Sink tileOutput = nullptr);
+bool Decode(Input input, void* inputContext, Output output, void* outputContext, uint16_t width, uint16_t height, void* work, size_t workBytes, int& error, Profile* profile = nullptr, Clock clock = nullptr, void* clockContext = nullptr, ImageTile::Sink tileOutput = nullptr, ImageTile::Order tileOrder = ImageTile::Order::Canonical);
 
 } // namespace JpegFrameDecoder

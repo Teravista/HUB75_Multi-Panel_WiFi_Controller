@@ -21,7 +21,7 @@ use GET, selections/settings use POST, deletion uses DELETE.
 
 | Method | Path after `/api` | Result / parameters |
 | --- | --- | --- |
-| GET | `/status` or `/state` | Active mode/name, displayed IDs, loop mode, SD state, rolling FPS, RAM and display settings |
+| GET | `/status` or `/state` | Firmware identity, active mode/name, displayed IDs, loop mode, SD state, rolling FPS, RAM and display settings |
 | GET | `/settings` | Same live status, including `displaySettings.maxFps` and `brightness` |
 | POST | `/settings?maxFps=30&brightness=80` | Set both; maxFps 0–60, brightness 0–100 |
 | POST | `/brightness?value=80` | Change brightness only; preserves the FPS cap |
@@ -77,6 +77,11 @@ Thumbnail `pixels` is base64, little-endian RGB565, row-major. Current previews 
 32×64. Use the returned width/height rather than assuming a size.
 Status/settings reads do not read the SD card.
 `/memory`, lists and previews require storage and may take longer.
+
+Status/settings replies include `firmware.id`, such as `HUB75 v1.0`, matching the
+release identifier printed in the serial `[boot]` line and shown in the web Summary.
+It remains available when the SD card is unavailable. Read it with `GET /api/status`;
+the `/api/state` and `/api/settings` aliases return it too.
 
 Status/settings and `/memory` also include `storageState` (`unavailable`, `mounting`,
 `ready`, `recovering`), `storageRetryMs`, `storageGeneration`, and `storageError`. Live

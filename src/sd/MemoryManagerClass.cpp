@@ -553,7 +553,7 @@ MemoryManager::BeginMediaSave (
 
     // Initialize transaction counters while keeping the preceding generation available.
     latest = MemoryStorage::FindNewestSavedPhoto(slots);
-    MemoryStorage::managerState.save = {};
+    MemoryStorage::ResetSaveSession();
     MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.save.metadata = metadata;
     MemoryStorage::managerState.save.expectedCrc = payloadChecksum;
@@ -850,7 +850,7 @@ MemoryManager::VerifyMediaSaveStep (
                     static_cast<unsigned long>(savedId), MemoryStorage::managerState.save.metadata.FormatName(),
                     static_cast<unsigned long>(MemoryStorage::managerState.save.metadata.frameCount),
                     savedCopies);
-        MemoryStorage::managerState.save = {};
+        MemoryStorage::ResetSaveSession();
         MemoryStorage::managerState.rgbCopies.Reset();
         MemoryStorage::managerState.rejectedSlot = SAVED_PHOTO_NO_SLOT;
         complete = true;
@@ -948,6 +948,7 @@ MemoryManager::OpenLastMedia (
     @param timing Optional output counters for this frame read.
     @param preparedSink Optional native consumer; omitting it always reads the logical original.
     @param tileSink Optional JPEG rectangle consumer; raw media retains its fragment sink.
+    @param tileOrder Pixel order requested by the JPEG tile consumer.
 
     @return true - The requested frame and its CRC passed verification.
     @return false - The request, I/O, consumer or checksum failed.
@@ -959,7 +960,8 @@ MemoryManager::ReadMediaFrame (
     void* context,
     FrameReadTiming* timing,
     PreparedImageSink preparedSink,
-    ImageTile::Sink tileSink
+    ImageTile::Sink tileSink,
+    ImageTile::Order tileOrder
     )
 {
     MemoryStorage::SavedFrameResult read;
@@ -997,7 +999,8 @@ MemoryManager::ReadMediaFrame (
             native, frameIndex, MemoryStorage::PreparedSinkContext::DeliverPreparedPixels, &nativeConsumer, timing);
         read = {nativeResult.complete, int(nativeResult.result), nativeResult.error};
     } else if (MemoryStorage::managerState.playback.description.indexedJpeg) {
-        read = MemoryStorage::ReadAndVerifyJpegFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, false, timing, tileSink);
+        read = MemoryStorage::ReadAndVerifyJpegFrame(MemoryStorage::managerState.playback.description,
+            frameIndex, sink, context, false, false, timing, tileSink, tileOrder);
     } else {
         read = MemoryStorage::ReadAndVerifyRawVideoFrame(MemoryStorage::managerState.playback.description, frameIndex, sink, context, false, timing);
     }
@@ -1193,7 +1196,7 @@ MemoryManager::BeginLibraryPhoto (
         return ReportStorageFailure("media filename namespace exhausted");
     }
     MemoryStorage::CloseSavedMediaPlayback();
-    MemoryStorage::managerState.save = MemoryStorage::SaveSession{};
+    MemoryStorage::ResetSaveSession();
     MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.save.libraryId = target;
     MemoryStorage::managerState.save.headerBytes = MemoryStorage::LibraryHeaderBytes;
@@ -1215,7 +1218,7 @@ MemoryManager::BeginLibraryPhoto (
     // Open the chosen destination before writing its header and pixel payload.
     result = f_open(&MemoryStorage::managerState.mediaFile, path, FA_WRITE | FA_CREATE_ALWAYS);
     if (result != FR_OK) {
-        MemoryStorage::managerState.save = {};
+        MemoryStorage::ResetSaveSession();
         MemoryStorage::managerState.rgbCopies.Reset();
         return ReportStorageFailure("photo create failed", result);
     }
@@ -1809,7 +1812,7 @@ MemoryManager::BeginLibraryVideo (
         return ReportStorageFailure("media filename namespace exhausted");
     }
     MemoryStorage::CloseSavedMediaPlayback();
-    MemoryStorage::managerState.save = MemoryStorage::SaveSession{};
+    MemoryStorage::ResetSaveSession();
     MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.save.videoId = target;
     MemoryStorage::managerState.save.headerBytes = MemoryStorage::VideoLibraryHeaderBytes;
@@ -1834,7 +1837,7 @@ MemoryManager::BeginLibraryVideo (
     // Open the chosen destination before writing its header and pixel payload.
     result = f_open(&MemoryStorage::managerState.mediaFile, path, FA_WRITE | FA_CREATE_ALWAYS);
     if (result != FR_OK) {
-        MemoryStorage::managerState.save = {};
+        MemoryStorage::ResetSaveSession();
         MemoryStorage::managerState.rgbCopies.Reset();
         return ReportStorageFailure("video library create failed", result);
     }
@@ -2583,7 +2586,7 @@ MemoryManager::DiscardSession (
     void
     )
 {
-    MemoryStorage::managerState.save = {};
+    MemoryStorage::ResetSaveSession();
     MemoryStorage::managerState.rgbCopies.Reset();
     MemoryStorage::managerState.playback = {};
     MemoryStorage::managerState.mediaFile = {};

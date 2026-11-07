@@ -14,10 +14,23 @@ p{line-height:1.5;color:#cbd5e1}#status{min-height:3em}*[hidden]{display:none!im
 section{border-top:1px solid #374151;margin-top:32px;padding-top:12px}
 .options{display:grid;grid-template-columns:1fr 1fr;gap:16px}.options label{margin-top:12px}
 input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:border-box;padding:10px;background:#1f2937;color:#f9fafb;border:1px solid #64748b;border-radius:8px}
+input:disabled,select:disabled{color:#6b7280;-webkit-text-fill-color:#6b7280;background:#1f2937;border-color:#374151;opacity:1;cursor:not-allowed}
+label:has(+ input:disabled),label:has(+ select:disabled){color:#6b7280}
+#firmware-version{overflow-wrap:anywhere}
 .check{display:flex;align-items:center;gap:10px}.check input{width:auto}
 .secondary{background:#374151;color:#f9fafb}progress{width:100%;height:12px}
 #video-source{display:block;width:128px;height:256px;object-fit:cover;margin:24px auto;background:#000}
 .preview-editor{position:relative;width:256px;max-width:100%;aspect-ratio:1/2;margin:24px auto;outline:1px solid #64748b}.preview-editor canvas{width:100%;height:100%;margin:0;border:0}.content-outline{position:absolute;border:1px solid #ef4444;box-sizing:border-box;pointer-events:none}.preview-editor[data-draggable=true] canvas{cursor:grab;touch-action:none}.drag-hint{font-size:.8rem;text-align:center}.tabs{display:flex;gap:8px;margin:0 0 24px}.tabs button{flex:1;width:auto;margin:0;padding:12px 6px;background:#1f2937;color:#cbd5e1;border:1px solid #475569}.tabs button[aria-selected=true]{background:#38bdf8;color:#082f49}.summary-box,.photo-card{padding:16px;border:1px solid #475569;border-radius:12px;background:#1f2937}.photo-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.photo-card{padding:12px;min-width:0}.photo-card h3{font-size:1rem;overflow-wrap:anywhere}.photo-card p{font-size:.8rem}.photo-card canvas{width:64px;height:128px;margin:8px auto;image-rendering:pixelated}.photo-card button{padding:10px;margin-top:8px}.photo-card.showing{border-color:#38bdf8}.library-actions{display:flex;align-items:center;gap:10px}.library-actions button{padding:10px}.summary-box p{overflow-wrap:anywhere}
+/* Align titles, previews, metadata and both actions across each pair of cards. */
+@supports (grid-template-rows:subgrid) {
+    .photo-card {
+        display:grid;
+        grid-template-rows:subgrid;
+        grid-row:span 5;
+        row-gap:0;
+        align-items:start;
+    }
+}
 .mode-line{display:flex;align-items:center;flex-wrap:wrap;gap:12px}#active-fps{font-size:.8rem;color:#cbd5e1;font-variant-numeric:tabular-nums}#summary-status{min-height:1.5em}
 .summary-content {display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
 .summary-details {min-width:0;flex:1}
@@ -37,7 +50,9 @@ input[type=number],input[type=text],select{font:inherit;width:100%;box-sizing:bo
 <div id="panel-summary" role="tabpanel" aria-labelledby="tab-summary">
 <div class="summary-box summary-content"><div class="summary-details"><p>Active mode on panel</p><div class="mode-line"><strong id="active-mode">Checking…</strong><span id="active-fps" hidden></span></div><p id="active-mode-detail"></p></div><figure id="summary-preview" class="summary-preview" hidden><canvas id="summary-preview-canvas" width="32" height="64" aria-label="Displayed media preview" hidden></canvas><figcaption id="summary-preview-caption" role="status"></figcaption></figure></div>
 <section><h2>Display settings</h2><label for="playback-max-fps">Maximum video FPS</label><input id="playback-max-fps" type="number" min="1" max="60" step="1" placeholder="Use video FPS"><label for="panel-brightness">Brightness %</label><input id="panel-brightness" type="number" min="0" max="100" step="1" value="80"><button id="display-settings-save" type="button" disabled>Apply settings</button></section>
-<section><h2>Memory usage</h2><p>Pico RAM: <strong id="ram-usage">Checking…</strong></p><progress id="ram-meter" max="100" value="0" hidden aria-label="RAM usage"></progress><p id="ram-detail"></p><p id="sd-state" role="status" aria-live="polite">Checking SD card…</p><p id="storage-usage">Checking…</p><p id="storage-capacity"></p></section><button id="summary-refresh" class="secondary" type="button">Refresh summary</button><p id="summary-status" role="status" aria-live="polite"></p></div>
+<section><h2>Memory usage</h2><p>Pico RAM: <strong id="ram-usage">Checking…</strong></p><progress id="ram-meter" max="100" value="0" hidden aria-label="RAM usage"></progress><p id="ram-detail"></p><p id="sd-state" role="status" aria-live="polite">Checking SD card…</p><p id="storage-usage">Checking…</p><p id="storage-capacity"></p></section>
+<section><h2>Firmware</h2><p id="firmware-version">Checking…</p></section>
+<button id="summary-refresh" class="secondary" type="button">Refresh summary</button><p id="summary-status" role="status" aria-live="polite"></p></div>
 <div id="panel-photos" role="tabpanel" aria-labelledby="tab-photos" hidden>
 <h2>Upload a photo</h2>
 <label for="photo">Photo</label>
@@ -479,6 +494,7 @@ async function uploadPhoto() {
     }
     const controller = new AbortController();
     let job = null;
+    let saved = false;
     uploading = true;
     updateVideoControls();
     try {
@@ -492,6 +508,7 @@ async function uploadPhoto() {
         const acknowledgement = await transferPreparedUpload(job, controller.signal, false);
         job = null;
         statusText.textContent = 'Photo saved and verified. ' + acknowledgement.warning;
+        saved = true;
     } catch (error) {
         if (job && !error.sessionLost) {
             await cancelOwnedUpload(job);
@@ -501,7 +518,12 @@ async function uploadPhoto() {
         uploading = false;
         updateVideoControls();
     }
-}
+
+    // Refresh only after verified saving and release of the upload guard.
+    if (saved) {
+        await loadLibraryPage('photo');
+    }
+} // uploadPhoto
 
 fileInput.addEventListener('change', preparePhotoPreview);
 uploadButton.addEventListener('click', uploadPhoto);
@@ -1689,10 +1711,12 @@ enableMediaDragging(preview, () => photoGeometry, () => !!photoSource && !upload
 enableMediaDragging(videoCanvas, () => videoGeometry, () => !!videoArea && !uploading && !videoBusy,
     (x, y) => updateDraggedPlacement('video', x, y));
 
+const LIBRARY_CARD_CACHE_LIMIT = 40;
 const libraryPages = {
-    photo: {history: [0], nextAfter: 0, hasMore: false, ticket: 0, busy: false},
-    video: {history: [0], nextAfter: 0, hasMore: false, ticket: 0, busy: false}
+    photo: {history: [0], nextAfter: 0, hasMore: false, ticket: 0, busy: false, refreshRequested: false, hasRendered: false, cards: new Map()},
+    video: {history: [0], nextAfter: 0, hasMore: false, ticket: 0, busy: false, refreshRequested: false, hasRendered: false, cards: new Map()}
 };
+let libraryStorageGeneration = null;
 let galleryBusy = false;
 let activeMediaTab = 'summary';
 let summaryBusy = false;
@@ -1741,6 +1765,33 @@ function formatStorageBytes(bytes) {
 }
 
 /**
+    Shows the firmware identity reported by the controller's status API.
+
+    Updates the existing label without rebuilding Summary. Older firmware can
+    omit the identifier; show that explicitly without interrupting status refreshes.
+    The identifier remains plain text even if a controller returns markup.
+
+    @param firmware Firmware identifier, when reported.
+*/
+function RenderFirmwareIdentity (
+    firmware
+    )
+{
+    let versionElement;
+    let identifier;
+
+    versionElement = document.getElementById('firmware-version');
+    identifier = 'Not reported';
+    if (firmware && typeof firmware.id === 'string' && firmware.id) {
+        identifier = firmware.id;
+    }
+
+    if (versionElement.textContent !== identifier) {
+        versionElement.textContent = identifier;
+    }
+} // RenderFirmwareIdentity
+
+/**
     Renders the last confirmed playback state while preserving unsaved settings edits.
 
     Updates mode, frame-rate and memory labels in place. A settings reply initializes the
@@ -1777,6 +1828,7 @@ function renderPlaybackStatus(status, forcePreview = false) {
     }
     renderFrameRates(status);
     renderMemoryStatus(status);
+    RenderFirmwareIdentity(status.firmware);
     const settings = status.displaySettings;
     if (settings && Number.isInteger(settings.maxFps) && settings.maxFps >= 0 && settings.maxFps <= 60 &&
         Number.isInteger(settings.brightness) && settings.brightness >= 0 && settings.brightness <= 100) {
@@ -1833,7 +1885,7 @@ async function refreshSummary(includeStorage = true, forcePreview = false) {
 }
 
 /**
-    Shows one accessible media tab and requests its latest data.
+    Shows one accessible media tab while refreshing its retained data in the background.
 
     @param name Summary, photos or videos tab identifier.
 */
@@ -1850,7 +1902,7 @@ function selectMediaTab(name) {
         document.getElementById('panel-' + candidate).hidden = !active;
     }
     if (name === 'summary') {
-        refreshSummary(true, true);
+        refreshSummary(false);
     } else if (name === 'photos') {
         loadLibraryPage('photo');
     } else {
@@ -2041,6 +2093,7 @@ function DescribeMediaCopies (
 function createLibraryCard(kind, item, displayed) {
     const card = document.createElement('article');
     card.className = 'photo-card';
+    card.dataset.mediaId = String(item.id);
     if (item.id === displayed) {
         card.className += ' showing';
     }
@@ -2086,24 +2139,224 @@ function createLibraryCard(kind, item, displayed) {
 }
 
 /**
-    Loads an ordered saved-media page and then its previews without clearing old data early.
+    Reuses an unchanged library card or prepares a replacement outside the visible grid.
 
-    Page cursors are bounded media IDs. Preview requests are sequential, and a new
-    page ticket prevents an older response from drawing into a replaced page.
+    The item signature includes its payload revision and placement/copy metadata.
+    IDs alone are insufficient because deleted IDs can be reused for different media.
+    Active selection is updated separately and never invalidates a saved preview.
+
+    @param kind Photo or video collection identifier.
+    @param item Confirmed metadata for one saved library item.
+
+    @return object - Retained or newly created card and its preview cache state.
+*/
+function GetLibraryCard (
+    kind,
+    item
+    )
+{
+    let signature;
+    let retained;
+    let created;
+
+    signature = JSON.stringify(item);
+    retained = libraryPages[kind].cards.get(item.id);
+    if (retained && retained.signature === signature) {
+        return retained;
+    }
+
+    created = createLibraryCard(kind, item, 0);
+    return {...created, id: item.id, signature, previewReady: false, generation: null};
+} // GetLibraryCard
+
+/**
+    Records a visible library card as a scroll anchor before updating the grid.
+
+    Capture immediately before changing the page so scrolling during a slow request
+    remains under the user's control. Prefer a surviving item nearest the viewport
+    top, including its replacement when metadata changed. Hidden libraries and grids
+    outside the viewport must not affect scrolling.
+
+    @param kind Photo or video collection identifier.
+    @param grid Visible library container before reconciliation.
+    @param cards Prepared card records in the requested display order.
+
+    @return object - Scroll position and optional surviving card anchor.
+    @return null - This library is not currently in view.
+*/
+function CaptureLibraryViewport (
+    kind,
+    grid,
+    cards
+    )
+{
+    let bounds;
+    let viewport;
+    let replacement;
+
+    if (activeMediaTab !== kind + 's' || grid.children.length === 0) {
+        return null;
+    }
+    bounds = grid.getBoundingClientRect();
+    if (bounds.bottom <= 0 || bounds.top >= window.innerHeight) {
+        return null;
+    }
+    viewport = {x: window.scrollX, y: window.scrollY, card: null, top: 0};
+
+    // Keep a nearby surviving item at the same height, even when rows regroup.
+    for (const child of grid.children) {
+        replacement = cards.find(record => String(record.id) === child.dataset.mediaId);
+        if (!replacement) {
+            continue;
+        }
+        bounds = child.getBoundingClientRect();
+        if (bounds.bottom > 0 && bounds.top < window.innerHeight &&
+            (!viewport.card || Math.abs(bounds.top) < Math.abs(viewport.top))) {
+            viewport.card = replacement.card;
+            viewport.top = bounds.top;
+        }
+    }
+    return viewport;
+} // CaptureLibraryViewport
+
+/**
+    Keeps the current reading position after library cards change.
+
+    A surviving card anchors its viewport height; otherwise retain the scroll offset.
+    The browser naturally clamps the offset when deleting the final row shortens the
+    page. Read the resulting position first so native scroll anchoring is not applied
+    twice. Unchanged layout never triggers a scroll operation.
+
+    @param viewport Previously captured library position, or null for an offscreen grid.
+*/
+function RestoreLibraryViewport (
+    viewport
+    )
+{
+    let targetY;
+
+    if (!viewport) {
+        return;
+    }
+    targetY = viewport.y;
+    if (viewport.card) {
+        targetY = window.scrollY + viewport.card.getBoundingClientRect().top - viewport.top;
+    }
+    if (targetY !== window.scrollY) {
+        window.scrollTo(viewport.x, targetY);
+    }
+} // RestoreLibraryViewport
+
+/**
+    Publishes a checked library page by updating only changed or removed cards.
+
+    Match cards by media ID, replace changed records and leave unchanged nodes attached
+    with their existing previews. Reorder only when necessary and preserve the visible
+    reading position. Retain a bounded recent set for returning to earlier pages;
+    evict the least recently used records first.
+
+    @param kind Photo or video collection identifier.
+    @param page Confirmed metadata and pagination response.
+    @param cards Prepared card records in the requested display order.
+*/
+function CommitLibraryPage (
+    kind,
+    page,
+    cards
+    )
+{
+    let state;
+    let grid;
+    let desired;
+    let replacement;
+    let reference;
+    let viewport;
+    let className;
+
+    state = libraryPages[kind];
+    grid = document.getElementById(kind + '-library');
+    viewport = CaptureLibraryViewport(kind, grid, cards);
+    desired = new Map(cards.map(record => [String(record.id), record.card]));
+
+    // Remove deleted entries and replace changed metadata without detaching neighbours.
+    for (const child of Array.from(grid.children)) {
+        replacement = desired.get(child.dataset.mediaId);
+        if (!replacement) {
+            grid.removeChild(child);
+        } else if (replacement !== child) {
+            grid.replaceChild(replacement, child);
+        }
+    }
+    for (let index = 0; index < cards.length; index++) {
+        reference = grid.children[index] || null;
+        if (reference !== cards[index].card) {
+            grid.insertBefore(cards[index].card, reference);
+        }
+    }
+
+    // Selection and cache bookkeeping do not recreate cards or their previews.
+    for (const record of cards) {
+        className = 'photo-card';
+        if (record.id === page.displayed) {
+            className += ' showing';
+        }
+        if (record.card.className !== className) {
+            record.card.className = className;
+        }
+        state.cards.delete(record.id);
+        state.cards.set(record.id, record);
+    }
+    while (state.cards.size > LIBRARY_CARD_CACHE_LIMIT) {
+        state.cards.delete(state.cards.keys().next().value);
+    }
+
+    state.hasRendered = true;
+    state.nextAfter = page.nextAfter;
+    state.hasMore = page.hasMore;
+    document.getElementById(kind + '-library-count').textContent = page.count + ' saved';
+    document.getElementById(kind + '-page').textContent = state.history.length;
+    if (kind === 'photo') {
+        document.getElementById('slideshow-enabled').checked = page.slideshow;
+        document.getElementById('slideshow-minutes').value = page.intervalSeconds / 60;
+    }
+    RestoreLibraryViewport(viewport);
+} // CommitLibraryPage
+
+/**
+    Refreshes a library page without clearing retained cards or successful previews.
+
+    Page cursors are bounded media IDs. A refresh during an active request invalidates
+    that page and queues one replacement load. The current request finishes before the
+    replacement starts, so thumbnail traffic cannot discard a refresh after deletion.
+    Stale responses are ignored. On repeat visits, new or changed previews are loaded
+    outside the visible grid before publishing the replacement page. Unchanged items
+    with a known payload revision need no thumbnail request. Older firmware without
+    revisions is revalidated while retaining its existing canvas during the request.
 
     @param kind Photo or video collection identifier.
 
-    @return Promise<void> - Completes after the current page and its previews are processed.
+    @return Promise<void> - Processes the page and queued refreshes, or queues a refresh when already loading.
 */
 async function loadLibraryPage(kind) {
-    if (libraryPages[kind].busy || uploading || videoBusy) {
+    if (uploading || videoBusy) {
         return;
     }
     const state = libraryPages[kind];
     const ticket = ++state.ticket;
+
+    // Invalidate pending responses and coalesce overlapping refresh requests.
+    if (state.busy) {
+        state.refreshRequested = true;
+        return;
+    }
     const message = document.getElementById(kind + '-library-status');
     state.busy = true;
-    message.textContent = 'Loading…';
+    const generation = libraryStorageGeneration;
+    if (state.hasRendered) {
+        message.textContent = 'Refreshing…';
+    } else {
+        message.textContent = 'Loading…';
+    }
     try {
         let operation = 10;
         let previewOperation = 14;
@@ -2115,38 +2368,68 @@ async function loadLibraryPage(kind) {
         }
         const cursor = state.history[state.history.length - 1];
         const page = await libraryRequest(operation, 0, cursor);
+        if (ticket !== state.ticket) {
+            return;
+        }
         if (!Array.isArray(page[listField]) || page[listField].length > 10 || !Number.isInteger(page.count)) {
             throw new Error('Incomplete library response.');
         }
-        state.nextAfter = page.nextAfter;
-        state.hasMore = page.hasMore;
-        const cards = page[listField].map(item => createLibraryCard(kind, item, page.displayed));
-        document.getElementById(kind + '-library').replaceChildren(...cards.map(item => item.card));
-        document.getElementById(kind + '-library-count').textContent = page.count + ' saved';
-        document.getElementById(kind + '-page').textContent = state.history.length;
-        if (kind === 'photo') {
-            document.getElementById('slideshow-enabled').checked = page.slideshow;
-            document.getElementById('slideshow-minutes').value = page.intervalSeconds / 60;
+        // Deleting the last item on a later page steps back without briefly emptying the grid.
+        if (page[listField].length === 0 && state.history.length > 1) {
+            state.history.pop();
+            state.refreshRequested = true;
+            return;
+        }
+        const cards = page[listField].map(item => GetLibraryCard(kind, item));
+        if (!state.hasRendered) {
+            CommitLibraryPage(kind, page, cards);
         }
         for (let index = 0; index < cards.length; index++) {
             if (ticket !== state.ticket || uploading || videoBusy) {
                 return;
             }
+            if (cards[index].previewReady && cards[index].generation === generation &&
+                Number.isInteger(page[listField][index].revision)) {
+                continue;
+            }
             try {
-                renderLibraryPreview(cards[index].canvas, await libraryRequest(previewOperation, page[listField][index].id));
+                const preview = await libraryRequest(previewOperation, page[listField][index].id);
+                if (ticket !== state.ticket) {
+                    return;
+                }
+                renderLibraryPreview(cards[index].canvas, preview);
+                cards[index].canvas.setAttribute('aria-label', page[listField][index].name + ' preview');
+                cards[index].previewReady = true;
+                cards[index].generation = generation;
             } catch (error) {
+                if (ticket !== state.ticket) {
+                    return;
+                }
                 cards[index].canvas.setAttribute('aria-label', 'Preview unavailable: ' + error.message);
             }
         }
+        if (ticket !== state.ticket) {
+            return;
+        }
+        CommitLibraryPage(kind, page, cards);
         message.textContent = '';
     } catch (error) {
-        message.textContent = 'Could not load library: ' + error.message;
+        if (ticket === state.ticket) {
+            message.textContent = 'Could not load library: ' + error.message;
+        }
     } finally {
         state.busy = false;
-        document.getElementById(kind + '-previous').disabled = state.history.length <= 1;
-        document.getElementById(kind + '-next').disabled = !state.hasMore;
+
+        // A completed action must obtain a fresh list after the old request releases ownership.
+        if (state.refreshRequested) {
+            state.refreshRequested = false;
+            await loadLibraryPage(kind);
+        } else {
+            document.getElementById(kind + '-previous').disabled = state.history.length <= 1;
+            document.getElementById(kind + '-next').disabled = !state.hasMore;
+        }
     }
-}
+} // loadLibraryPage
 
 /**
     Requests the preceding or next bounded saved-media page.
@@ -2170,19 +2453,22 @@ function changeLibraryPage(kind, forward) {
 }
 
 /**
-    Selects or deletes one saved item, then reloads its current collection page.
+    Selects or deletes one saved item, then refreshes the current collection page.
 
     @param kind Photo or video collection identifier.
     @param action Show or delete operation chosen by the user.
     @param id Saved item identifier.
 
-    @return Promise<void> - Completes after the action and refreshed page, or displays an error.
+    @return Promise<void> - Completes the action and requests a fresh list, or displays an error.
 */
 async function libraryAction(kind, action, id) {
     if (galleryBusy || uploading || videoBusy) {
         return;
     }
     galleryBusy = true;
+
+    // Stop older page work from publishing data or messages after this action.
+    ++libraryPages[kind].ticket;
     let succeeded = false;
     try {
         let operation = 11;
@@ -2196,7 +2482,9 @@ async function libraryAction(kind, action, id) {
             }
         }
         await libraryRequest(operation, id);
-        libraryPages[kind].history = [0];
+        if (action === 'delete') {
+            libraryPages[kind].cards.delete(id);
+        }
         succeeded = true;
     } catch (error) {
         document.getElementById(kind + '-library-status').textContent = error.message;
@@ -2590,6 +2878,7 @@ async function cancelOwnedUpload(job) {
     @return Promise<void> - Completes after saving, retaining a resumable pause or reporting failure.
 */
 async function runPreparedVideo(job, controller, resume) {
+    let saved = false;
     videoAbort = controller;
     videoBusy = true;
     updateVideoControls();
@@ -2597,6 +2886,7 @@ async function runPreparedVideo(job, controller, resume) {
         const acknowledgement = await transferPreparedUpload(job, controller.signal, resume);
         videoStatus.textContent = `Saved and verified: ${job.prepared.frames} frames. ` + acknowledgement.warning;
         videoJob = null;
+        saved = true;
     } catch (error) {
         if (!controller.signal.aborted && error.retryable) {
             videoStatus.textContent = 'Connection unavailable. Prepared video retained. Tap Resume upload/check or Cancel.';
@@ -2615,7 +2905,12 @@ async function runPreparedVideo(job, controller, resume) {
         videoBusy = !!videoJob;
         updateVideoControls();
     }
-}
+
+    // Initial and resumed uploads share this refresh after verification releases the guard.
+    if (saved) {
+        await loadLibraryPage('video');
+    }
+} // runPreparedVideo
 
 /**
     Continues a retained prepared video after a network pause without converting it again.
@@ -2640,6 +2935,16 @@ async function resumeVideoUpload() {
     @param status Latest status or managed-storage response.
 */
 function renderMemoryStatus(status) {
+    // Revalidate retained previews after an observed SD remount without clearing their pixels.
+    if (Number.isInteger(status.storageGeneration) && status.storageGeneration !== libraryStorageGeneration) {
+        libraryStorageGeneration = status.storageGeneration;
+        for (const state of Object.values(libraryPages)) {
+            if (state.busy) {
+                ++state.ticket;
+                state.refreshRequested = true;
+            }
+        }
+    }
     const ram = status.ram;
     if (ram?.available && Number.isSafeInteger(ram.totalBytes) && ram.totalBytes > 0 &&
         Number.isSafeInteger(ram.usedBytes) && ram.usedBytes >= 0 && ram.usedBytes <= ram.totalBytes &&
